@@ -1,0 +1,6 @@
+[submodule "pixijs"]
+	path = pixijs
+	url = git@github.com:23TNC/resonantdust_pixijs.git
+[submodule "spacetime"]
+	path = spacetime
+	url = git@github.com:23TNC/resonantdust_spacetime.git
