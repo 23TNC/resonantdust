@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:spacetimedb.com)",
+      "WebSearch",
+      "WebFetch(domain:crates.io)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:docs.rs)",
+      "PowerShell(Copy-Item -Recurse \"d:\\\\projects\\\\resonantdust\\\\simulation\" \"d:\\\\projects\\\\resonantdust\\\\actionmanager\")",
+      "PowerShell(Copy-Item -Recurse \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\data\\\\definitions\" \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\definitions\")"
+    ]
+  }
+}
