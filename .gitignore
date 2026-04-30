@@ -63,3 +63,7 @@ Thumbs.db
 
 # npm
 pixijs/node_modules/*
+
+# data
+data/*
+data
