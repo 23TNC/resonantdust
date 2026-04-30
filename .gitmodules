@@ -7,3 +7,6 @@
 [submodule "actionmanager"]
 	path = actionmanager
 	url = git@github.com:23TNC/resonantdust_actionmanager.git
+[submodule "data"]
+	path = data
+	url = git@github.com:23TNC/resonantdust_data
