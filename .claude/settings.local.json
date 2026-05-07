@@ -7,7 +7,15 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "WebFetch(domain:docs.rs)",
       "PowerShell(Copy-Item -Recurse \"d:\\\\projects\\\\resonantdust\\\\simulation\" \"d:\\\\projects\\\\resonantdust\\\\actionmanager\")",
-      "PowerShell(Copy-Item -Recurse \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\data\\\\definitions\" \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\definitions\")"
+      "PowerShell(Copy-Item -Recurse \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\data\\\\definitions\" \"d:\\\\projects\\\\resonantdust\\\\pixijs\\\\src\\\\definitions\")",
+      "Bash(cargo build *)",
+      "PowerShell(cmd /c dir spacetime\\\\server\\\\spacetimedb\\\\data)",
+      "PowerShell(cmd /c dir spacetime\\\\server\\\\spacetimedb 2>&1)",
+      "Bash(xargs wc *)",
+      "PowerShell(cmd /c dir pixijs_old\\\\src\\\\data 2>&1)",
+      "Bash(git submodule *)",
+      "Bash(git mv *)",
+      "Bash(git rm *)"
     ]
   }
 }

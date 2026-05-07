@@ -21,6 +21,7 @@ dist/
 /spacetime-data/*
 /spacetime-keys/*
 
+/pixijs/src/data
 # Exported games
 *.pck
 *.apk
@@ -63,7 +64,3 @@ Thumbs.db
 
 # npm
 pixijs/node_modules/*
-
-# data
-data/*
-data
