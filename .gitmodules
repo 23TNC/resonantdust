@@ -4,6 +4,3 @@
 [submodule "spacetime"]
 	path = spacetime
 	url = git@github.com:23TNC/resonantdust_spacetime.git
-[submodule "data"]
-	path = data
-	url = git@github.com:23TNC/resonantdust_data
