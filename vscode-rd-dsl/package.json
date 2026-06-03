@@ -1,0 +1,35 @@
+{
+  "name": "rd-dsl",
+  "displayName": "Resonant Dust DSL",
+  "description": "Syntax highlighting for Resonant Dust .rd files.",
+  "version": "0.1.0",
+  "publisher": "resonantdust",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "rd-dsl",
+        "aliases": [
+          "Resonant Dust DSL",
+          "rd-dsl"
+        ],
+        "extensions": [
+          ".rd"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "rd-dsl",
+        "scopeName": "source.rd-dsl",
+        "path": "./syntaxes/rd-dsl.tmLanguage.json"
+      }
+    ]
+  }
+}

@@ -1,51 +1,60 @@
 # Resonant Dust
 
-Multiplayer card / hex-tile game. The repo is a thin shell over three
-directories that each have their own `AGENT.md` (or `AGENTS.md`) — start
-there for the actual contracts.
+Multiplayer card / hex-tile game. The repo is a shell over a few submodules plus
+the shared Rust that ties them together. Each directory has its own `AGENTS.md`
+— start there for the contracts.
 
 ## Layout
 
-| Path | Purpose |
-| --- | --- |
-| [pixijs/](pixijs/AGENT.md) | PixiJS v8 + TypeScript client. Renders the world / inventory, drives the game tick, talks to SpacetimeDB. |
-| [spacetime/](spacetime/server/AGENTS.md) | SpacetimeDB module (Rust). Authoritative game state — cards, players, actions, zones, recipes. |
-| [data/](data/AGENT.md) | Shared JSON game data — card definitions, aspects, recipes, biomes. **Read by both client and server**; symlinked into the pixijs project, embedded into the Rust module via `include_str!`. |
+| Path | Repo | Purpose |
+| --- | --- | --- |
+| [pixijs/](pixijs/AGENTS.md) | submodule | PixiJS v8 + TypeScript client. Renders world / inventory, drives the game tick. Talks to the **gateway**, not SpacetimeDB directly. |
+| gateway/ | submodule | The **gate** (Rust). The client's transport endpoint; validates + plans recipes, generates terrain, applies effects to SpacetimeDB. Links the shared VM as an rlib. |
+| spacetime/ | submodule | SpacetimeDB modules (Rust) — authoritative *packed* card / zone / player state + hold arbitration. Being reshaped into dumb packed-state stores. (Per-module docs under `spacetime/server/modules/*/AGENTS.md`.) |
+| [content/](content/AGENTS.md) | submodule | Game content. The **current** form is a stack-VM **DSL** under [`content/data/`](content/data/) (`*.rd`), spec in [`SYNTAX.txt`](content/data/SYNTAX.txt) / [`CONVENTIONS.txt`](content/data/CONVENTIONS.txt). The old JSON catalogs + `resonantdust-content` crate are legacy, being retired. |
+| [wasm/](wasm/AGENTS.md) | **main repo** | The shared Rust: `resonantdust-data` (DSL parser / validator / resolver + VM + content loader + storage bridge) and `resonantdust-wasm` (client bindings). The gate links the rlib; the client gets it built to wasm. |
+| bin/ | main repo | Dockerized build/run wrappers — `bin/wasm` (the VM crate), `bin/content` (legacy crate), `bin/st` / `bin/gate` / `bin/regions` / `bin/zones`, `bin/art` / `bin/cards`. |
+
+`wasm/` is the one piece of Rust that is **not** a submodule — it's the shared
+logic, kept in the main repo so it can't drift out of reach (a nested content
+submodule once swallowed weeks of work).
+
+## The shift: a DSL + one shared VM
+
+The project is mid-migration, from "JSON schema with logic mirrored in Rust
+**and** TypeScript" to a **stack-VM definition language** interpreted by **one
+shared Rust VM**:
+
+- Content is `*.rd` programs (cards / recipes / aspects / functions / assets),
+  **loaded at runtime** — editing content needs no recompile.
+- The VM (`wasm/data/src/vm.rs`) evaluates them. The gate links it as an rlib;
+  the client runs the *same code* compiled to wasm. **Evaluation is no longer
+  mirrored** — server and client run identical logic, so there's no manual
+  TS/Rust lockstep to keep.
+- **Recompile boundary:** content change → none (reload the `.rd`); language
+  change (new op / sigil) → rebuild `resonantdust-data`; storage-schema change →
+  rebuild the modules.
+
+Status: the shared **data + wasm layer is built and tested** (parser → VM →
+loader → bridge → bindings). Gate / client / module integration is in progress —
+see [wasm/AGENTS.md](wasm/AGENTS.md).
 
 ## Submodules
 
-`pixijs/`, `spacetime/`, and `data/` are each tracked as a git submodule
-(see `.gitmodules`). Editing files inside one of those directories from
-this repo lands the change in the *submodule's* repo, not this one.
-Cloning fresh? `git submodule update --init --recursive`.
-
-## Where to start
-
-- New to the project: read [pixijs/AGENT.md](pixijs/AGENT.md) and
-  [spacetime/server/spacetimedb/AGENTS.md](spacetime/server/spacetimedb/AGENTS.md).
-  They explain the client/server split.
-- Adding a card or recipe: [data/AGENT.md](data/AGENT.md) plus
-  [data/cards/AGENT.md](data/cards/AGENT.md) /
-  [data/recipes/AGENT.md](data/recipes/AGENT.md).
-- Working on the world board / hex grid: [pixijs/src/world/AGENT.md](pixijs/src/world/AGENT.md).
-- Working on the action / recipe system: client side is
-  [pixijs/src/actions/AGENT.md](pixijs/src/actions/AGENT.md), server side
-  is `actions.rs` / `magnetic.rs` documented under the spacetime module.
+`pixijs`, `spacetime`, `content`, `gateway` are git submodules (`.gitmodules`).
+Editing files inside one lands the change in *that submodule's* repo, not this
+one. Fresh clone: `git submodule update --init --recursive`.
 
 ## Cross-cutting conventions
 
-- **Schema is shared, evaluation is mirrored.** The same `data/*.json`
-  feeds both server (Rust, embedded at compile time) and client
-  (TypeScript, bundled by Vite). Recipe priority evaluation runs on
-  both sides — client as a pre-filter, server as the authoritative
-  evaluator. Logic must be kept in lockstep manually; see
-  [data/recipes/AGENT.md](data/recipes/AGENT.md) ("Where this is implemented").
-- **Bindings are generated.** The client's `pixijs/src/server/bindings/`
-  is regenerated from the server schema by
-  `spacetime/server/generate-bindings.sh`. Never edit by hand.
-- **Authority model.** The server is authoritative for card identity,
-  inventory membership, world-tile state, and action lifecycle. The
-  client is authoritative for inventory layout (stacking, ordering,
-  pixel positions); inventory fiddling never reaches the wire until a
-  state-changing event (recipe commit, world drop, etc.) triggers a
-  reducer call.
+- **Authority model.** The gate (+ SpacetimeDB) is authoritative for card
+  identity, inventory membership, world-tile state, holds, and action lifecycle.
+  The client owns inventory layout (stacking, ordering, pixel positions) and
+  never reaches the wire until a state-changing event (recipe commit, world
+  drop) triggers a reducer.
+- **Shared code, not mirrored logic.** The recipe matcher and data hooks run
+  from the one VM. Do **not** reintroduce a parallel TypeScript implementation —
+  that drift is exactly what the rewrite removes.
+- **Content is data, not code.** New cards/recipes/aspects are authored in
+  `content/data/*.rd` against the DSL and loaded at runtime — they don't touch
+  Rust. Extending the *language* (a new op) does.

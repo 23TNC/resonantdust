@@ -1,0 +1,113 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Resonant Dust DSL",
+  "scopeName": "source.rd-dsl",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#compile-symbols" },
+    { "include": "#lifecycle-hooks" },
+    { "include": "#engine-symbols" },
+    { "include": "#label-definitions" },
+    { "include": "#block-headers" },
+    { "include": "#colors" },
+    { "include": "#references" },
+    { "include": "#keywords" },
+    { "include": "#constants" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "comments": {
+      "match": ";.*$",
+      "name": "comment.line.semicolon.rd-dsl"
+    },
+    "compile-symbols": {
+      "comment": "< … > is the compile-time symbol sigil (e.g. <card>). Colored wherever a <…> ends the line.",
+      "match": "(<)([^>]*)(>)(?=\\s*$)",
+      "captures": {
+        "1": { "name": "punctuation.definition.block.rd-dsl" },
+        "2": { "name": "keyword.control.directive.rd-dsl" },
+        "3": { "name": "punctuation.definition.block.rd-dsl" }
+      }
+    },
+    "lifecycle-hooks": {
+      "comment": "@ is the lifecycle-hook sigil (@define, @data:define, @visuals:define, @card.tile). The engine enters here.",
+      "match": "^\\s*(@[A-Za-z][A-Za-z0-9_.:]*)(>)\\s*$",
+      "captures": {
+        "1": { "name": "keyword.control.lifecycle.rd-dsl" },
+        "2": { "name": "punctuation.definition.block.rd-dsl" }
+      }
+    },
+    "engine-symbols": {
+      "comment": ":: is the engine-symbol sigil (e.g. ::corpus>) — what the engine stores and sorts. (Single : is a label; double :: is an engine symbol.)",
+      "match": "^\\s*(::[A-Za-z][A-Za-z0-9_.:]*)(>?)\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.section.engine.rd-dsl" },
+        "2": { "name": "punctuation.definition.block.rd-dsl" }
+      }
+    },
+    "label-definitions": {
+      "match": "^\\s*(:[A-Za-z_][\\w.]*)(>)\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.function.label.rd-dsl" },
+        "2": { "name": "punctuation.definition.block.rd-dsl" }
+      }
+    },
+    "block-headers": {
+      "match": "^\\s*([A-Za-z_][\\w.]*)(>)\\s*$",
+      "captures": {
+        "1": { "name": "entity.name.section.rd-dsl" },
+        "2": { "name": "punctuation.definition.block.rd-dsl" }
+      }
+    },
+    "colors": {
+      "match": "#[0-9a-fA-F]{3,8}\\b",
+      "name": "constant.other.color.rd-dsl"
+    },
+    "references": {
+      "comment": "Each maximal run is colored by its leading delimiter: $ (dereferences a <…> compile symbol — same color as <card>), :: (engine symbol), : (label), & (slot address), * (slot value), . (field/aspect). The delimiter and the name after it share one color; a run ends at the next delimiter or whitespace. :: is matched before : so the double colon wins. Exception: the .<stack>.<offset> coordinate right after `slot` is colored by stack id (hex/top/bottom).",
+      "patterns": [
+        { "comment": "slot coordinate — hex stack: .0.<offset> (offset = any digits). Colored by stack id.", "match": "(?<=slot)\\.0(?![0-9])(?:\\.[0-9]+)?", "name": "constant.numeric.stack.hex.rd-dsl" },
+        { "comment": "slot coordinate — top stack: .1.<offset>", "match": "(?<=slot)\\.1(?![0-9])(?:\\.[0-9]+)?", "name": "constant.numeric.stack.top.rd-dsl" },
+        { "comment": "slot coordinate — bottom stack: .2.<offset>", "match": "(?<=slot)\\.2(?![0-9])(?:\\.[0-9]+)?", "name": "constant.numeric.stack.bottom.rd-dsl" },
+        { "comment": ":: engine-symbol segment ($card::corpus, ::corpus inline)", "match": "::[A-Za-z0-9_+\\-]*", "name": "entity.name.section.engine.rd-dsl" },
+        { "comment": ": label segment (:loop, :corpus)", "match": ":[A-Za-z0-9_+\\-]*", "name": "entity.name.function.label.rd-dsl" },
+        { "comment": "$ compile-symbol dereference — same color as <…>", "match": "\\$[A-Za-z0-9_+\\-]*", "name": "keyword.control.directive.rd-dsl" },
+        { "comment": "& slot-address segment", "match": "&[A-Za-z0-9_+\\-]*", "name": "entity.name.tag.slot.rd-dsl" },
+        { "comment": "* slot-value segment", "match": "\\*[A-Za-z0-9_+\\-]*", "name": "support.type.value.rd-dsl" },
+        { "comment": "% sigil segment", "match": "%[A-Za-z0-9_+\\-]*", "name": "variable.other.percent.rd-dsl" },
+        { "comment": "^ engine call — breaks out of the DSL into engine code", "match": "\\^[A-Za-z0-9_+\\-]*", "name": "support.function.engine-call.rd-dsl" },
+        { "comment": ". field / aspect segment", "match": "\\.[A-Za-z0-9_+\\-]*", "name": "entity.other.attribute-name.aspect.rd-dsl" }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "(?:!if)|\\b(?:if|goto|call|ret)\\b",
+          "name": "keyword.control.flow.rd-dsl"
+        },
+        {
+          "comment": "conditions — operators that produce a boolean",
+          "match": "\\b(?:eq|ne|gt|ge|lt|le|and|or|not|within)\\b",
+          "name": "keyword.operator.comparison.rd-dsl"
+        },
+        {
+          "match": "\\b(?:add|sub|mul|div|mod|inc|dec)\\b",
+          "name": "keyword.operator.arithmetic.rd-dsl"
+        },
+        {
+          "comment": "actions — verbs that mutate state (normalize writes a slot, so it lives here)",
+          "match": "\\b(?:set|array|stock|range|count|key|destroy|create|borrow|use|claim|share|normalize|random|vec[0-9]+)\\b",
+          "name": "keyword.other.action.rd-dsl"
+        }
+      ]
+    },
+    "constants": {
+      "match": "\\b(?:rtl|ltr)\\b",
+      "name": "constant.language.rd-dsl"
+    },
+    "numbers": {
+      "match": "(?<![\\w.$&*:#-])-?\\d+\\b",
+      "name": "constant.numeric.rd-dsl"
+    }
+  }
+}
