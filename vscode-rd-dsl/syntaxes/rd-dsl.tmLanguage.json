@@ -74,15 +74,15 @@
         { "comment": "$ compile-symbol dereference — same color as <…>", "match": "\\$[A-Za-z0-9_+\\-]*", "name": "keyword.control.directive.rd-dsl" },
         { "comment": "& slot-address segment", "match": "&[A-Za-z0-9_+\\-]*", "name": "entity.name.tag.slot.rd-dsl" },
         { "comment": "* slot-value segment", "match": "\\*[A-Za-z0-9_+\\-]*", "name": "support.type.value.rd-dsl" },
-        { "comment": "% sigil segment", "match": "%[A-Za-z0-9_+\\-]*", "name": "variable.other.percent.rd-dsl" },
-        { "comment": "^ engine call — breaks out of the DSL into engine code", "match": "\\^[A-Za-z0-9_+\\-]*", "name": "support.function.engine-call.rd-dsl" },
+        { "comment": "^ system call — engine-native function (^biome, ^seed), invoked with `call`", "match": "\\^[A-Za-z0-9_+\\-]*", "name": "support.function.engine-call.rd-dsl" },
         { "comment": ". field / aspect segment", "match": "\\.[A-Za-z0-9_+\\-]*", "name": "entity.other.attribute-name.aspect.rd-dsl" }
       ]
     },
     "keywords": {
       "patterns": [
         {
-          "match": "(?:!if)|\\b(?:if|goto|call|ret)\\b",
+          "comment": "control flow — branch, jump, call, return, stack drop",
+          "match": "(?:!if)|\\b(?:if|goto|call|ret|drop)\\b",
           "name": "keyword.control.flow.rd-dsl"
         },
         {
@@ -91,22 +91,25 @@
           "name": "keyword.operator.comparison.rd-dsl"
         },
         {
-          "match": "\\b(?:add|sub|mul|div|mod|inc|dec)\\b",
+          "comment": "arithmetic & math functions",
+          "match": "\\b(?:add|sub|mul|div|mod|inc|dec|sin|cos)\\b",
           "name": "keyword.operator.arithmetic.rd-dsl"
         },
         {
-          "comment": "actions — verbs that mutate state (normalize writes a slot, so it lives here)",
-          "match": "\\b(?:set|array|stock|range|count|key|destroy|create|borrow|use|claim|share|normalize|random|vec[0-9]+)\\b",
+          "comment": "actions — verbs that read/mutate state or generate values (normalize/scatter/random write a slot; count/key/recall push lookups)",
+          "match": "\\b(?:set|array|stock|range|count|key|recall|destroy|create|borrow|use|claim|share|normalize|scatter|random|vec[0-9]+)\\b",
           "name": "keyword.other.action.rd-dsl"
         }
       ]
     },
     "constants": {
-      "match": "\\b(?:rtl|ltr)\\b",
+      "comment": "language constants — direction tokens and the math constant pi",
+      "match": "\\b(?:rtl|ltr|pi)\\b",
       "name": "constant.language.rd-dsl"
     },
     "numbers": {
-      "match": "(?<![\\w.$&*:#-])-?\\d+\\b",
+      "comment": "integer or float literal (floats: any number with a decimal part)",
+      "match": "(?<![\\w.$&*:#^%-])-?\\d+(?:\\.\\d+)?\\b",
       "name": "constant.numeric.rd-dsl"
     }
   }

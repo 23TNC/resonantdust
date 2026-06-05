@@ -24,8 +24,7 @@ So `$object::symbols:corpus` colors as `$object` + `::symbols` + `:corpus`, and
 | `:` | label | `:corpus`, `:loop` | `entity.name.function.label` |
 | `&` | slot address | `&card`, `&slot` | `entity.name.tag.slot` |
 | `*` | slot value | `*var`, `*slot` | `support.type.value` |
-| `%` | percent sigil | `%foo` | `variable.other.percent` |
-| `^` | engine call (breaks out of the DSL) | `^spawn` | `support.function.engine-call` |
+| `^` | system call — engine-native function (`^biome`, `^seed`) | `^biome` | `support.function.engine-call` |
 | `.` | field / aspect | `.height`, `.wood`, `.0` | `entity.other.attribute-name.aspect` |
 
 **Slot coordinates.** The `.<stack>.<offset>` right after `slot` is an exception:
@@ -48,12 +47,12 @@ it's colored by **stack id** (the offset shares the stack's color). `slot.1.0` �
 | Block headers | `recipe>`, `card.soul>`, `human>` | `entity.name.section` |
 | Label definitions & references | `:loop>`, `:loop goto` | `entity.name.function.label` |
 | Hex colors | `#a8e0e6` | `constant.other.color` |
-| Control flow | `if`, `!if`, `goto`, `call`, `ret` | `keyword.control.flow` |
+| Control flow | `if`, `!if`, `goto`, `call`, `ret`, `drop` | `keyword.control.flow` |
 | Conditions | `eq ne gt ge lt le and or not within` | `keyword.operator.comparison` |
-| Arithmetic | `add sub mul div mod inc dec` | `keyword.operator.arithmetic` |
-| Actions | `set array stock range count key destroy create borrow use claim share normalize random vec2 vec3 …` (`vec`+digits) | `keyword.other.action` |
-| Language constants | `rtl`, `ltr` | `constant.language` |
-| Numbers (operands) | `10`, `-1` | `constant.numeric` |
+| Arithmetic & math | `add sub mul div mod inc dec sin cos` | `keyword.operator.arithmetic` |
+| Actions | `set array stock range count key recall destroy create borrow use claim share normalize scatter random vec2 vec3 …` (`vec`+digits) | `keyword.other.action` |
+| Language constants | `rtl`, `ltr`, `pi` | `constant.language` |
+| Numbers (operands) | `10`, `-1`, `1.5`, `-0.25` (ints & floats) | `constant.numeric` |
 | Comments | `; ...` | `comment.line.semicolon` |
 
 Sigil meanings: `<…>` are **compile-time symbols**; `@` is the **lifecycle-hook**
@@ -78,14 +77,17 @@ literals stand out from keywords — drop this into your `settings.json` under
 { "scope": "entity.name.tag.slot.rd-dsl",               "settings": { "foreground": "#569CD6" } }, // & slot address
 { "scope": "support.type.value.rd-dsl",                 "settings": { "foreground": "#4EC9B0" } }, // * slot value
 { "scope": "entity.other.attribute-name.aspect.rd-dsl", "settings": { "foreground": "#9CDCFE" } }, // . field / aspect
-{ "scope": "variable.other.percent.rd-dsl",             "settings": { "foreground": "#B5CEA8" } }, // % sigil
-{ "scope": "support.function.engine-call.rd-dsl",       "settings": { "foreground": "#DCDCAA", "fontStyle": "bold" } }, // ^ engine call
+{ "scope": "support.function.engine-call.rd-dsl",       "settings": { "foreground": "#DCDCAA", "fontStyle": "bold" } }, // ^ system call
 { "scope": "constant.numeric.stack.hex.rd-dsl",         "settings": { "foreground": "#4EC9B0" } }, // slot .0.# (hex)
 { "scope": "constant.numeric.stack.top.rd-dsl",         "settings": { "foreground": "#CE9178" } }, // slot .1.# (top)
 { "scope": "constant.numeric.stack.bottom.rd-dsl",      "settings": { "foreground": "#C586C0" } }, // slot .2.# (bottom)
 { "scope": "constant.other.color.rd-dsl",               "settings": { "foreground": "#CE9178" } }, // #hex colors
+{ "scope": "keyword.control.flow.rd-dsl",               "settings": { "foreground": "#4FC1FF" } }, // if/goto/call/ret/drop
 { "scope": "keyword.operator.comparison.rd-dsl",        "settings": { "foreground": "#C586C0" } }, // conditions
-{ "scope": "keyword.other.action.rd-dsl",               "settings": { "foreground": "#F44747" } }  // actions (red)
+{ "scope": "keyword.operator.arithmetic.rd-dsl",        "settings": { "foreground": "#9CDCFE" } }, // arithmetic & math
+{ "scope": "keyword.other.action.rd-dsl",               "settings": { "foreground": "#F44747" } }, // actions (red)
+{ "scope": "constant.language.rd-dsl",                  "settings": { "foreground": "#569CD6" } }, // rtl/ltr/pi
+{ "scope": "constant.numeric.rd-dsl",                   "settings": { "foreground": "#B5CEA8" } }  // numbers
 ```
 
 ## Install (local development)
