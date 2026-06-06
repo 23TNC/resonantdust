@@ -10,3 +10,12 @@
 [submodule "gateway"]
 	path = gateway
 	url = git@github.com:23TNC/resonantdust_gateway.git
+[submodule "npc"]
+	path = npc
+	url = git@github.com:23TNC/resonantdust_client.git
+[submodule "client"]
+	path = client
+	url = git@github.com:23TNC/resonantdust_client.git
+[submodule "shared"]
+	path = shared
+	url = git@github.com:23TNC/resonantdust_shared.git
