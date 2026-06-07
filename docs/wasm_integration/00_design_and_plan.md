@@ -16,8 +16,8 @@ optimizations and must be *ported*, not stripped.
 
 ## 0. Current state (verified 2026-06-03)
 
-- **Runtime** (`wasm/data` = `resonantdust-data`, rlib; wrapped by `wasm/` =
-  `resonantdust-wasm`, cdylib for the browser):
+- **Runtime** (`shared/data` = `resonantdust-data`, rlib; wrapped by `shared/` =
+  `resonantdust-shared`, cdylib for the browser):
   - `Content` exposes `card_def_id` / `card_view` / `match_recipe` / `plan_recipe`.
   - `match_recipe`/`plan_recipe` take **no host table** — only the lower-level
     `vm::run` does. So `@init`/`@update` (which consume `^biome`/`^seed`) have
@@ -32,7 +32,7 @@ optimizations and must be *ported*, not stripped.
   (`world_gen.rs`), server-authoritative, on legacy `biome_core` /
   `cards_of_type` / `decode_definition`. Embeds JSON via its content dep's
   `build.rs`.
-- **Client** (`pixijs`): new wasm bundle (`wasm/pkg`) built but imported nowhere.
+- **Client** (`pixijs`): new wasm bundle (`shared/pkg`) built but imported nowhere.
   Bootstrap, `recipeMatcher.ts`, `LayoutWorld.buildTile` all on the legacy
   `resonantdust_content` wasm. No `.rd` loader for the browser.
 - **Climate noise**: FBM samplers live only in `regions/world_gen.rs` — native,
@@ -62,7 +62,7 @@ tile def for the ≤2 rule when porting.
 
 ## 2. Phases
 
-### Phase 1 — Shared runtime surface in `wasm/data` (serial unblocker) — **DONE 2026-06-03**
+### Phase 1 — Shared runtime surface in `shared/data` (serial unblocker) — **DONE 2026-06-03**
 
 Landed: `noise.rs` (ported FBM + rarity channel, bit-for-bit parity lock vs
 legacy), `worldgen.rs` (`biome_host` / `select_biome` / `generate_tile`),
@@ -163,7 +163,7 @@ prerequisite for verifying the gate, not independent. After it, the gate decodes
 via the Bundle and the legacy-decode bridge in `dsl_recipe.rs` is deleted.
 
 - **3a DONE** — regions module links `resonantdust-data` (path
-  `../../../pixijs/src/wasm/data`, reachable via the `pixijs` build mount);
+  `../../../pixijs/src/shared/data`, reachable via the `pixijs` build mount);
   `build.rs` embeds `content/data/**.rd` → `RD_FILES`; `content::bundle()` loads
   the `Bundle` once. Compiles to the SpacetimeDB wasm target.
 - **3b DONE** — `world_gen.rs` rewritten: all legacy noise / biome / pick /

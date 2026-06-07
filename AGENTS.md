@@ -12,10 +12,10 @@ the shared Rust that ties them together. Each directory has its own `AGENTS.md`
 | gateway/ | submodule | The **gate** (Rust). The client's transport endpoint; validates + plans recipes, generates terrain, applies effects to SpacetimeDB. Links the shared VM as an rlib. |
 | spacetime/ | submodule | SpacetimeDB modules (Rust) — authoritative *packed* card / zone / player state + hold arbitration. Being reshaped into dumb packed-state stores. (Per-module docs under `spacetime/server/modules/*/AGENTS.md`.) |
 | [content/](content/AGENTS.md) | submodule | Game content. The **current** form is a stack-VM **DSL** under [`content/data/`](content/data/) (`*.rd`), spec in [`SYNTAX.txt`](content/data/SYNTAX.txt) / [`CONVENTIONS.txt`](content/data/CONVENTIONS.txt). The old JSON catalogs + `resonantdust-content` crate are legacy, being retired. |
-| [wasm/](wasm/AGENTS.md) | **main repo** | The shared Rust: `resonantdust-data` (DSL parser / validator / resolver + VM + content loader + storage bridge) and `resonantdust-wasm` (client bindings). The gate links the rlib; the client gets it built to wasm. |
-| bin/ | main repo | Dockerized build/run wrappers — `bin/wasm` (the VM crate), `bin/content` (legacy crate), `bin/st` / `bin/gate` / `bin/regions` / `bin/zones`, `bin/art` / `bin/cards`, and `bin/redeploy` (change-detecting rebuild+redeploy, see below). |
+| [shared/](shared/AGENTS.md) | **main repo** | The shared Rust: `resonantdust-data` (DSL parser / validator / resolver + VM + content loader + storage bridge) and `resonantdust-shared` (client bindings). The gate links the rlib; the client gets it built to wasm. |
+| bin/ | main repo | Dockerized build/run wrappers — `bin/shared` (the VM crate), `bin/content` (legacy crate), `bin/st` / `bin/gate` / `bin/regions` / `bin/zones`, `bin/art` / `bin/cards`, and `bin/redeploy` (change-detecting rebuild+redeploy, see below). |
 
-`wasm/` is the one piece of Rust that is **not** a submodule — it's the shared
+`shared/` is the one piece of Rust that is **not** a submodule — it's the shared
 logic, kept in the main repo so it can't drift out of reach (a nested content
 submodule once swallowed weeks of work).
 
@@ -27,7 +27,7 @@ shared Rust VM**:
 
 - Content is `*.rd` programs (cards / recipes / aspects / functions / assets),
   **loaded at runtime** — editing content needs no recompile.
-- The VM (`wasm/data/src/vm.rs`) evaluates them. The gate links it as an rlib;
+- The VM (`shared/data/src/vm.rs`) evaluates them. The gate links it as an rlib;
   the client runs the *same code* compiled to wasm. **Evaluation is no longer
   mirrored** — server and client run identical logic, so there's no manual
   TS/Rust lockstep to keep.
@@ -37,7 +37,7 @@ shared Rust VM**:
 
 Status: the shared **data + wasm layer is built and tested** (parser → VM →
 loader → bridge → bindings). Gate / client / module integration is in progress —
-see [wasm/AGENTS.md](wasm/AGENTS.md).
+see [shared/AGENTS.md](shared/AGENTS.md).
 
 ## Rebuild / redeploy
 
@@ -46,8 +46,11 @@ acts only on what changed. It content-hashes each build unit's *source closure*
 into a gitignored stamp dir (`spacetime/.build-state/`) — **not** mtime, **not**
 `git diff` — so it catches uncommitted edits, means "since last build", and is
 idempotent. The shared `resonantdust-data` crate is folded into every consumer's
-inputs, so a DSL/VM edit automatically marks `cards` + `players` + `regions` +
-`gate` dirty (the fan-out a hand-typed build chain forgets).
+inputs, so a DSL/VM edit automatically marks `shard` + `players` + `gate` dirty
+(the fan-out a hand-typed build chain forgets). The unified **`shard`** module is
+one binary published to BOTH the `cards` and `regions` databases (owner-card data
+vs region/terrain data); `redeploy` fans its one source change out to `st re
+cards` + `st re regions`.
 
 - `redeploy` — dry run: print the plan, build nothing.
 - `redeploy --run` — execute (changed module → `st re <mod>`; gate → `gate

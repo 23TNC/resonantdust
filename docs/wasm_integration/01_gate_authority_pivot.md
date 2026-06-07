@@ -262,5 +262,5 @@ Goal: `content/` = `.rd` + JSON data only; all Rust in `resonantdust-data`.
 ## 5. Deferred: client
 Untouched until gate + modules settle. Then (old Phase 4): vite `.rd` bundling,
 `Content` bootstrap, port `recipeMatcher.ts` / `LayoutWorld`, def_id/locale
-migration, delete the legacy content wasm. The browser bundle (`wasm/pkg`) is
+migration, delete the legacy content wasm. The browser bundle (`shared/pkg`) is
 already built and waiting.
