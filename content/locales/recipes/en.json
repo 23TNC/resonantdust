@@ -1,0 +1,66 @@
+{
+  "cut_tree": {
+    "label": "cut tree",
+    "success": {
+      "simple": "{actor} chopped down {root}."
+    }
+  },
+  "break_rock": {
+    "label": "break rock",
+    "success": {
+      "simple": "{actor} broke {root}."
+    }
+  },
+  "corpus-": {
+    "label": "corpus-"
+  },
+  "corpus_down": {
+    "label": "corpus_down"
+  },
+  "corpus_up": {
+    "label": "corpus_up"
+  },
+  "despair_failure": {
+    "label": "despair_failure"
+  },
+  "despair_success": {
+    "label": "despair_success"
+  },
+  "dread_remover": {
+    "label": "dread_remover"
+  },
+  "fleeting": {
+    "label": "fleeting"
+  },
+  "strike_failure": {
+    "label": "strike_failure"
+  },
+  "strike_success": {
+    "label": "strike_success"
+  },
+  "triple_corpus": {
+    "label": "triple_corpus"
+  },
+  "corpus_stack": {
+    "1": {
+      "label": "1"
+    },
+    "2": {
+      "label": "2"
+    }
+  },
+  "corpus_b": {
+    "1": {
+      "label": "1"
+    },
+    "2": {
+      "label": "2"
+    }
+  },
+  "stick": {
+    "label": "stick"
+  },
+  "chorus_attune": {
+    "label": "chorus_attune"
+  }
+}

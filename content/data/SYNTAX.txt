@@ -1,0 +1,142 @@
+Reference sigils (lead a reference; pick resolution mode):
+$ Resolve a global symbol  ($card::corpus, $object::symbols:corpus, $functions:ring_objects).
+  Enum registries use `.`: $shape.rect (legacy, going away), $faction.chorus.
+  $globals::<id> resolves to a `<globals>` CONSTANT's value (card_width,
+  title_height, hex_width, …) — shared sizes the DSL + client read instead of
+  hardcoding them in engine code. Resolves to the VALUE at exec (not a deferred
+  ref); a later global can be a function of an earlier one.
+& Writable slot reference   (&aspect.cost, &objects.0).
+* Read / deref              (*biome.humidity, *slot.1.0.def_id).
+: Local label reference     (:loop) — resolves in the current scope, stops at < / :: / @.
+^ System call — an engine-native function invoked with `call` (^biome, ^seed). The FFI
+  boundary to native code not expressed in the DSL; must be deterministic so server
+  and client agree. Re-derives on each call (e.g. ^biome regenerates terrain context).
+  The visual-primitive constructors are intrinsics here: ^hex / ^rect / ^sprite /
+  ^text / ^progress — `^<kind> call &h set` pushes a prim onto `prims` (engine-
+  owned) and returns a handle you configure via `&h.pos`/`&h.tint`/… (see
+  CONVENTIONS). `^text` takes a locale KEY in `&h.text` (e.g. `*sys.label` for a
+  title); the client resolves + renders it.
+  ^card_data — a STRUCTURED host record of the card's runtime state (the engine
+  bundles it so the DSL needn't pass big ints): `^card_data call &d set` then
+  read nested fields — `*d.stack.state` / `*d.stack.index` (chain position),
+  `*d.loose`, overlay flags (`*d.hovered`/`*d.selected`/…), `*d.progress.<i>`.
+  Lets the DSL drive visual states (stack offsets, overlays, progress bars)
+  instead of the engine hardcoding them.
+# Hex color literal.
+; Line comment, to end of line.
+
+Number literals:
+  `10`, `-1`            integers.
+  `1.5`, `-0.25`        floats — any token containing `.` that parses as f64.
+  Arithmetic & comparison PROMOTE to float when either operand is a float;
+  pure-integer `div`/`mod` stay truncating (recipe math is unchanged). Visual
+  coords (prim pos / size in PIXELS from $globals + asset px; anchor a 0..100
+  pivot; scale a multiplier) and biome axes are floats; ids / aspect magnitudes
+  / stock stay integers.
+
+Path separators (compose freely; each marks its hop kind):
+:: Definition / lookup key  | : tag (facet, function, label) | . member.
+  e.g. $card::corpus:data.aspect.corpus+  — namespace card, def corpus, facet
+  data, member aspect.corpus+. A local &aspect.corpus+ is the relative tail.
+
+Header sigils (a lone `name>` line; nesting is by indentation):
+<  Bucket / compile-time export. `<card>` / `<recipe>` hold `::` defs; each global
+   function is its own scope, `<functions:ring_objects>`, holding a code body.
+:: Stored definition record (the lookup key). Cards hold `:data>` / `:visuals>`
+   facets (`:data` is shared simulation state on BOTH runtimes — server
+   authoritative, client uses it for local recipe matching; `:visuals` is
+   client-only presentation, and may read `:data`); recipes hold `@input>` /
+   `@output>`. A single-facet card may inline: `::aether:visuals>`.
+:  Structural facet (`:data>` / `:visuals>`), holding hooks. (Inside a code body
+   a `:<name>>` line is a jump label instead.)
+@  Code hook: @define>, @init>, @update>, @destroy>, @input>, @output>.
+
+if  Execute the next operation when the condition is true.
+!if Execute the next operation when the condition is false.
+
+goto Transfer execution to a label.
+call Invoke a function ($functions:x) or system call (^x); pushes the callee's return
+     value onto the stack. Consume it (`… &slot set`) or discard it (`… drop`).
+ret  Return one value from the current function: `<val> ret` (use `0 ret` for void).
+drop Discard the top stack value (e.g. an unused call return).
+
+count Push the number of entries in an array/map/object collection.
+key   Push the key (name) at a positional index of a map: &map <i> key. The complement
+      of positional value reads (*map.*i), so a keyed map can be iterated by index and
+      the name recovered at each step.
+recall Look up a catalog record by computed id: <id> <namespace> recall → the <ns>::<id>
+      record (or 0 if none). e.g. `*name aspect recall` → that aspect's record. The
+      explicit registry lookup — id + namespace on the stack, not an instance path.
+
+set Store a value into a slot.
+array Initialize a zeroed collection reference with the given slot count.
+
+destroy Destroy an object.
+create Create an object in a container.
+
+borrow Borrow an object for recipe execution. slot hold: false position hold: false
+share  Share an object for recipe execution.  slot hold: false position hold: true
+use    Use an object for recipe execution.    slot hold: true  position hold: false
+claim  Claim an object for recipe execution.  slot hold: true  position hold: true
+
+stock Set a slot's bit width and mark it a variable aspect: <bits> &slot stock. (Value set later via range + normalize; no `set` needed here.) Static aspects need no declaration — just <value> &slot set.
+
+eq Return true when two values are equal.
+ne Return true when two values are not equal.
+gt Return true when the left value is greater than the right value.
+ge Return true when the left value is greater than or equal to the right value.
+lt Return true when the left value is less than the right value.
+le Return true when the left value is less than or equal to the right value.
+
+and Return true when both values are true.
+or Return true when either value is true.
+not Invert a boolean value.
+
+within Return true when a value falls within a range.
+range  Sets the minimum and maximum values for a slot.
+vec2   Set a 2-component vector as {x, y}: <x> <y> &slot vec2. Read via *slot.x / *slot.y.
+       Each component keeps its float-ness, so visual coords can be floats.
+       Used for anchor (pivot) and primitive pos/size. e.g. `50.0 75.0 &pos vec2`.
+
+inc Increment a numeric reference by 1.
+dec Decrement a numeric reference by 1.
+
+add Add two values.
+sub Subtract the right value from the left value.
+mul Multiply two values.
+div Divide the left value by the right value. (Integer/integer truncates; if
+    either operand is a float the result is a float — use a float divisor, e.g.
+    `*i 6.0 div`, to get a fractional result.)
+
+mod Return the remainder after division.
+
+sin Sine of an angle in RADIANS: <radians> sin -> float.
+cos Cosine of an angle in RADIANS.
+sqrt Square root: <n> sqrt -> float. (e.g. `3 sqrt` for a hex cell's √3·radius.)
+pi  Push the constant π (a float). Build an angle from an index, e.g. an N-slot
+    ring: `*i N.0 div 2.0 mul pi mul` = i/N · 2π; position with sin/cos.
+random Deterministic pseudo-random from a seed: <seed> random -> a hash of the seed. Same seed always yields the same value, so server and client agree (safe in @init). Range it with mod (<seed> random <n> mod); vary per pick by mixing a counter into the seed (<seed> <i> add random).
+normalize Scale a numeric input into a slot's min/max range and write it: &slot <input> normalize.
+       Maps the ABSOLUTE 0..100 axis onto the range and FLOORS — so a value
+       confined to a narrow band collapses to one bucket. For climate-driven
+       stock counts use `scatter` instead.
+scatter Band-relative stock count with jitter: &slot <input> <lo> <hi> <seed> scatter.
+       Maps <input> from the gate band [lo,hi] onto the slot's range (set by a
+       prior `range`), ROUNDS (not floors), then nudges by a deterministic
+       -1/0/+1 drawn from <seed> (the per-cell ^seed), clamped back into range.
+       An unranged slot stays 0 (the tier never declared it → no stock). Vary
+       <seed> per aspect (e.g. *seed vs *seed 7 add) so their jitter decorrelates.
+       Fixes normalize's collapse — neighbours differ, wetter ground trends denser.
+
+rtl Constant representing right-to-left direction.
+ltr Constant representing left-to-right direction.
+
+@define> Execute when a definition is loaded.
+@init>   Execute when an instance is created.
+@update> Execute during updates.
+@destroy> (:visuals) Execute when the instance is dying (row dead===1). Its prims
+         are the EXIT targets the client eases to, then removes the card. No
+         @destroy → empty prims → instant removal.
+
+@input>  Define recipe matching requirements.
+@output> Define recipe execution behavior.

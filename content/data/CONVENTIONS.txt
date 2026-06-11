@@ -1,0 +1,201 @@
+; Game conventions that the DSL paths encode. SYNTAX.txt covers tokens; this
+; covers what the tokens MEAN, so the editor (and us) can highlight by role.
+
+==============================================================================
+STACKS & ROOTS
+==============================================================================
+
+Every chain hangs off one root card. A root currently exposes three stacks:
+
+    stack 0  HEX     the tile / hex slot under the root  (STACK_DIRECTION HEX)
+    stack 1  TOP     grows upward from the root          (STACK_DIRECTION UP)
+    stack 2  BOTTOM  grows downward from the root        (STACK_DIRECTION DOWN)
+
+So the first number after `slot` is the STACK selector (0|1|2), not a free
+index. The root itself may be promoted into a stack at offset 0 — a recipe
+reference to `slot.<stack>.0` can resolve to the root card.
+
+==============================================================================
+THE SLIDING FRAME  —  slot.a.b
+==============================================================================
+
+`slot` is the recipe's entry point: a recipe pattern is written against
+`slot.<stack>.<offset>` coordinates, and the matcher slides that frame along
+each stack looking for a window where the pattern holds.
+
+    slot.a.b   ==   root[a][b + N]   for some N in 0 .. len(root[a])
+
+  - a = stack       (0 hex / 1 top / 2 bottom)
+  - b = offset      position WITHIN the recipe's frame, not an absolute index
+  - N = frame base  chosen by the matcher as it slides the window
+
+This is why `slot` is special: it is NOT root and NOT an absolute address. It
+is a sliding offset from root. `slot.1.0` = "top stack, first card of the
+current frame"; the same recipe matches anywhere the frame can sit.
+
+`root` (as a path anchor) refers to the chain root directly — no sliding.
+
+==============================================================================
+PATH ANATOMY
+==============================================================================
+
+A path is dot-separated segments. Segments fall into distinct ROLES:
+
+  anchor       leading segment that picks the address space:
+                 slot   sliding recipe frame (followed by a stack.offset pair)
+                 root   the chain anchor, absolute
+                 var    engine scratch register     (var.<n>)
+                 sys    engine-provided field        (sys.duration; in :visuals
+                        also sys.label / sys.type / sys.key — the card's identity,
+                        seeded before the hook for locale-keyed text)
+                 aspect aspect namespace of the current card
+                 objects / color / asset / shape / biome  card-instance data
+
+  coord pair   the `<stack>.<offset>` immediately after `slot`
+                 stack  = 0|1|2 (constrained enum: hex/top/bottom)
+                 offset = frame-relative index
+
+  hop          a segment that re-anchors the path onto ANOTHER card:
+                 owner  walk to the card that owns the current one, then the
+                        rest of the path is resolved in THAT card's space
+                        (e.g. slot.1.0.owner.slot.1.0 — actor's own top stack)
+                 inventory / blueprint  container destinations for `create`
+
+  field        a named leaf that reads a property, not a child collection:
+                 def_id  the card's definition key
+                 style   render direction / style
+                 (and aspect names: aspect.wood, aspect.corpus+, ...)
+
+  index        a numeric segment that is an array/collection index rather than
+               a stack coordinate: objects.0, var.0, asset.<n>
+
+  interp       a value reference embedded inside a path as a dynamic index:
+                 objects.*var.0   →  objects[ value of var.0 ]
+                 aspect.*var.2    →  aspect indexed by var.2
+
+==============================================================================
+ASPECTS
+==============================================================================
+
+The trailing non-numeric segment of an aspect path is the aspect NAME
+(slot.0.0.aspect.stone → stone). Satisfaction is a `satisfies` LUT, not a tree
+(content/data/aspect/01.rd): each aspect lists the aspects it satisfies, so
+`pine → [wood]` (and an aspect can satisfy several). A predicate `aspect.Q`
+folds over a card: sum every stocked aspect A where A==Q or Q ∈ satisfies(A) —
+so a tile with `pine:2` + `ash:3` reads `aspect.wood` = 5. Exact match is
+implicit (no aspect lists itself). The gate computes the transitive closure +
+sum and writes the rolled-up key into the operating-set frame; the VM reads it
+as a plain key. Polarity suffixes `+` / `-` are part of the name (corpus+).
+
+==============================================================================
+VISUAL PRIMITIVES  (:visuals -> &prims)
+==============================================================================
+
+`:visuals` builds the `prims` draw list, but the DSL never hand-builds it: the
+ENGINE owns `prims`. You construct a primitive with a `^` intrinsic, which
+appends it to `prims` and hands back a HANDLE; you configure the prim through the
+handle. The client reconciles `prims` into retained Pixi objects (by index) and
+eases each toward the values you set. The DSL only ever writes TARGET values; the
+engine owns the live objects + the tween, so you never hold a sprite -- you
+construct one and describe it.
+
+    ^hex call &h set                                       ; push a hex, get a handle
+    0.0 0.0 &h.pos vec2                                     ; &h.<field> writes THROUGH
+    $globals::hex_width $globals::hex_height &h.size vec2   ; px, from globals
+    *color.bg &h.tint set
+
+`&h` is a reference to the prim just pushed; reuse the name for the next one
+(`^sprite call &h set`). Push order IS paint/reconcile order -- no index
+bookkeeping. (`prims` exists because `^` filled it; the engine never scans for a
+magic variable, and you never write `&prims.0.kind`.)
+
+Kinds are `^` engine intrinsics (NOT a `$` registry): ^rect | ^hex | ^text |
+^sprite | ^progress. The engine (`vm::PRIM_KINDS`) + the client `makePrimitive`
+own the matching set. `^progress` is a self-contained bar (dim track + fill). The
+DSL sets `target` (WHICH progress row to track) + `style`, NOT a fill value — it
+doesn't run per-frame. The engine resolves `target` to the row's timing and fills
+the bar live, hiding it when the progress ends ("the engine handles the reset").
+Fields (all optional; the kind is fixed by the `^` constructor):
+  pos size       vec2, in PIXELS — sourced from `$globals` (card_width/height,
+                  hex_width/height, title_height) and asset px (`*rec.art.size`).
+                  No box normalization: a fill is `$globals::card_width
+                  $globals::card_height`, an object is its asset px. The DSL owns
+                  every dimension; nothing is hardcoded engine-side.
+  anchor         vec2, a 0..100 PIVOT (50,50 = centre) — a fraction, not px.
+  scale rot alpha floats (defaults 1 / 0 / 1). `scale` is the multiplier (per-
+                  instance variance, zoom); `size` is the base px. They're
+                  distinct — call `scale` when you mean relative.
+  tint            #rrggbb (for a rect/hex fill this IS the colour: white texture
+                  x tint).
+  texture         a bare asset / render-object NAME (rect/hex fill image, or the
+                  sprite art). The CLIENT picks the LOD variant + faction -- the
+                  definition just names the thing.
+  text            a LOCALE KEY. The client resolves it via the locale runtime;
+                  definitions never decode locales (locales = key->string). For a
+                  card title use `*sys.label` (= `cards.<type>.<key>.label`, seeded
+                  by the engine) — `$functions::title` does exactly this, and
+                  rect_card / hex_card call it so every card face is titled. The
+                  client bakes ONE bitmap font and SCALES the node to `size.y` px
+                  (no per-size/zoom re-rasterization); `size.y` is the text px
+                  height, `tint` the colour.
+  target          `^progress` only: the row to track (`*d.progress.<i>.id`). The
+                  engine fills from its timing; the DSL never sets a fraction.
+  style           `^progress` only: 1 = ltr, 2 = rtl. DSL-chosen (needn't come
+                  from the row).
+  source          `^progress` only: which fraction to fill from. unset/0 = a
+                  progress row (`target` → `*d.progress.<i>`); 1 = the action
+                  QUEUE/debounce countdown (the pre-propose bar). tint is the fill
+                  colour either way (e.g. #fff for the white queue bar).
+  z               intra-card paint order (`&h.z set`); higher draws on top. Unset
+                  → push order (so a `title` emitted last stays on top for free).
+                  This is the prim's z WITHIN its card only — a card's z in its
+                  stack is the container's, set client-side from the chain (the
+                  two sorts nest, they don't share a scale). So you order a card's
+                  own prims here; you never reach across cards.
+
+E.g. a progress bar on a card title — set target + style; the engine fills it:
+    ^card_data call &d set
+    ^progress call &p set
+    0.0 0.0 &p.pos vec2
+    $globals::card_width $globals::title_height &p.size vec2
+    #6cf &p.tint set
+    *d.progress.0.id    &p.target set
+    *d.progress.0.style &p.style set
+
+Hooks: build the prims in `@init` (first draw -- the client snaps current=target)
+and/or `@update` (a change -- the client eases to the new targets). Both run the
+same builder; the VM emits the full list each time and the client diffs by index.
+Conditional elements toggle via `alpha 0`, never by adding/removing a record (the
+index is the identity). Genuine per-frame motion is a dedicated engine primitive,
+not DSL.
+
+`@destroy` runs when the card is dying (row `dead === 1`) — its prims are the card's
+final render before removal. Normally it just re-runs the builder (same as
+`@update`), so the card stays correctly drawn through teardown and the client then
+splices the chain + removes it in one step (no empty-frame flicker). With no
+`@destroy` hook the exit list is empty, so the card blinks out before removal —
+hence every card defines one. (You CAN ease an exit here by emitting the same
+indices/kinds at a gone state — `alpha 0`, a shrink — but that's optional; the
+default is a clean, immediate teardown.)
+
+Shared builders compose the standard sets: e.g. `ring_prims` for tiles emits the
+hex body (tint `color.bg`) plus one sprite per stock object on a trig ring, the
+sprite's `texture` being the aspect's render object (`*rec.art.object`). World
+tiles render through `tile_prims`, which overlays the STORED stock (not biome-
+recomputed) before running `:visuals`.
+
+==============================================================================
+HIGHLIGHTING IMPLICATIONS
+==============================================================================
+
+The editor highlights references with a deliberately simple two-part split,
+rather than coloring every role above (which read as noise):
+
+  HEAD  the sigil + path up to the last `.` (or to whitespace if no dot),
+        colored by the SIGIL so $ / & / * reads are distinguishable at a glance.
+  TAIL  the segment after the last `.` — the aspect / asset / variable being
+        edited — in its own color. A dotless path, or one whose final segment
+        is a number (slot.1.0), is all head.
+
+The roles above (anchor, coord pair, hop, interp) still describe what the head
+MEANS; they are just not individually colored.

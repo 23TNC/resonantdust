@@ -1,0 +1,290 @@
+{
+  "_comment": "Card labels and descriptions. Top-level keys are card types; each card's `label` is rendered as the card's title bar text. KEEP LABELS ≤ 10 CHARACTERS so they fit the title-bar width without truncating or wrapping. Descriptions (`description.simple`) have no length limit — they render in the details panel's expanded state. The `simple` slot is the only one consumed today; reserved for future tiered descriptions (`detailed`, `lore`, etc.).",
+  "requisite": {
+    "log": {
+      "label": "Log",
+      "description": {
+        "simple": "A length of cut wood — fuel and lumber both."
+      }
+    },
+    "stone": {
+      "label": "Stone",
+      "description": {
+        "simple": "Rough quarried stone — heavy and slow to shape, but lasting."
+      }
+    },
+    "axe": {
+      "label": "Axe",
+      "description": {
+        "simple": "A simple hand axe — useful for chopping wood."
+      }
+    },
+    "pickaxe": {
+      "label": "Pickaxe",
+      "description": {
+        "simple": "A heavy pickaxe — useful for breaking stone."
+      }
+    },
+    "stick": {
+      "label": "stick"
+    },
+    "food": {
+      "label": "Food",
+      "description": {
+        "simple": "Edible produce — sustenance for the journey."
+      }
+    },
+    "reliquary": {
+      "label": "Reliquary",
+      "description": {
+        "simple": "An ornate vessel — sanctified to hold spiritual relics."
+      }
+    },
+    "dust": {
+      "label": "dust"
+    },
+    "corpse": {
+      "label": "Corpse"
+    },
+    "corpse_chorus": {
+      "label": "Corpse"
+    },
+    "corpse_chord": {
+      "label": "Offline"
+    },
+    "corpse_resonance": {
+      "label": "Corpse"
+    }
+  },
+  "event": {
+    "despair": {
+      "label": "Despair",
+      "description": {
+        "simple": "A bleak omen anchored to the world. Feed it dread to lift it; ignore it and it lingers."
+      }
+    },
+    "strike": {
+      "label": "Strike",
+      "description": {
+        "simple": "A burst of effort pinned to the world. Channel corpus into it to see it through."
+      }
+    },
+    "test": {
+      "label": "test"
+    }
+  },
+  "faculty": {
+    "aether": {
+      "label": "Aether",
+      "description": {
+        "simple": "The subtle essence — the spark of magic in a soul."
+      }
+    },
+    "aether+": {
+      "label": "Aether+",
+      "description": {
+        "simple": "Aether kindled brighter than rest. A surplus."
+      }
+    },
+    "aether-": {
+      "label": "Aether-",
+      "description": {
+        "simple": "Aether spent. Will recover in time."
+      }
+    },
+    "anima": {
+      "label": "Anima",
+      "description": {
+        "simple": "The animating spirit — will and intent."
+      }
+    },
+    "anima+": {
+      "label": "Anima+",
+      "description": {
+        "simple": "Spirit stoked beyond its usual flame."
+      }
+    },
+    "anima-": {
+      "label": "Anima-",
+      "description": {
+        "simple": "Spirit spent. Will recover in time."
+      }
+    },
+    "corpus": {
+      "label": "Corpus",
+      "description": {
+        "simple": "The body's vigor — physical capacity and health."
+      }
+    },
+    "corpus+": {
+      "label": "Corpus+",
+      "description": {
+        "simple": "Vigor heightened beyond rest. A surplus of strength."
+      }
+    },
+    "corpus-": {
+      "label": "Corpus-",
+      "description": {
+        "simple": "Body spent. Will recover in time."
+      }
+    },
+    "sollertia": {
+      "label": "Sollertia",
+      "description": {
+        "simple": "Trained skill and cleverness — the cunning hand and quick wit."
+      }
+    },
+    "sollertia+": {
+      "label": "Sollertia+",
+      "description": {
+        "simple": "Skill sharpened past its usual edge."
+      }
+    },
+    "sollertia-": {
+      "label": "Sollertia-",
+      "description": {
+        "simple": "Skill spent. Will recover in time."
+      }
+    },
+    "corpus++": {
+      "label": "corpus++"
+    }
+  },
+  "revery": {
+    "dread": {
+      "label": "Dread",
+      "description": {
+        "simple": "A clinging fear that resists being put down."
+      }
+    }
+  },
+  "soul": {
+    "player_soul": {
+      "label": "Player",
+      "description": {
+        "simple": "You — a thin soul that owns and acts through the souls in your care."
+      }
+    },
+    "human": {
+      "label": "Human",
+      "description": {
+        "simple": "An ordinary mortal — adaptable, balanced across every faculty."
+      }
+    },
+    "human_builder": {
+      "label": "human_builder"
+    }
+  },
+  "tile": {
+    "forest_1": {
+      "label": "Forest 1",
+      "description": {
+        "simple": "Light forest — passable, but slower than open ground."
+      }
+    },
+    "forest_2": {
+      "label": "Forest 2",
+      "description": {
+        "simple": "Dense forest — costly to cross."
+      }
+    },
+    "rock": {
+      "label": "Rock",
+      "description": {
+        "simple": "A boulder of useful stone. Break it apart with a pickaxe."
+      }
+    },
+    "tree": {
+      "label": "Tree",
+      "description": {
+        "simple": "A standing tree. Cut it down with an axe for logs."
+      }
+    },
+    "desert_1": {
+      "label": "desert_1"
+    },
+    "desert_2": {
+      "label": "desert_2"
+    },
+    "desert_3": {
+      "label": "desert_3"
+    },
+    "desert_4": {
+      "label": "desert_4"
+    },
+    "forest_3": {
+      "label": "forest_3"
+    },
+    "forest_4": {
+      "label": "forest_4"
+    },
+    "mountain_1": {
+      "label": "mountain_1"
+    },
+    "mountain_2": {
+      "label": "mountain_2"
+    },
+    "mountain_3": {
+      "label": "mountain_3"
+    },
+    "mountain_4": {
+      "label": "mountain_4"
+    },
+    "plains_1": {
+      "label": "plains_1"
+    },
+    "plains_2": {
+      "label": "plains_2"
+    },
+    "plains_3": {
+      "label": "plains_3"
+    },
+    "plains_4": {
+      "label": "plains_4"
+    },
+    "nd_furnace": {
+      "label": "nd_furnace"
+    },
+    "workbench": {
+      "label": "workbench"
+    },
+    "building_nd_furnace": {
+      "label": "building_nd_furnace"
+    },
+    "building_workbench": {
+      "label": "building_workbench"
+    },
+    "alter": {
+      "label": "Alter",
+      "description": {
+        "simple": "A consecrated structure. Its appearance changes as its level rises."
+      }
+    },
+    "empty": {
+      "label": "empty"
+    },
+    "concrete": {
+      "label": "Concrete",
+      "description": {
+        "simple": "A paved surface — flat, walkable, easy to build on."
+      }
+    },
+    "anima_fountain": {
+      "label": "anima_fountain"
+    },
+    "aether_fountain": {
+      "label": "aether_fountain"
+    },
+    "table": {
+      "label": "Table",
+      "description": {
+        "simple": "A flat stone slab — workspace for crafts and rituals."
+      }
+    }
+  },
+  "blueprint": {
+    "blueprint_nd_furnace": {
+      "label": "Furnace"
+    }
+  }
+}

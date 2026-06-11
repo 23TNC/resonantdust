@@ -1,0 +1,105 @@
+{
+  "_comment": "Panel UI strings — titles, buttons, labels, placeholders for the client's DOM/PIXI panels. Top-level keys are PANEL KEYS matching `content/panels/defaults.json` (`settingsMenu`, `debugPanel`, `chatPanel`, `gameViewPanel`, …) so a panel's layout defaults and its strings share one identifier. Schema reuses the generic locale-loader leaf rule (see `locales_core.rs`): each panel entry's `label` is its TITLE-BAR text, and EVERY other key is a flat string variant (button captions, row labels, placeholders). Consume from TS via the `localeLabel` / `localeVariant` wasm wrappers (see `pixijs/src/game/panels/panelStrings.ts`). Pure glyphs (▲ ▼ ✕ − + ▣ ▢) and numeric placeholders stay hard-coded in the panel code — they are not translatable text.",
+
+  "settingsMenu": {
+    "label": "Settings",
+    "resetPanels": "Reset All Panels",
+    "logOut": "Log Out",
+    "toggleFullscreen": "Toggle Fullscreen",
+    "sound": "Sound",
+    "enterEditMode": "Enter UI Edit Mode",
+    "exitEditMode": "Exit UI Edit Mode",
+    "editModeUnavailable": "UI Edit Mode (unavailable)"
+  },
+
+  "chatPanel": {
+    "label": "Chat",
+    "inputPlaceholder": "Type a message…"
+  },
+
+  "chatSettings": {
+    "label": "Chat Settings",
+    "fontSize": "Font size",
+    "timestamps": "Timestamps",
+    "systemMessages": "System messages",
+    "on": "On",
+    "off": "Off"
+  },
+
+  "gameDetailsPanel": {
+    "label": "Details",
+    "descriptionHeader": "Description"
+  },
+
+  "gameViewPanel": {
+    "label": "Game View"
+  },
+
+  "gameInventoryPanel": {
+    "label": "Inventory"
+  },
+
+  "panelSettingsPopup": {
+    "label": "Panel Settings",
+    "settingsHeadingSuffix": "Settings",
+    "titleBar": "Title bar",
+    "gridSnap": "Grid snap",
+    "anchor": "Anchor",
+    "draggable": "Draggable",
+    "snapping": "Snapping",
+    "height": "Height",
+    "taskbarPin": "Taskbar Pin",
+    "taskbarIcon": "Taskbar Icon",
+    "taskbarIconPlaceholder": "(text)",
+    "titleSuffix": "Title Suffix",
+    "minimize": "Minimize",
+    "hideMinimize": "Hide Minimize",
+    "resizeHorizontal": "Resize Horizontal",
+    "resizeVertical": "Resize Vertical",
+    "close": "Close",
+    "hideClose": "Hide Close",
+    "mask": "Mask",
+    "layer": "Layer",
+    "reset": "Reset",
+    "copyJson": "Copy JSON",
+    "copyAllJson": "Copy All JSON",
+    "none": "None",
+    "topLeft": "Top Left",
+    "topRight": "Top Right",
+    "bottomLeft": "Bottom Left",
+    "bottomRight": "Bottom Right",
+    "topCenter": "Top Center",
+    "bottomCenter": "Bottom Center",
+    "off": "Off",
+    "auto": "Auto",
+    "full": "Full",
+    "half": "Half",
+    "quarter": "Quarter",
+    "player": "Player",
+    "soul": "Soul"
+  },
+
+  "debugPanel": {
+    "label": "Debug",
+    "debugInfo": "Debug info",
+    "serverNow": "Server now",
+    "offset": "Offset",
+    "fps": "FPS",
+    "drawCalls": "Draw Calls",
+    "atlases": "Atlases",
+    "size256": "256",
+    "size128": "128",
+    "size64": "64",
+    "dateNow": "Date.now",
+    "clientDelay": "Client delay",
+    "runningDelay": "Running delay",
+    "runningDelta": "Running delta",
+    "delta": "Delta",
+    "bestCapture": "Best capture",
+    "worstCapture": "Worst capture",
+    "captures": "Captures",
+    "captureSpread": "Capture spread",
+    "rtt": "RTT",
+    "rttBest": "RTT (best)"
+  }
+}
