@@ -1,0 +1,19 @@
+# Headless Laigter container, driven by `bin/laigter` (and `bin/art laigter`).
+#
+# The repo root is mounted at /work, so callers pass /work-relative paths to
+# -d (diffuse) and -r (preset) and the generated maps land back in the tree.
+# Build the image once with `bin/laigter build`; see laigter/Dockerfile for the
+# Xvfb + Mesa software-GL stack that makes the Qt/OpenGL AppImage run headless.
+services:
+  laigter:
+    build:
+      context: .
+      args:
+        LAIGTER_VER: "1.13.1"
+    image: resonantdust-laigter:1.13.1
+    # tini as PID 1: reaps Xvfb so the headless run doesn't wedge on teardown
+    # (see laigter/entrypoint.sh).
+    init: true
+    volumes:
+      - ..:/work
+    working_dir: /work

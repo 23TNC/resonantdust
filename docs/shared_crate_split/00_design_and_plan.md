@@ -111,10 +111,27 @@ happens incrementally and reversibly afterward.
    `resonantdust-codec` directly (they used only `card_model`/`flags`/`packed`);
    `chat` + `regionindex` never depended on the shared crate. Modules no longer
    link the DSL blob. Verified: `bin/st build shard`, `bin/st build players`.
-3. **Land the audited moves** into `state`/`rules` (`dsl_recipe`,
-   `synthetic_tile`, effect semantics, stacking resolver) — they arrive in the
-   right crate, moved once.
-4. **Delete the facade** once gateway/client/wrapper depend on members directly.
+3. **Land the audited moves** into `state`/`rules` — IN PROGRESS.
+   - ✅ `dsl_recipe` glue → new `resonantdust-rules` crate, genericized over
+     `CardStore` (+ `now_ms` threaded). Gateway deletes its copy and calls
+     `resonantdust_rules::dsl_recipe::run`. Verified: `bin/gate build`.
+   - ✅ host/join stacking resolver ported `stacking.ts` → `resonantdust-rules`
+     (`stacking` module): `stack_bits`/`match_stack`/`resolve_stack_drop`, 4 unit
+     tests incl. the card-onto-tile reverse. The drift-killer.
+   - ⬜ `synthetic_tile` derivation, effect semantics (`owning_soul`/`stat_slot`/
+     `hold_mask`), versioned-row collapse → `state`. Needs the shared `ZoneView`
+     layer first — DEFERRED until the client world model is the real consumer
+     (see status note below), to avoid shaping the abstraction blind.
+4. **Delete the facade** — ✅ DONE. Narrowed every `use resonantdust_data::X`
+   across gateway / client / wrapper (`shared/src`) to the owning member crate
+   (`resonantdust_codec` / `_dsl` / `_state` / `_protocol`), swapped each
+   consumer's `Cargo.toml` `resonantdust-data` dep for the specific members it
+   uses, dropped `data` from the workspace `members`, and deleted
+   `shared/data/`. Verified green: `bin/shared test` (172), `bin/client test`
+   (38), `bin/gate build`, `bin/st build shard`. (The deferred phase-3 movers —
+   `synthetic_tile` / effect-semantics / versioned-row collapse into `state` —
+   remain in `dsl` for now; that's a separate refactor, not blocking the facade
+   deletion.)
 
 ## Risks
 

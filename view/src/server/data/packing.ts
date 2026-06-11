@@ -1,0 +1,361 @@
+/** Packing helpers for SpacetimeDB row keys, zone IDs, and card-row
+ *  bit-packed fields.
+ *
+ *  **Source of truth:** [`content/src/packed.rs`](../../../../content/src/packed.rs).
+ *  The same definitions are re-exported into the shard and chat
+ *  modules via `pub use resonantdust_content::packed::*;`, and the
+ *  individual helpers (`packMacroZone`, `unpackMicroZone`,
+ *  `isStackLayout`, `worldLayer`, etc.) are exposed through the
+ *  wasm pkg (`content/pkg/resonantdust_content.js`) for cold-path
+ *  callers and tests that want the canonical implementation.
+ *
+ *  The native TS mirrors below exist for **hot-path performance** —
+ *  these functions are called per zone decode / card sync, and the
+ *  wasm-crossing overhead adds up. If you change any bit layout
+ *  here, change the matching helper in
+ *  [`content/src/packed.rs`](../../../../content/src/packed.rs) in
+ *  the same patch. There is no compile-time drift check; the
+ *  discipline is "same file, same PR."
+ *
+ *
+ *  Encoding schemes here all match the server's wire format:
+ *
+ *  1. **Valid-at u64 row keys.** Every server table uses a u64 primary key
+ *     whose high 48 bits hold the row's absolute-millisecond unix
+ *     timestamp at which the row becomes valid, and whose low 16 bits
+ *     hold an opaque global sequence number that disambiguates
+ *     same-millisecond writes. The row's logical id (`card_id`,
+ *     `zone_id`, `player_id`) lives on a separate column and should
+ *     be read from there — not derived from the key. Multiple rows
+ *     per id can coexist; the client picks the row whose validAt is
+ *     the largest one that has elapsed.
+ *
+ *  2. **`ZoneId` = the full packed `macroZone` u64** held as a `bigint`
+ *     (the SDK wire type). It identifies a zone uniquely by owner +
+ *     surface + coords; it's `MacroZone.packed`. World zones carry
+ *     `WORLD_LAYER` in the surface band; inventory/card zones use a
+ *     `surface < 64`.
+ *
+ *  3. **`macroZone`** = `[owner_card_id:u32 | surface:u8 | chunkQ:i12 | chunkR:i12]`
+ *     (high → low), where each chunk is `ZONE_SIZE` × `ZONE_SIZE` hexes wide.
+ *     `owner` is bits 32-63 (the owning card_id; `0` = WORLD), `surface` bits
+ *     24-31, `chunkQ` bits 12-23, `chunkR` bits 0-11; the two coords are signed
+ *     12-bit (±2047), the unpack restores the sign.
+ *
+ *  4. **`microLocation` u32 — TWO INTERPRETATIONS, gated by the
+ *     `micro_is_card` flag (in `flagsBk`):**
+ *
+ *     - **`micro_is_card` set** → `microLocation` is a **root card_id**. The
+ *       card is a flat stack member; its branch is the `stackState` flag
+ *       (`STACK_DIR_HEX/UP/DOWN` or `STACK_STATE_DEFERRED`) and its slot is the
+ *       `stackIndex` flag (0..15). No parent pointers — every member points
+ *       straight at the root.
+ *
+ *     - **`micro_is_card` clear** → `microLocation` is **loose coords + offset**
+ *       ```
+ *       [localQ: u3 (29-31) | localR: u3 (26-28) | x: i12 (14-25) | y: i12 (2-13) | rsvd: u2]
+ *       ```
+ *       `localQ`/`localR` address a cell in the zone; `x`/`y` is the signed
+ *       within-cell offset. The `stackState` flag is the loose kind
+ *       (`LOOSE_HEX/RECT`, `SNAP_HEX/RECT`).
+ *
+ *     (`microZone` u8 was removed — everything it held now lives in
+ *     `microLocation` + flags. Stacking is one flat root+index mechanism; see
+ *     `docs/micro_location_rewrite/`.) */
+
+const SEQ_SHIFT = 16n;
+const SEQ_MASK = 0xffffn;
+
+/** Packed `(time_ms_u48 << 16) | sequence_u16` matching the server's
+ *  u64 primary key. */
+export type ValidAt = bigint;
+
+/** Pack a `validAtMs` (u48) + `sequence` (u16) into the u64 PK. The
+ *  client mostly only reads this — the only writer is tests / mocks. */
+export function packValidAt(validAtMs: number, sequence: number): ValidAt {
+  return (BigInt(validAtMs) << SEQ_SHIFT) | (BigInt(sequence) & SEQ_MASK);
+}
+
+/** Extract the row's `validAt` (in absolute unix milliseconds) from
+ *  the packed u64 PK. The sequence portion is opaque and discarded. */
+export function validAtOf(packed: ValidAt): number {
+  return Number(packed >> SEQ_SHIFT);
+}
+
+/** Zone identifier — the full packed `macro_zone` u64
+ *  `[owner_card_id:u32 | surface:u8 | i12 | i12]`, as a `bigint` (the SDK wire
+ *  type). The single value identifies a zone (owner + surface + coords)
+ *  uniquely; it's `MacroZone.packed`. */
+export type ZoneId = bigint;
+
+/** Surface band for world zones. World `macroZone`s carry `WORLD_LAYER`
+ *  in bits 24-31 with owner `0`; inventory/card zones use a `surface < 64`. */
+export const WORLD_LAYER = 64;
+
+/** Surface band for per-soul inventory. `macro_zone` is the
+ *  owning soul card's `card_id`. The player's own inventory is just
+ *  the inventory of their `player_soul` card on this same band — there
+ *  is no separate player-inventory surface. */
+export const INVENTORY_LAYER = 1;
+
+/** Each macroZone covers a 7×7 block of hex positions (odd so the owner-origin
+ *  tile centres). Mirrors `ZONE_SIZE` in `codec/src/packed.rs`. */
+export const ZONE_SIZE = 7;
+
+/** The owner-origin world tile (0,0) sits at the zone's centre local cell (3,3),
+ *  not the (0,0) corner. Mirror of `TILE_CENTER` — consumers fold a tile coord as
+ *  `chunk*ZONE_SIZE + local − TILE_CENTER`. */
+export const TILE_CENTER = 3;
+
+/** Each region covers a 7×7 block of zones — 49 zones per region.
+ *  Mirrors `REGION_SIZE` in `codec/src/packed.rs`. */
+export const REGION_SIZE = 7;
+
+/** macro_zone→region-slot centering: macro_zone (0,0) lands at region centre slot
+ *  (3,3). Mirror of `REGION_CENTER`. */
+export const REGION_CENTER = 3;
+
+/** The decoded `macro_zone` a client row carries — the full packed `bigint`
+ *  key together with its unpacked parts, derived together so reads never
+ *  pack/unpack and it's clear when `packed` must be rebuilt (only via
+ *  [`makeMacroZone`]). Layout: `[owner:u32 | surface:u8 | i12 zoneQ | i12 zoneR]`.
+ *  - `packed`: the full u64 — the subscription / equality / `ZoneId` key.
+ *  - `owner`: the owning card_id (bits 32-63); `0` is the WORLD sentinel.
+ *  - `surface`: the band (bits 24-31).
+ *  - `zoneQ` / `zoneR`: tile-origin coords (chunk × `ZONE_SIZE`, signed) — read
+ *    as `(q, r)` or `(x, y)` per surface; `(0, 0)` for single-chunk surfaces. */
+export interface MacroZone {
+  packed: bigint;
+  owner: number;
+  surface: number;
+  zoneQ: number;
+  zoneR: number;
+}
+
+/** Decode the wire `macro_zone` (`u64` → SDK `bigint`) into a [`MacroZone`].
+ *  Mirrors `pack_macro_zone_full` / the accessors in `content/src/packed.rs`. */
+export function decodeMacroZone(packed: bigint): MacroZone {
+  const rawQ = Number((packed >> 12n) & 0xfffn);
+  const rawR = Number(packed & 0xfffn);
+  const chunkQ = rawQ >= 0x800 ? rawQ - 0x1000 : rawQ;
+  const chunkR = rawR >= 0x800 ? rawR - 0x1000 : rawR;
+  return {
+    packed,
+    owner: Number((packed >> 32n) & 0xffff_ffffn),
+    surface: Number((packed >> 24n) & 0xffn),
+    zoneQ: chunkQ * ZONE_SIZE,
+    zoneR: chunkR * ZONE_SIZE,
+  };
+}
+
+/** The single write helper — build a [`MacroZone`] from its parts, packing
+ *  `packed` in lockstep. `owner` is a card_id (`0` = WORLD); `zoneQ` / `zoneR`
+ *  are tile origins (folded to i12 chunk coords). Mirrors
+ *  `pack_macro_zone_full` in `content/src/packed.rs`. */
+export function makeMacroZone(
+  owner: number,
+  surface: number,
+  zoneQ: number,
+  zoneR: number,
+): MacroZone {
+  const chunkQ = Math.floor(zoneQ / ZONE_SIZE);
+  const chunkR = Math.floor(zoneR / ZONE_SIZE);
+  const packed =
+    (BigInt(owner >>> 0) << 32n) |
+    (BigInt(surface & 0xff) << 24n) |
+    (BigInt(chunkQ & 0xfff) << 12n) |
+    BigInt(chunkR & 0xfff);
+  return { packed, owner: owner >>> 0, surface: surface & 0xff, zoneQ, zoneR };
+}
+
+/** Map a `macro_zone` to its containing `(macroRegion, bit)`, where `bit`
+ *  (`0..48`) indexes the zone's slot in the region's 64-bit
+ *  presence/availability bitfields. Row-major over the region's 7×7 zones:
+ *  `bit = localR * REGION_SIZE + localQ`, with the [`REGION_CENTER`] shift so
+ *  macro_zone (0,0) → region (0,0) slot (3,3) = bit 24. `owner` / `surface` carry
+ *  through. Mirror of `codec/src/packed.rs::region_of_zone`. */
+export function regionOfZone(macroZone: bigint): { macroRegion: bigint; bit: number } {
+  const m = decodeMacroZone(macroZone);
+  // `m.zoneQ/zoneR` are tile origins (chunk × ZONE_SIZE); recover chunk indices.
+  const chunkQ = Math.floor(m.zoneQ / ZONE_SIZE);
+  const chunkR = Math.floor(m.zoneR / ZONE_SIZE);
+  // Shift by REGION_CENTER, then floor-div (matches Rust `div_euclid`); locals 0..6.
+  const sq = chunkQ + REGION_CENTER;
+  const sr = chunkR + REGION_CENTER;
+  const regionQ = Math.floor(sq / REGION_SIZE);
+  const regionR = Math.floor(sr / REGION_SIZE);
+  const localQ = sq - regionQ * REGION_SIZE;
+  const localR = sr - regionR * REGION_SIZE;
+  const bit = localR * REGION_SIZE + localQ;
+  // Pack region coords into the q/r field: makeMacroZone divides its zoneQ/zoneR
+  // by ZONE_SIZE internally, so feed `regionQ * ZONE_SIZE` to land regionQ there.
+  const macroRegion = makeMacroZone(m.owner, m.surface, regionQ * ZONE_SIZE, regionR * ZONE_SIZE).packed;
+  return { macroRegion, bit };
+}
+
+// ---- micro placement + flags (mirror of card_model.rs / flags.rs) -------
+//
+// A card's micro placement lives in `microLocation` (u32) + the `stack`/`index`
+// fields of the propagating `flags` word. Gated by the `stack` field (bits 0-3);
+// `stack === 0` is the loose sentinel:
+//   stack !== 0 → microLocation is a root card_id; branch = stack - 1, slot =
+//                 index (the card is a flat stack member).
+//   stack === 0 → microLocation is loose cell coords + within-cell offset
+//                 `[x:i12 (20-31) | y:i12 (8-19) | localQ:3 (5-7) | localR:3 (2-4) | rsvd:2]`;
+//                 the `index` field is unused (every surface is a uniform hex
+//                 cell; snapped-vs-free is render-only — a snapped card carries a
+//                 zero offset, so there is no loose "kind").
+//
+// Bit positions MUST match `resonantdust_data::flags` (the client mirrors them
+// by hand — "same change, same PR"). The three columns:
+//   flags    (u32) — propagating: state bits, placement (stack/index), holds.
+//   flagsBk  (u8)  — non-propagating dirty/preserve markers.
+//   stock    (u8)  — tile-card per-row stock slots (u2 each).
+
+const STACK_SHIFT = 0; // flags bits 0-3 (0 = loose sentinel)
+const STACK_MASK = 0xf << STACK_SHIFT;
+const INDEX_SHIFT = 4; // flags bits 4-7 (slot-in-stack; unused when loose)
+const INDEX_MASK = 0xf << INDEX_SHIFT;
+/** `flags` bit: card was generated from zone tile data. */
+export const ZONE_BORN = 1 << 29;
+/** `flags` placement mask (`stack` + `index`) — preserved/cleared together. */
+const PLACEMENT_MASK = STACK_MASK | INDEX_MASK;
+
+/** `branch` values for a stack member (stored as `stack - 1`). */
+export const STACK_DIR_HEX = 0;
+export const STACK_DIR_UP = 1;
+export const STACK_DIR_DOWN = 2;
+export const STACK_STATE_DEFERRED = 3;
+
+/** Max stack index (u4). Chains saturate here; placement fails over to loose. */
+export const MAX_STACK_INDEX = 15;
+
+// Stock byte (per-card tile stock): two u2 slots.
+const STOCK_SLOT_BITS = 2;
+const STOCK_SLOT_MASK = 0b11;
+/** Read tile-card per-row stock `slot` (0 or 1) from the `stock` byte. */
+export function cardStock(stock: number, slot: number): number {
+  return (stock >>> ((slot & 1) * STOCK_SLOT_BITS)) & STOCK_SLOT_MASK;
+}
+
+// Layout: [ x:i12 (20-31) | y:i12 (8-19) | localQ:u3 (5-7) | localR:u3 (2-4) | rsvd:u2 (0-1) ].
+const MICRO_LOOSE_X_SHIFT = 20;
+const MICRO_LOOSE_Y_SHIFT = 8;
+const MICRO_LOOSE_LQ_SHIFT = 5;
+const MICRO_LOOSE_LR_SHIFT = 2;
+
+function sx12(v: number): number {
+  const m = v & 0xfff;
+  return m & 0x800 ? m - 0x1000 : m;
+}
+
+/** Pack loose coords + within-cell offset into a `microLocation` (u32). */
+export function packMicroLoose(
+  localQ: number,
+  localR: number,
+  x: number,
+  y: number,
+): number {
+  return (
+    (((localQ & 0x7) << MICRO_LOOSE_LQ_SHIFT) |
+      ((localR & 0x7) << MICRO_LOOSE_LR_SHIFT) |
+      ((x & 0xfff) << MICRO_LOOSE_X_SHIFT) |
+      ((y & 0xfff) << MICRO_LOOSE_Y_SHIFT)) >>>
+    0
+  );
+}
+
+/** Inverse of [`packMicroLoose`]. Uses unsigned shifts so a high `localQ`
+ *  (bit 31 set) decodes correctly. */
+export function unpackMicroLoose(microLocation: number): {
+  localQ: number;
+  localR: number;
+  x: number;
+  y: number;
+} {
+  return {
+    localQ: (microLocation >>> MICRO_LOOSE_LQ_SHIFT) & 0x7,
+    localR: (microLocation >>> MICRO_LOOSE_LR_SHIFT) & 0x7,
+    x: sx12(microLocation >>> MICRO_LOOSE_X_SHIFT),
+    y: sx12(microLocation >>> MICRO_LOOSE_Y_SHIFT),
+  };
+}
+
+/** Read just the loose cell `(localQ, localR)` from a `microLocation`. */
+export function microLooseCell(microLocation: number): {
+  localQ: number;
+  localR: number;
+} {
+  return {
+    localQ: (microLocation >>> MICRO_LOOSE_LQ_SHIFT) & 0x7,
+    localR: (microLocation >>> MICRO_LOOSE_LR_SHIFT) & 0x7,
+  };
+}
+
+/** Raw `stack` field (0 = loose; nonzero = branch + 1) on `flags`. */
+function stackField(flags: number): number {
+  return (flags & STACK_MASK) >>> STACK_SHIFT;
+}
+/** `stack !== 0` test — microLocation is a root card_id (a stack member). */
+export function microIsCard(flags: number): boolean {
+  return stackField(flags) !== 0;
+}
+/** Stack `branch` value (`stack - 1`; 0 when loose). On `flags`. */
+export function stackBranch(flags: number): number {
+  const s = stackField(flags);
+  return s === 0 ? 0 : s - 1;
+}
+/** `index` field — slot-in-stack when stacked, loose kind when loose. On `flags`. */
+export function stackIndex(flags: number): number {
+  return (flags & INDEX_MASK) >>> INDEX_SHIFT;
+}
+/** `zone_born` flag test (on `flags`). */
+export function zoneBorn(flags: number): boolean {
+  return (flags & ZONE_BORN) !== 0;
+}
+
+/** A card's decoded micro placement — the client mirror of the server's
+ *  `Micro` enum. `stacked` = a flat stack member of `root`; `loose` = cell coords
+ *  + within-cell offset. Every surface is a uniform hex cell; snapped-vs-free is
+ *  render-only (a snapped card carries a zero offset), so there is no `looseKind`.
+ *  Decode with [`decodeMicro`]; rebuild `(microLocation, flags)` with
+ *  [`applyMicro`]. */
+export type Micro =
+  | { kind: "stacked"; root: number; branch: number; index: number }
+  | { kind: "loose"; localQ: number; localR: number; x: number; y: number };
+
+/** Decode a row's `(microLocation, flags)` into a [`Micro`]. */
+export function decodeMicro(microLocation: number, flags: number): Micro {
+  if (microIsCard(flags)) {
+    return {
+      kind: "stacked",
+      root: microLocation >>> 0,
+      branch: stackBranch(flags),
+      index: stackIndex(flags),
+    };
+  }
+  const { localQ, localR, x, y } = unpackMicroLoose(microLocation);
+  return { kind: "loose", localQ, localR, x, y };
+}
+
+/** Rebuild `(microLocation, flags)` for a [`Micro`], preserving the non-placement
+ *  bits of `baseFlags` (state bits + hold counts). The single write helper —
+ *  mirror of the server's `Micro::apply`. Stack members store `branch + 1` so the
+ *  `stack === 0` loose sentinel stays distinct; loose leaves `index` clear. */
+export function applyMicro(
+  micro: Micro,
+  baseFlags: number,
+): { microLocation: number; flags: number } {
+  let flags = baseFlags & ~PLACEMENT_MASK;
+  if (micro.kind === "stacked") {
+    flags |=
+      (((micro.branch & 0xf) + 1) << STACK_SHIFT) |
+      ((micro.index & 0xf) << INDEX_SHIFT);
+    return { microLocation: micro.root >>> 0, flags: flags >>> 0 };
+  }
+  // Loose: stack stays 0 (sentinel); `index` left clear.
+  return {
+    microLocation: packMicroLoose(micro.localQ, micro.localR, micro.x, micro.y),
+    flags: flags >>> 0,
+  };
+}

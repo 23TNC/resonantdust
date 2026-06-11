@@ -1,0 +1,4 @@
+# Large binary texture atlases (LOD + future render maps) go through git-LFS so
+# the main repo history stays lean. Scoped to view/public/textures; fonts (.ttf)
+# and the favicon stay as regular blobs (small).
+public/textures/**/*.png filter=lfs diff=lfs merge=lfs -text
