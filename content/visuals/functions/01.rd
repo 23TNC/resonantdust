@@ -47,14 +47,13 @@
     @define>
       $globals::card_height $globals::cell_margin 2 mul add &value set
 
-  ; world hex cell — pointy-top, derived from the CARD so cards intersect the
-  ; hexagon (not float in an oversized one). The hex inscribes a card-sized rect
-  ; (card_width wide × card_width + 2·title_height tall = 72×120); for a pointy-
-  ; top hex inscribing W×H (H>R), R = W/(2√3) + H/2 ≈ 80.78. width = √3·r,
-  ; height = 2·r (matches the client WORLD_HEX_RADIUS in hexSize.ts — keep synced).
+  ; world hex cell — pointy-top, fixed display radius of 86 (up from the
+  ; card-inscribed ≈80.78). The hex runs slightly larger than the 72×120 card it
+  ; hosts, so cards sit comfortably inside it. width = √3·r, height = 2·r
+  ; (matches the client WORLD_HEX_RADIUS in hexSize.ts — keep synced).
   ::hex_radius>
     @define>
-      $globals::card_width 2 3 sqrt mul div $globals::card_width $globals::title_height 2 mul add 2 div add &value set
+      86 &value set
   ::hex_width>
     @define>
       $globals::hex_radius 3 sqrt mul &value set

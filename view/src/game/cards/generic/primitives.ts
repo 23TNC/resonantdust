@@ -1,6 +1,8 @@
 import { BitmapText, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { TEXT_BAKE_PX, TEXT_FONT } from "../../../assets/fonts";
 import type { LodTextureManager } from "../../../assets/textures/LodTextureManager";
+import type { DeferredLighting } from "../../lighting/DeferredLighting";
+import { LitSprite } from "../../lighting/LitSprite";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
 import { resolveAsset } from "./resolveAsset";
 import type { AnimatableFields, PrimKind, VisualNode } from "./visualSpec";
@@ -17,6 +19,10 @@ const TINT_EPS = 1.5;
 /** Shared deps a primitive needs to resolve itself. */
 export interface PrimDeps {
   lod: LodTextureManager;
+  /** Viewport deferred lighting. Textured prims (`rect`/`hex`/`sprite`) are
+   *  `LitSprite`s registered here so the deferred normal pass can reach them;
+   *  the system scopes lights to this viewport. */
+  deferred: DeferredLighting;
   /** Atlas-packed white texture for solid fills — tinted to any colour. MUST
    *  live in the same atlas as the art so fills batch with sprites (Pixi's
    *  global `Texture.WHITE` is a separate page and would break the batch). */
@@ -149,28 +155,30 @@ abstract class BasePrim implements Primitive {
 /** `rect` / `hex` — a solid (or textured) fill via a tinted Sprite. A white
  *  texture × tint gives any colour without a Graphics batch break. */
 export class FillPrim extends BasePrim {
-  readonly node: Sprite;
+  readonly node: LitSprite;
   constructor(readonly kind: "rect" | "hex", private readonly deps: PrimDeps) {
     super();
-    this.node = new Sprite(deps.whiteTexture);
+    this.node = new LitSprite(deps.deferred, deps.whiteTexture);
     if (kind === "hex") {
-      if (deps.hexTexture) this.node.texture = deps.hexTexture;
+      if (deps.hexTexture) this.node.setTextures(deps.hexTexture, null);
       else hexFallbackWarn();
     }
   }
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
     // Texture BEFORE setSize (Pixi 8: a 1×1 `orig` pins scale to literal px
-    // otherwise). A textured fill swaps the base texture here.
+    // otherwise). A textured fill swaps the base texture here; the atlas fills
+    // (white / hex) have no normal map, so the lit shader uses the flat-up
+    // fallback and they get distance falloff + ambient only.
     if (n.texture) {
       const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
         dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
       });
-      this.node.texture = r.texture;
+      this.node.setTextures(r.texture, r.normal);
     } else if (this.kind === "hex" && this.deps.hexTexture) {
-      this.node.texture = this.deps.hexTexture;
+      this.node.setTextures(this.deps.hexTexture, null);
     } else {
-      this.node.texture = this.deps.whiteTexture;
+      this.node.setTextures(this.deps.whiteTexture, null);
     }
     setAnchor(this.node, n);
   }
@@ -189,10 +197,11 @@ export class FillPrim extends BasePrim {
  *  the scale that draws it at the requested CSS size. */
 export class SpritePrim extends BasePrim {
   readonly kind = "sprite" as const;
-  readonly node = new Sprite();
+  readonly node: LitSprite;
   private baseScale = 1;
   constructor(private readonly deps: PrimDeps) {
     super();
+    this.node = new LitSprite(deps.deferred);
   }
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
@@ -204,7 +213,7 @@ export class SpritePrim extends BasePrim {
     const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
       dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
     });
-    this.node.texture = r.texture;
+    this.node.setTextures(r.texture, r.normal);
     this.baseScale = r.scale;
     setAnchor(this.node, n);
   }
@@ -346,7 +355,7 @@ export class MaskPrim extends BasePrim {
   }
 }
 
-function setAnchor(node: Sprite | BitmapText, n: VisualNode): void {
+function setAnchor(node: Sprite | BitmapText | LitSprite, n: VisualNode): void {
   const ax = (n.anchor?.x ?? 0) / 100;
   const ay = (n.anchor?.y ?? 0) / 100;
   node.anchor.set(ax, ay);

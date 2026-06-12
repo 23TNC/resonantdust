@@ -1,18 +1,15 @@
-/** Size at which world hex tiles (and hex cards placed on world hexes)
- *  are *displayed*.
+import { global } from "../../definitions/globals";
+
+/** Size at which world hex tiles (and hex cards placed on world hexes) are
+ *  *displayed*, read from the gate-served DSL `<globals>` (`hex_radius` /
+ *  `hex_width` / `hex_height`) — the SAME numbers the DSL itself draws the hex
+ *  body from. This is deliberately not a hardcoded constant: the radius lives in
+ *  exactly one place (the content global), so the tile spacing (client) and the
+ *  tile body (DSL) can never drift. Width = √3·r, height = 2·r, matching the DSL
+ *  `hex_width`/`hex_height` derivations in `content/visuals/functions/01.rd`.
  *
- *  Derived from the card so cards intersect the hexagon rather than floating in
- *  an oversized one: the hex is sized so its inscribed rectangle is
- *  `BODY_WIDTH × (BODY_WIDTH + 2·TITLE_HEIGHT)` = 72×120 (matching the DSL
- *  `hex_radius` global in `content/visuals/functions/01.rd`). For a pointy-top
- *  hex inscribing a W×H rect with H > R, the rect's top/bottom corners sit on
- *  the sloped caps where half-width = √3·(R − H/2), so W = 2√3·(R − H/2) ⇒
- *  `R = W/(2√3) + H/2` ≈ 80.78 (down from the old hardcoded 96). Keep in sync
- *  with the DSL global. */
-const BODY_WIDTH = 72;    // = globals card_width / body_width
-const TITLE_HEIGHT = 24;  // = globals title_height
-const INSCRIBE_W = BODY_WIDTH;
-const INSCRIBE_H = BODY_WIDTH + 2 * TITLE_HEIGHT;
-export const WORLD_HEX_RADIUS = INSCRIBE_W / (2 * Math.sqrt(3)) + INSCRIBE_H / 2;
-export const WORLD_HEX_WIDTH  = Math.sqrt(3) * WORLD_HEX_RADIUS;
-export const WORLD_HEX_HEIGHT = WORLD_HEX_RADIUS * 2;
+ *  Call these after `initGlobals()` — i.e. anywhere in the world scene; login
+ *  loads the content runtime before entering it. */
+export const worldHexRadius = (): number => global("hex_radius");
+export const worldHexWidth = (): number => global("hex_width");
+export const worldHexHeight = (): number => global("hex_height");

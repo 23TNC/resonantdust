@@ -3,6 +3,7 @@ import type { GameContext } from "../../../GameContext";
 import { global } from "../../definitions/globals";
 import { cardBox } from "./cardBox";
 import { atlasHex, atlasWhite } from "./atlasFills";
+import { DeferredLighting } from "../../lighting/DeferredLighting";
 import { PrimitiveLayer } from "./PrimitiveLayer";
 import type { PrimDeps } from "./primitives";
 import { drawVisuals, type HostValue, type VisualHost } from "./drawVisuals";
@@ -35,6 +36,8 @@ export class GenericCardFace extends Container {
     super();
     this.deps = {
       lod: ctx.lodTextures,
+      // Offline preview → plain albedo (never goes through the deferred passes).
+      deferred: DeferredLighting.offline(),
       whiteTexture: atlasWhite(ctx.textures, ctx.app.renderer),
       hexTexture: atlasHex(ctx.textures, ctx.app.renderer),
       seed,

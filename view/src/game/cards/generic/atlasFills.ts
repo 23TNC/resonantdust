@@ -1,7 +1,7 @@
 import { Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
 import type { TextureManager } from "../../../assets/textures/TextureManager";
 import { hexPoints } from "../../viewport/hex/HexTileVisual";
-import { WORLD_HEX_RADIUS } from "../../viewport/hex/hexSize";
+import { worldHexRadius } from "../../viewport/hex/hexSize";
 
 /**
  * Atlas-packed fill textures for the generic primitives. These MUST come from
@@ -40,7 +40,8 @@ function renderAndPack(
   const rt = RenderTexture.create({ width: w + BAKE_PADDING * 2, height: h + BAKE_PADDING * 2 });
   renderer.render({ container: g, target: rt, clear: true });
   g.destroy();
-  const packed = textures.pack(rt);
+  // Colour-only fill — no normal source, so the normal page is untouched.
+  const packed = textures.pack(rt).albedo;
   rt.destroy(true);
   return new Texture({
     source: packed.source,
@@ -59,14 +60,14 @@ export function atlasWhite(textures: TextureManager, renderer: Renderer): Textur
 }
 
 /** Atlas-packed white pointy-top hex mask, for `hex` fills (tinted). Baked at
- *  `WORLD_HEX_RADIUS` (the largest hex display size) so it's never upscaled,
+ *  `worldHexRadius()` (the largest hex display size) so it's never upscaled,
  *  using the same `hexPoints` geometry as the legacy hex bake. A `FillPrim`
  *  setSize-stretches it to the card's box, so the mask's native aspect
  *  (√3·r × 2r) is the proportion a hex card's primitive should request. */
 export function atlasHex(textures: TextureManager, renderer: Renderer): Texture {
   const cached = hexCache.get(textures);
   if (cached) return cached;
-  const r = WORLD_HEX_RADIUS;
+  const r = worldHexRadius();
   const w = Math.ceil(Math.sqrt(3) * r);
   const h = Math.ceil(2 * r);
   const g = new Graphics().poly(hexPoints(w / 2, h / 2, r)).fill({ color: 0xffffff });

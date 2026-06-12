@@ -85,8 +85,27 @@ class Atlas {
 }
 
 interface PhysicalPage {
-  texture: RenderTexture;
+  /** Albedo (colour) page — the source every sprite renders from today. */
+  albedo: RenderTexture;
+  /** Parallel normal-map page, identical dimensions to `albedo` and sharing
+   *  this page's `atlases` allocators, so a slot maps to the same (x, y) in
+   *  both. Created lazily on the first normal bake — a page whose sprites
+   *  have no normal map never allocates the second GL texture. */
+  normal: RenderTexture | null;
   atlases: Atlas[];
+}
+
+/**
+ * One packed slot, exposed as a frame into the albedo page plus the matching
+ * frame into the parallel normal page. `albedo` and `normal` share identical
+ * `frame` rectangles (same slot) and differ only in their backing source, so a
+ * lighting shader samples both at the same UVs. `normal` is null when the pack
+ * had no normal source (UI fills, the white fallback, or art whose normal map
+ * hasn't been generated yet).
+ */
+export interface PackedPair {
+  readonly albedo: Texture;
+  readonly normal: Texture | null;
 }
 
 /**
@@ -102,14 +121,18 @@ interface PhysicalPage {
  *   quadtree state, and each allocation is local to a single atlas.
  *
  * Usage:
- *   const packed = textures.pack(sourceTexture);
- *   sprite.texture = packed;
+ *   const { albedo, normal } = textures.pack(albedoTexture, normalTexture);
+ *   sprite.texture = albedo; // normal feeds the lighting pass at the same frame
  *
- * The returned Texture's `frame` matches the source's native pixel
+ * Each pack allocates ONE slot shared by the albedo and normal pages, so the
+ * two returned frames are byte-identical rectangles into parallel atlases. The
+ * `normal` source is optional — pass nothing for colour-only fills and `normal`
+ * comes back null. The returned frames match the source's native pixel
  * dimensions placed at the slot's top-left, so the sprite draws at the
  * original size with no distortion. The slot itself is rounded up to
  * `nextPow2(max(width, height))`; any unused area inside that slot is
- * wasted but harmless.
+ * wasted but harmless. Albedo and normal sources must share dimensions (the
+ * slot is sized from the albedo).
  *
  * No deduplication and no eviction — every pack call consumes a fresh
  * slot for the lifetime of the manager.
@@ -143,14 +166,15 @@ export class TextureManager {
   }
 
   /**
-   * Pack `source` into the atlas pool and return a sub-Texture pointed
-   * at the slot. The returned Texture's frame matches the source's
-   * native (width × height), positioned at the slot's top-left within
-   * the backing physical texture.
+   * Pack `albedo` (and optionally its `normal`) into the atlas pool and return
+   * the matching frames. One slot is allocated and used for both pages, so the
+   * returned `albedo`/`normal` frames are identical rectangles into parallel
+   * atlases. `normal` comes back null when no normal source is given. Frames
+   * match the albedo's native (width × height) at the slot's top-left.
    */
-  pack(source: Texture): Texture {
-    const w = source.width;
-    const h = source.height;
+  pack(albedo: Texture, normal: Texture | null = null): PackedPair {
+    const w = albedo.width;
+    const h = albedo.height;
     const slotSize = nextPow2(Math.max(w, h));
     if (slotSize > ATLAS_SIZE) {
       throw new Error(
@@ -163,26 +187,56 @@ export class TextureManager {
     for (const page of this.pages) {
       for (const atlas of page.atlases) {
         const slot = atlas.alloc(slotSize);
-        if (slot) return this.bake(source, w, h, slot, page.texture);
+        if (slot) return this.bake(albedo, normal, w, h, slot, page);
       }
     }
 
     const created = this.createAtlas();
     const slot = created.atlas.alloc(slotSize)!;
-    return this.bake(source, w, h, slot, created.page.texture);
+    return this.bake(albedo, normal, w, h, slot, created.page);
   }
 
   destroy(): void {
-    for (const page of this.pages) page.texture.destroy(true);
+    for (const page of this.pages) {
+      page.albedo.destroy(true);
+      page.normal?.destroy(true);
+    }
     this.pages.length = 0;
   }
 
   private bake(
-    source: Texture,
+    albedo: Texture,
+    normal: Texture | null,
     w: number,
     h: number,
     slot: { x: number; y: number },
+    page: PhysicalPage,
+  ): PackedPair {
+    const albedoFrame = this.renderInto(albedo, slot, page.albedo, w, h);
+    let normalFrame: Texture | null = null;
+    if (normal) {
+      // Lazily stand up the parallel normal page at the same dimensions the
+      // first time this page bakes a normal — the shared allocator already
+      // reserved this slot, so the frame lines up with the albedo.
+      if (!page.normal) {
+        page.normal = RenderTexture.create({
+          width: page.albedo.width,
+          height: page.albedo.height,
+        });
+      }
+      normalFrame = this.renderInto(normal, slot, page.normal, w, h);
+    }
+    return { albedo: albedoFrame, normal: normalFrame };
+  }
+
+  /** Draw one `source` into `target` at `slot` and return a frame over the
+   *  baked region. Shared by the albedo and normal bakes. */
+  private renderInto(
+    source: Texture,
+    slot: { x: number; y: number },
     target: RenderTexture,
+    w: number,
+    h: number,
   ): Texture {
     const sprite = new Sprite(source);
     sprite.position.set(slot.x, slot.y);
@@ -205,8 +259,8 @@ export class TextureManager {
     }
 
     const size = this.maxTextureSize;
-    const texture = RenderTexture.create({ width: size, height: size });
-    const page: PhysicalPage = { texture, atlases: [] };
+    const albedo = RenderTexture.create({ width: size, height: size });
+    const page: PhysicalPage = { albedo, normal: null, atlases: [] };
     this.pages.push(page);
     const atlas = new Atlas(0, 0);
     page.atlases.push(atlas);
@@ -214,7 +268,7 @@ export class TextureManager {
   }
 
   private findFreeAtlasSlot(page: PhysicalPage): { x: number; y: number } | null {
-    const { width, height } = page.texture;
+    const { width, height } = page.albedo;
     for (let y = 0; y + ATLAS_SIZE <= height; y += ATLAS_SIZE) {
       for (let x = 0; x + ATLAS_SIZE <= width; x += ATLAS_SIZE) {
         const taken = page.atlases.some((a) => a.originX === x && a.originY === y);

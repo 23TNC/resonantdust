@@ -5,10 +5,12 @@ import {
   pickLodForSize,
   lodsDescendingFrom,
   urlAtLod,
+  albedoUrlFor,
+  normalUrlFor,
   LOD_SIZES,
   MIN_LOD,
 } from "../lodUrls";
-import type { TextureManager } from "./TextureManager";
+import type { PackedPair, TextureManager } from "./TextureManager";
 import { debug } from "../../debug";
 
 /** Pixels trimmed off each side of a packed texture's frame.
@@ -30,12 +32,17 @@ const DEFAULT_QUALITY_CAP = 1024;
  * LOD-aware lazy loader, picker, and per-URL atlas cache for every
  * sprite the runtime renders.
  *
- * Folder convention: `pixijs/public/textures/lod/<lodSize>/<aspect>/
- * <faction>/<N>.png`. The `art remaster <aspect>` tool generates
- * `<N>.png` at every LOD bucket the master source can cover (an
- * aspect with a small master might only ship the 64 bucket;
- * `flowers` is the canonical example today). Mirrored 1:1, so an
- * `index: 3` reference picks the same variant at any LOD.
+ * Folder convention: `view/public/textures/lod/<lodSize>/<aspect>/
+ * <faction>/<N>.png`. The `art` tool generates `<N>.png` (the lit
+ * diffuse) at every LOD bucket the master source can cover (an aspect
+ * with a small master might only ship the 64 bucket; `flowers` is the
+ * canonical example today), plus optional `<N>.albedo.png` (de-lit
+ * colour) and `<N>.normal.png` (normal map) siblings. Mirrored 1:1, so
+ * an `index: 3` reference picks the same variant at any LOD. Each
+ * variant loads as an albedo+normal pair (see `load`): the albedo
+ * channel is `<N>.albedo.png` when present, else `<N>.png`; the normal
+ * is `<N>.normal.png` or null. Sprites render the albedo today; the
+ * normal frame is reserved for the lighting pass.
  *
  * **`aspect.size` is the *desired draw size* in screen px at
  * scale 1.0**, not the source resolution. The manager picks the
@@ -81,12 +88,15 @@ export class LodTextureManager {
   /** Cap on the LOD bucket the picker will select even when
    *  `desiredSize` would resolve higher. See `DEFAULT_QUALITY_CAP`. */
   private readonly qualityCap: number;
-  /** Atlas-packed Texture keyed by source URL. One entry per
-   *  actually-rendered variant — a 256 and a 512 of the same
-   *  aspect are two cache entries. Stable map: a URL's Texture is
-   *  set once and never reassigned, so callers can hold the
-   *  reference across frames. */
-  private readonly byUrl = new Map<string, Texture>();
+  /** Atlas-packed albedo+normal pair keyed by the *variant* URL
+   *  (`<N>.png`). One entry per actually-rendered variant — a 256
+   *  and a 512 of the same aspect are two cache entries. `pair.albedo`
+   *  is what sprites render today; `pair.normal` is the same frame in
+   *  the parallel normal atlas (null until the aspect has a normal
+   *  map), reserved for the lighting pass. Stable map: a URL's pair is
+   *  set once and never reassigned, so callers can hold the reference
+   *  across frames. */
+  private readonly byUrl = new Map<string, PackedPair>();
   /** URLs whose `Assets.load` is in-flight. Prevents redundant
    *  loads when several `get` calls for the same variant happen
    *  between the first call and the load resolving. Cleared in
@@ -166,6 +176,22 @@ export class LodTextureManager {
     index?: number,
     faction?: string,
   ): Texture {
+    return this.getPair(aspect, desiredSize, seed, index, faction).albedo;
+  }
+
+  /** Like {@link get}, but returns the albedo + normal pair for the resolved
+   *  variant — the normal frame sits at the SAME atlas slot/frame as the
+   *  albedo (or null when the aspect has no normal map). The lighting pass
+   *  binds `normal` alongside `albedo`; everything else uses `get`. Same
+   *  picker + substitute + white-fallback cascade (white/substitute pairs
+   *  carry a null normal). */
+  getPair(
+    aspect: string,
+    desiredSize: number,
+    seed: number,
+    index?: number,
+    faction?: string,
+  ): PackedPair {
     const cap = Math.min(desiredSize, this.qualityCap);
     const idealLod = pickLodForSize(cap);
 
@@ -209,7 +235,7 @@ export class LodTextureManager {
       idealUrl = pickVariantUrl(urls, seed, index);
       break;
     }
-    if (idealUrl === null) return this.ensureWhiteFallback();
+    if (idealUrl === null) return this.whitePair();
 
     // Ideal URL is on disk. Cache hit fast path.
     const cached = this.byUrl.get(idealUrl);
@@ -221,8 +247,12 @@ export class LodTextureManager {
       this.loading.add(idealUrl);
       void this.load(idealUrl);
     }
-    const substitute = this.findCachedSubstitute(idealUrl);
-    return substitute ?? this.ensureWhiteFallback();
+    return this.findCachedSubstitute(idealUrl) ?? this.whitePair();
+  }
+
+  /** The white-fallback frame as a normal-less pair. */
+  private whitePair(): PackedPair {
+    return { albedo: this.ensureWhiteFallback(), normal: null };
   }
 
   /** Best already-cached LOD for the same `(aspect, faction,
@@ -231,7 +261,7 @@ export class LodTextureManager {
    *  upscaling a 64 to 256 is the worse end of the trade). Returns
    *  `null` when no LOD bucket for this variant is in the cache.
    *  String-replace + Map lookup per bucket — O(LOD_SIZES.length). */
-  private findCachedSubstitute(idealUrl: string): Texture | null {
+  private findCachedSubstitute(idealUrl: string): PackedPair | null {
     for (let i = LOD_SIZES.length - 1; i >= 0; i--) {
       const candidate = urlAtLod(idealUrl, LOD_SIZES[i]);
       const cached = this.byUrl.get(candidate);
@@ -252,7 +282,7 @@ export class LodTextureManager {
     const rt = RenderTexture.create({ width: MIN_LOD, height: MIN_LOD });
     this.renderer.render({ container: g, target: rt, clear: true });
     g.destroy();
-    const atlas = this.textures.pack(rt);
+    const atlas = this.textures.pack(rt).albedo;
     rt.destroy(true);
     this.whiteFallback = atlas;
     return atlas;
@@ -265,12 +295,28 @@ export class LodTextureManager {
   }
 
   private async load(url: string): Promise<void> {
+    let loaded = false;
     try {
-      await Assets.load(url);
-      const src = Assets.get<Texture>(url);
-      if (!src) return;
-      const atlas = this.textures.pack(src);
-      this.byUrl.set(url, insetFrame(atlas, FRAME_INSET));
+      // `url` is the variant (`<N>.png`). Load its albedo channel (the de-lit
+      // `<N>.albedo.png` when present, else this lit `<N>.png`) and, alongside
+      // it, the optional `<N>.normal.png`. Both pack into one shared slot so
+      // their frames line up for the lighting pass; the normal is null until
+      // the aspect's map is generated.
+      const albedoUrl = albedoUrlFor(url);
+      const normalUrl = normalUrlFor(url);
+      await Promise.all([
+        Assets.load(albedoUrl),
+        normalUrl ? Assets.load(normalUrl) : Promise.resolve(),
+      ]);
+      const albedoSrc = Assets.get<Texture>(albedoUrl);
+      if (!albedoSrc) return;
+      const normalSrc = normalUrl ? Assets.get<Texture>(normalUrl) ?? null : null;
+      const packed = this.textures.pack(albedoSrc, normalSrc);
+      this.byUrl.set(url, {
+        albedo: insetFrame(packed.albedo, FRAME_INSET),
+        normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
+      });
+      loaded = true;
     } catch (err) {
       // Callers `void this.load(...)` (fire-and-forget). The `void` discards
       // the return value but does NOT handle a rejection — without this catch
@@ -283,36 +329,27 @@ export class LodTextureManager {
       debug.warn(["lod"], `[lod] failed to load ${url}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.loading.delete(url);
-      for (const cb of this.listeners) cb();
     }
+    // Notify listeners ONLY on success — a new texture is in the cache, so a
+    // consumer holding a substitute can re-resolve to the upgrade. Firing on
+    // failure too would let an onLoad-driven re-resolve immediately re-kick a
+    // persistently-failing URL every frame.
+    if (loaded) for (const cb of this.listeners) cb();
   }
 }
 
-/** Pick one URL from a (sorted) variant list. `index` set → match
- *  `<index>.png` exactly, fall through to the seed pick when the
- *  named variant isn't in the list. `index` unset → deterministic
- *  pseudo-random `seed % length`. */
+/** Pick one URL from the natural-sorted variant list. `index` set → the i-th
+ *  sprite, ONE-BASED (index 1 = the first sprite), wrapped into range — so it's
+ *  invariant to the filename scheme (`<N>.png`, `<sheet>_<idx>.albedo.png`, …)
+ *  and to how many channel maps each sprite carries. `index` unset →
+ *  deterministic `seed % length`. The list is already one-entry-per-sprite (see
+ *  `lodUrlsFor` / `VARIANT_SET`), so position IS the sprite number. */
 function pickVariantUrl(urls: readonly string[], seed: number, index?: number): string {
   if (index !== undefined) {
-    const match = urls.find(url => urlMatchesIndex(url, index));
-    if (match) return match;
+    const zero = (((index - 1) % urls.length) + urls.length) % urls.length;
+    return urls[zero];
   }
   return urls[(seed >>> 0) % urls.length];
-}
-
-/** Match an integer index against a variant URL's basename. The
- *  folder already encodes lod / aspect / faction (e.g.
- *  `lod/256/alter/chorus/5.png`) so the basename is purely a variant
- *  selector: `<N>.png`. Matching by filename (not list position)
- *  keeps an `index: 5` reference stable as unrelated files are
- *  added or removed from the same folder. */
-function urlMatchesIndex(url: string, index: number): boolean {
-  const slash = url.lastIndexOf("/");
-  const basename = slash >= 0 ? url.slice(slash + 1) : url;
-  if (!basename.toLowerCase().endsWith(".png")) return false;
-  const stem = basename.slice(0, -4);
-  if (!/^\d+$/.test(stem)) return false;
-  return parseInt(stem, 10) === index;
 }
 
 function insetFrame(tex: Texture, inset: number): Texture {

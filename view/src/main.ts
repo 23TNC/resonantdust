@@ -35,6 +35,9 @@ async function main(): Promise<void> {
     antialias: true,
     autoDensity: true,
     resolution: window.devicePixelRatio || 1,
+    // The normal-mapped lighting shader (LitSprite) is composed as a GLSL-only
+    // high-shader program, so force WebGL until a WGSL variant exists.
+    preference: "webgl",
   });
   const host = document.getElementById("app");
   if (!host) throw new Error("#app element not found");

@@ -17,6 +17,10 @@ import type { AssetRef } from "./visualSpec";
  */
 export interface AssetResolution {
   texture: Texture;
+  /** Normal-map frame at the SAME atlas slot as `texture`, or null when the
+   *  resolved variant has no normal map (white fallback, or art without one).
+   *  Fed to the lighting shader; null → the lit prim uses a flat-up normal. */
+  normal: Texture | null;
   /** Multiply onto `sprite.scale` to draw `tex` at the requested CSS size. */
   scale: number;
 }
@@ -37,7 +41,7 @@ export function resolveAsset(
   opts: ResolveOpts,
 ): AssetResolution {
   const desired = Math.max(1, footprintCssPx * opts.dpr);
-  const texture = lod.get(ref.name, desired, opts.seed ?? 0, ref.index, opts.faction);
+  const { albedo, normal } = lod.getPair(ref.name, desired, opts.seed ?? 0, ref.index, opts.faction);
   const variance = opts.variance ?? 1;
-  return { texture, scale: (footprintCssPx / texture.width) * variance };
+  return { texture: albedo, normal, scale: (footprintCssPx / albedo.width) * variance };
 }

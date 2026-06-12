@@ -34,6 +34,16 @@ const FLOOR_BAND = -1e7;
 export class PrimitiveLayer extends Container {
   private prims: Primitive[] = [];
   private box: CardBox;
+  /** The last spec drawn — kept so `refreshTextures` can re-resolve art (e.g.
+   *  when a higher LOD finishes loading) without re-running the DSL. */
+  private lastList: PrimList | null = null;
+  /** The variant-picker inputs (`deps.seed` / `deps.faction`) ACTIVE at the
+   *  last `draw`. `deps` is shared and the host mutates `seed`/`faction` per
+   *  build, so `refreshTextures` must restore these before re-resolving —
+   *  otherwise it picks the variant for whatever was drawn most recently
+   *  (collapsing every layer onto one texture). */
+  private drawSeed = 0;
+  private drawFaction: string | undefined = undefined;
   /** Where reconciled prim nodes are parented.
    *  - `null` (default): self-mounted — nodes are children of this container and
    *    z-order follows spec order via `setChildIndex`. The card case: a card is
@@ -63,6 +73,9 @@ export class PrimitiveLayer extends Container {
   /** Reconcile to a new target spec. Newly-created primitives seed `current`
    *  (from `enter` or target); existing ones get the new target and ease. */
   draw(list: PrimList): void {
+    this.lastList = list;
+    this.drawSeed = this.deps.seed;
+    this.drawFaction = this.deps.faction;
     const parent = this.mountTarget ?? this;
     for (let i = 0; i < list.length; i++) {
       const node = list[i];
@@ -121,6 +134,25 @@ export class PrimitiveLayer extends Container {
       this.mask = maskPrim ? maskPrim.node : null;
     }
     this.animating = true;
+  }
+
+  /** Re-resolve each primitive's art against the last-drawn spec, without
+   *  re-running the DSL or reconciling. Used when a higher-LOD texture finishes
+   *  loading: `resolveAsset` now returns the cached upgrade, so re-applying the
+   *  same spec node swaps the substitute (e.g. 64px) for the ideal LOD in place
+   *  (position/ease untouched — `applyDiscrete` only re-reads the texture). */
+  refreshTextures(): void {
+    const list = this.lastList;
+    if (!list) return;
+    // Restore the variant-picker inputs this layer was drawn with — `deps` is
+    // shared and mutated per build, so re-resolving with the live values would
+    // pick a DIFFERENT variant (every layer collapsing onto whatever was built
+    // last). With these restored, re-resolve returns the SAME variant, only at
+    // the now-cached higher LOD.
+    this.deps.seed = this.drawSeed;
+    this.deps.faction = this.drawFaction;
+    const n = Math.min(this.prims.length, list.length);
+    for (let i = 0; i < n; i++) this.prims[i].update(list[i], this.box);
   }
 
   /** Advance every primitive one layout step. Returns true while any is still

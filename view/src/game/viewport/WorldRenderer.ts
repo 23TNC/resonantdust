@@ -1,8 +1,9 @@
-import { Container, Graphics, Point, Text } from "pixi.js";
+import { Container, Graphics, Point, Sprite, Text, type FederatedPointerEvent } from "pixi.js";
 import type { GameContext } from "../../GameContext";
+import { DeferredLighting } from "../lighting/DeferredLighting";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
-import { WORLD_HEX_RADIUS, WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT } from "./hex/hexSize";
+import { worldHexRadius, worldHexWidth, worldHexHeight } from "./hex/hexSize";
 import { HexTileVisual, hexPoints } from "./hex/HexTileVisual";
 import { PrimitiveLayer } from "../cards/generic/PrimitiveLayer";
 import type { PrimDeps } from "../cards/generic/primitives";
@@ -134,8 +135,20 @@ export class WorldRenderer extends LayoutNode {
   private readonly tileLayer = new Container();
   private readonly sortLayer = new Container();
   private readonly cardLayer = new Container();
-  private readonly grid = new HexMath(WORLD_HEX_RADIUS);
+  private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
+  /** This viewport's deferred lighting (world-space, scoped here). Owns the
+   *  lit-sprite registry + lights; the normal/light/composite passes land in
+   *  later phases. Fed the cursor each pointer move. */
+  private readonly deferred = new DeferredLighting();
+  private readonly onCursorMove: (e: FederatedPointerEvent) => void;
+  /** Phase 3: the light accumulation buffer, multiplied over the albedo. */
+  private readonly lightOverlay = new Sprite();
+  /** Set when any LOD texture finishes loading; the next `tick` re-resolves
+   *  present tiles/cards so substitutes (64px) swap up to the ideal LOD. Many
+   *  load events coalesce into one re-resolve per frame. */
+  private texturesDirty = false;
+  private readonly unsubLod: () => void;
 
   private anchorQ: number;
   private anchorR: number;
@@ -185,15 +198,41 @@ export class WorldRenderer extends LayoutNode {
     this.cardLayer.sortableChildren = true;
     this.panLayer.addChild(this.tileLayer, this.sortLayer, this.cardLayer, this.selectionGfx);
     this.container.addChild(this.panLayer);
+    // Phase 3: the light buffer, multiplied over the albedo. A sibling of
+    // panLayer (not captured by the normal/albedo passes), in content-local
+    // space — same setup as the (now-removed) phase-2 debug overlay that proved
+    // alignment, but BlendMode multiply so it shades rather than replaces.
+    this.lightOverlay.blendMode = "multiply";
+    this.lightOverlay.visible = false;
+    this.container.addChild(this.lightOverlay);
 
     this.deps = {
       lod: gctx.lodTextures,
+      deferred: this.deferred,
       whiteTexture: atlasWhite(gctx.textures, gctx.app.renderer),
       hexTexture: atlasHex(gctx.textures, gctx.app.renderer),
       seed: 0,
       progress: () => -1,
       queue: () => -1,
     };
+
+    // Drive the cursor light: project the screen position straight into
+    // `container` (content) space — the space the light buffer + mesh live in,
+    // so the light pass uses it directly with no further transform. When the
+    // cursor is over a different viewport the point lands off this one's visible
+    // area, so the light naturally stays contained. `globalpointermove` fires
+    // regardless of hit-testing; the stage just needs to be event-enabled.
+    gctx.app.stage.eventMode = "static";
+    this.onCursorMove = (e: FederatedPointerEvent) => {
+      const p = this.panLayer.toLocal(e.global);
+      this.deferred.setCursorWorld(p.x, p.y);
+    };
+    gctx.app.stage.on("globalpointermove", this.onCursorMove);
+
+    // LOD upgrade: prims resolve a 64px substitute while the ideal LOD loads;
+    // when it lands, re-resolve so they swap up (the resolver now returns the
+    // cached upgrade). Coalesced to one pass per frame in `tick`.
+    this.unsubLod = gctx.lodTextures.onLoad(() => { this.texturesDirty = true; });
   }
 
   /** The current anchor cell (fractional). */
@@ -467,6 +506,31 @@ export class WorldRenderer extends LayoutNode {
       this.animating = active;
     }
     this.drawSelection();
+
+    // Apply any LOD upgrades that landed since last frame (coalesced).
+    if (this.texturesDirty) {
+      this.texturesDirty = false;
+      for (const t of this.tiles.values()) t.prims.refreshTextures();
+      for (const c of this.cards.values()) c.layer?.refreshTextures();
+    }
+
+    // Deferred lighting: render the normal G-buffer (flat-up everywhere except
+    // real-normal art), sum the lights into the light buffer sampling it, then
+    // show that buffer multiplied over the albedo.
+    const renderer = this.gctx.app.renderer;
+    this.deferred.renderNormals(renderer, this.panLayer);
+    const lit = this.deferred.renderLights(renderer, this.panLayer);
+    if (lit) {
+      this.lightOverlay.texture = lit;
+      this.lightOverlay.width = this.width;
+      this.lightOverlay.height = this.height;
+      this.lightOverlay.visible = true;
+    }
+  }
+
+  override setBounds(x: number, y: number, width: number, height: number): void {
+    super.setBounds(x, y, width, height);
+    this.deferred.resize(width, height, this.gctx.app.renderer.resolution);
   }
 
   /** Redraw the selection outline over the selected card's footprint (it pans
@@ -491,22 +555,28 @@ export class WorldRenderer extends LayoutNode {
 
   private buildTile(key: string, spec: TileSpec): void {
     const center = this.grid.cellToPixel(spec.q, spec.r);
-    const cornerX = center.x - WORLD_HEX_WIDTH / 2;
-    const cornerY = center.y - WORLD_HEX_HEIGHT / 2;
+    const hexW = worldHexWidth();
+    const hexH = worldHexHeight();
+    const cornerX = center.x - hexW / 2;
+    const cornerY = center.y - hexH / 2;
     const def = this.gctx.definitions.decode(spec.packed);
 
     let node = this.tiles.get(key);
     if (!node) {
       const root = new Container();
       root.position.set(cornerX, cornerY);
-      const bg = new HexTileVisual(WORLD_HEX_RADIUS);
+      const bg = new HexTileVisual(
+        worldHexRadius(),
+        this.deferred,
+        this.deps.hexTexture ?? this.deps.whiteTexture,
+      );
       const outline = new Graphics()
-        .poly(hexPoints(WORLD_HEX_WIDTH / 2, WORLD_HEX_HEIGHT / 2, WORLD_HEX_RADIUS))
+        .poly(hexPoints(hexW / 2, hexH / 2, worldHexRadius()))
         .stroke({ color: TILE_OUTLINE_COLOR, width: 1, alpha: 0.6 });
       root.addChild(bg, outline);
       this.tileLayer.addChild(root);
       const prims = new PrimitiveLayer(
-        cardBox(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT, { x: cornerX, y: cornerY }),
+        cardBox(hexW, hexH, { x: cornerX, y: cornerY }),
         this.deps,
         { target: this.sortLayer },
       );
@@ -514,7 +584,7 @@ export class WorldRenderer extends LayoutNode {
       this.tiles.set(key, node);
     } else {
       node.sig = spec.sig;
-      node.prims.setBox(cardBox(WORLD_HEX_WIDTH, WORLD_HEX_HEIGHT, { x: cornerX, y: cornerY }));
+      node.prims.setBox(cardBox(hexW, hexH, { x: cornerX, y: cornerY }));
     }
     node.bg.draw(def);
     this.deps.seed = cellHash(spec.q, spec.r);
@@ -598,7 +668,7 @@ export class WorldRenderer extends LayoutNode {
   /** A tinted hex + `#id` label for a card the content can't render. */
   private makeFallbackMarker(id: number): Container {
     const marker = new Container();
-    const r = WORLD_HEX_RADIUS * 0.55;
+    const r = worldHexRadius() * 0.55;
     const hex = new Graphics()
       .poly(hexPoints(0, 0, r))
       .fill({ color: CARD_COLORS[id % CARD_COLORS.length], alpha: 0.92 })
@@ -612,6 +682,9 @@ export class WorldRenderer extends LayoutNode {
   override destroy(): void {
     this.feed?.close();
     this.feed = null;
+    this.gctx.app.stage.off("globalpointermove", this.onCursorMove);
+    this.unsubLod();
+    this.deferred.destroy();
     for (const t of this.tiles.values()) t.prims.destroy();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
