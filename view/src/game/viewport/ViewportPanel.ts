@@ -25,6 +25,11 @@ export interface ViewportPanelOptions {
   uiEditMode?: UiEditMode;
   title?: string;
   storageKey?: string;
+  /** Content-defaults lookup key, decoupled from `storageKey`. Inventories set
+   *  this to a stable string (e.g. `"inventory"`) so a shipped default survives
+   *  `card_id` renumbers — the per-id `storageKey` still owns localStorage
+   *  position memory, but the default fallback is shared + id-independent. */
+  defaultsKey?: string;
   /** Panel rect; defaults to the world viewport size. */
   defaultRect?: DomPanelRect;
   /** Taskbar pin (e.g. `"bottom-right"` for inventories). */
@@ -56,6 +61,7 @@ export class ViewportPanel extends PixiPanel {
       parent: opts.parent,
       title: opts.title ?? "World",
       storageKey: opts.storageKey,
+      defaultsKey: opts.defaultsKey,
       defaultRect: opts.defaultRect ?? WORLD_RECT,
       minWidth: 240,
       minHeight: 200,

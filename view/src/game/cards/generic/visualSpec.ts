@@ -19,7 +19,7 @@
  * reconciler a cheap by-index diff).
  */
 
-export type PrimKind = "rect" | "hex" | "text" | "sprite" | "progress" | "mask";
+export type PrimKind = "rect" | "hex" | "text" | "sprite" | "progress" | "mask" | "light";
 
 export interface Vec2 {
   x: number;
@@ -90,6 +90,10 @@ export interface VisualNode {
   /** Optional seed for `current` on first creation, so the primitive eases in
    *  from this state instead of snapping to target (e.g. `{ alpha: 0 }`). */
   enter?: Partial<AnimatableFields>;
+  /** `light` primitive: a point light source — `pos` is its location and `tint`
+   *  its colour; these are its remaining variables (matching the editor's cursor
+   *  light). Not drawn; the renderer's lighting pass consumes it. */
+  light?: { height: number; radius: number; intensity: number };
 }
 
 /** A card's full presentation. Index = reconciliation key; paint order is each

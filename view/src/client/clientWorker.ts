@@ -11,7 +11,7 @@
 //! async step — fetching the `/content` bundle — happens HERE in JS and is handed
 //! to `load_content`.
 
-import type { ToWorker, FromWorker } from "./protocol";
+import type { ToWorker, FromWorker, ChatMessage, ClockStats } from "./protocol";
 import type { RenderRegion, Renderable } from "./render";
 import init, { WasmClient } from "./wasm/resonantdust_client.js";
 
@@ -21,6 +21,9 @@ const post = (msg: FromWorker): void => ctx.postMessage(msg);
 let gateUrl = "";
 let core: WasmClient | null = null;
 let pumpTimer: ReturnType<typeof setInterval> | null = null;
+/** Last `player_soul_id()` posted to the main thread, so the pump only emits a
+ *  `playerSoul` message on an actual change (notably -1 → resolved). */
+let lastSoulId = -1;
 
 /** Per-viewport render state: its current region + a generation counter (bumped
  *  on every emit so the viewport drops stale lower-gen batches). */
@@ -55,6 +58,24 @@ ctx.onmessage = (e: MessageEvent<ToWorker>): void => {
     case "uploadMaster":
       core?.upload_master(msg.aspect, msg.faction, msg.variant, msg.channel, msg.data);
       break;
+    case "modifyContent":
+      core?.modify_content(msg.lineage, msg.text);
+      break;
+    case "addContent":
+      core?.add_content(msg.name, msg.text);
+      break;
+    case "modifyLocale":
+      core?.modify_locale(msg.domain, msg.json);
+      break;
+    case "modifyVisuals":
+      core?.modify_visuals(msg.name, msg.text);
+      break;
+    case "sendChat":
+      core?.send_chat(msg.body);
+      break;
+    case "give":
+      core?.give(msg.owner, msg.cardKey, msg.zoneOwner, msg.surface, msg.worldQ, msg.worldR);
+      break;
   }
 };
 
@@ -75,13 +96,34 @@ async function handleLogin(id: number, name: string): Promise<void> {
     }
     core.login(name);
     await waitFor(() => core!.player_id() >= 0, 8000, "player_id");
+    // Subscribe the chat feed now that our sender id/name are known. Idempotent —
+    // safe on a re-login. Inbound messages accumulate for the pump's `take_chat`.
+    core.subscribe_chat();
     // The player_soul card streams in a pump or two later (discovery walk:
     // player_id → cards WHERE owner_id=player_id → player_soul). Wait briefly so
-    // the view can open the player's own inventory; -1 if it doesn't arrive.
+    // the view can open the player's own inventory.
     try {
       await waitFor(() => core!.player_soul_id() >= 0, 3000, "player_soul");
     } catch {
-      /* leave it at -1 — the player inventory just won't open */
+      // A fresh player owns no player_soul. `claim_or_login` deliberately does
+      // NOT mint one — the soul lives in the cards DB, a different module the
+      // players module can't write to — so by design the CLIENT mints it (the
+      // headless harness does the same in `session.rs`). Create it: owner = our
+      // player_id, the reserved `player_soul` def, surface 0 (never rendered) at
+      // the origin. `give` is the generic create_card path; with zone_owner ==
+      // owner and world (0,0) it sends `macro_zone = 0` → the exact harness seed.
+      // Then wait for the discovery sub to stream it back so the login reply
+      // carries a real soul id (the pump's `playerSoul` event is the backstop if
+      // it lands even later).
+      const pid = core.player_id();
+      if (pid >= 0) {
+        core.give(pid, "player_soul", pid, 0, 0, 0);
+        try {
+          await waitFor(() => core!.player_soul_id() >= 0, 5000, "player_soul(minted)");
+        } catch {
+          /* still pending — the pump's `playerSoul` event opens it if it lands */
+        }
+      }
     }
     post({
       type: "reply",
@@ -107,6 +149,33 @@ function startPump(): void {
     const version = core.take_content_changed();
     if (version !== undefined) void handleContentChanged(version);
     if (changed) for (const viewId of views.keys()) emitView(viewId);
+    // The player_soul card_id lands a pump or two after login (the discovery
+    // walk), so the login reply often carried -1. Notify the main thread the
+    // instant it resolves (or changes) so the view opens the player's inventory
+    // — the soul is never rendered, so this is the only handle to it.
+    const soul = core.player_soul_id();
+    if (soul !== lastSoulId) {
+      lastSoulId = soul;
+      post({ type: "playerSoul", id: soul });
+    }
+    // Clock diagnostics for the debug HUD — drained every pump (independent of
+    // `changed`) so the sync tab's sparklines have a continuous trail. Cheap; the
+    // main thread skips the DOM work when the panel is closed.
+    try {
+      post({ type: "clockStats", stats: JSON.parse(core.clock_stats()) as ClockStats });
+    } catch {
+      /* malformed snapshot — skip this tick; the next pump's is independent */
+    }
+    // Chat is a side feed (not world rows) — drain it independently of `changed`.
+    const chat = core.take_chat();
+    if (chat !== "[]") {
+      try {
+        const messages = JSON.parse(chat) as ChatMessage[];
+        if (messages.length > 0) post({ type: "chat", messages });
+      } catch {
+        /* malformed batch — drop it; the next pump's messages are independent */
+      }
+    }
   }, 50);
 }
 

@@ -11,7 +11,7 @@ import {
   type TitleSuffix,
 } from "./DomPanel";
 
-/** Panels-locale key for this popup (matches `content/panels/defaults.json`
+/** Panels-locale key for this popup (matches `view/src/content/panels/defaults.json`
  *  and `content/locales/panels/en.json`). */
 const POPUP = "panelSettingsPopup";
 /** Resolve one of this popup's strings from the panels locale. Short
@@ -338,7 +338,7 @@ export class PanelSettingsPopup {
     // "Copy this panel" — serializes the bound panel's live state
     // as JSON and writes it to the clipboard wrapped in
     // `{ "<defaultsKey>": { … } }` so it's paste-ready into
-    // `content/panels/defaults.json`'s `panels` map. The user
+    // `view/src/content/panels/defaults.json`'s `panels` map. The user
     // workflow is: drag/resize the panel, click 📋, paste into the
     // content file, commit — new players boot with that layout.
     // Falls back to a textarea-select copy when the async
@@ -360,7 +360,7 @@ export class PanelSettingsPopup {
     this.rowsByKey.set("copyJson", copyRow.row);
     // "Copy all panels" — same workflow but snapshots every live
     // panel into a single blob keyed by `defaultsKey ?? storageKey`.
-    // Output drops straight under `content/panels/defaults.json`'s
+    // Output drops straight under `view/src/content/panels/defaults.json`'s
     // `panels:` root (the wrapper key from the per-panel button is
     // omitted — the top level here IS the map). Useful when the
     // user has tweaked several panels and wants one paste covering

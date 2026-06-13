@@ -145,6 +145,9 @@ export class WorldRenderer extends LayoutNode {
   private readonly onCursorMove: (e: FederatedPointerEvent) => void;
   /** Phase 3: the light accumulation buffer, multiplied over the albedo. */
   private readonly lightOverlay = new Sprite();
+  /** The emissive accumulation buffer, ADDED over the lit result so glows read
+   *  even where light is ~0. Hidden whenever no on-screen sprite emits. */
+  private readonly emissiveOverlay = new Sprite();
   /** Set when any LOD texture finishes loading; the next `tick` re-resolves
    *  present tiles/cards so substitutes (64px) swap up to the ideal LOD. Many
    *  load events coalesce into one re-resolve per frame. */
@@ -208,6 +211,11 @@ export class WorldRenderer extends LayoutNode {
     this.lightOverlay.blendMode = "multiply";
     this.lightOverlay.visible = false;
     this.container.addChild(this.lightOverlay);
+    // Emissive ADDED on top of the multiply — `albedo×light + emissive`. Added
+    // after lightOverlay so it composites last.
+    this.emissiveOverlay.blendMode = "add";
+    this.emissiveOverlay.visible = false;
+    this.container.addChild(this.emissiveOverlay);
 
     this.deps = {
       lod: gctx.lodTextures,
@@ -558,6 +566,17 @@ export class WorldRenderer extends LayoutNode {
       this.lightOverlay.width = this.width;
       this.lightOverlay.height = this.height;
       this.lightOverlay.visible = true;
+    }
+    // Emissive pass (after lights, which captured the albedo) — null when no
+    // on-screen sprite emits, so the additive overlay simply stays hidden.
+    const emis = this.deferred.renderEmissive(renderer, this.panLayer);
+    if (emis) {
+      this.emissiveOverlay.texture = emis;
+      this.emissiveOverlay.width = this.width;
+      this.emissiveOverlay.height = this.height;
+      this.emissiveOverlay.visible = true;
+    } else {
+      this.emissiveOverlay.visible = false;
     }
   }
 

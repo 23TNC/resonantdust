@@ -518,16 +518,20 @@ fn hash(x: i64) -> i64 {
 const STEP_CAP: u32 = 1_000_000;
 
 /// Visual-primitive constructors exposed as `^` engine intrinsics (`^hex`,
-/// `^rect`, `^sprite`, `^text`, `^progress`, `^mask`). `^<kind> call` APPENDS a
-/// `{kind}` prim to the `prims` draw list and returns a `Ref` handle the DSL
-/// configures (`&h.pos`, `&h.tint`, …). The engine owns `prims` (so
+/// `^rect`, `^sprite`, `^text`, `^progress`, `^mask`, `^light`). `^<kind> call`
+/// APPENDS a `{kind}` prim to the `prims` draw list and returns a `Ref` handle
+/// the DSL configures (`&h.pos`, `&h.tint`, …). The engine owns `prims` (so
 /// `defs::draw_visuals` reads it legitimately); the client `makePrimitive` owns
 /// the matching render set — the FFI agreement, not a content registry.
 ///
 /// `mask` is the odd one out: its node isn't drawn, it CLIPS the rest of the
 /// card's prims (the client sets it as the `PrimitiveLayer`'s mask). Ease its
 /// `size.y` from full → 0 (via an `enter` seed) for a roll-up exit.
-const PRIM_KINDS: &[&str] = &["hex", "rect", "sprite", "text", "progress", "mask"];
+///
+/// `light` is also not drawn: it registers a deferred point light from its
+/// `&h.light.{height,radius,intensity}` shape (position `&h.pos`, colour
+/// `&h.tint`) — see `defs::LightFields` and the client `DeferredLighting`.
+const PRIM_KINDS: &[&str] = &["hex", "rect", "sprite", "text", "progress", "mask", "light"];
 
 /// Functions callable via `$functions:name call`.
 #[derive(Default, Debug)]

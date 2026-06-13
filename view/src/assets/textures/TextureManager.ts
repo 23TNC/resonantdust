@@ -92,6 +92,10 @@ interface PhysicalPage {
    *  both. Created lazily on the first normal bake — a page whose sprites
    *  have no normal map never allocates the second GL texture. */
   normal: RenderTexture | null;
+  /** Parallel emissive page, same deal as `normal` — same allocator/slots,
+   *  lazy on the first emissive bake. Sampled by the deferred emissive pass
+   *  (additive self-illumination); null until some sprite carries one. */
+  emissive: RenderTexture | null;
   atlases: Atlas[];
 }
 
@@ -106,6 +110,10 @@ interface PhysicalPage {
 export interface PackedPair {
   readonly albedo: Texture;
   readonly normal: Texture | null;
+  /** Emissive frame at the same slot, or null when the pack had no emissive
+   *  source (the common case — emissive is opt-in per art). Fed to the
+   *  deferred emissive pass; null → the sprite emits nothing. */
+  readonly emissive: Texture | null;
 }
 
 /**
@@ -172,7 +180,11 @@ export class TextureManager {
    * atlases. `normal` comes back null when no normal source is given. Frames
    * match the albedo's native (width × height) at the slot's top-left.
    */
-  pack(albedo: Texture, normal: Texture | null = null): PackedPair {
+  pack(
+    albedo: Texture,
+    normal: Texture | null = null,
+    emissive: Texture | null = null,
+  ): PackedPair {
     const w = albedo.width;
     const h = albedo.height;
     const slotSize = nextPow2(Math.max(w, h));
@@ -187,19 +199,20 @@ export class TextureManager {
     for (const page of this.pages) {
       for (const atlas of page.atlases) {
         const slot = atlas.alloc(slotSize);
-        if (slot) return this.bake(albedo, normal, w, h, slot, page);
+        if (slot) return this.bake(albedo, normal, emissive, w, h, slot, page);
       }
     }
 
     const created = this.createAtlas();
     const slot = created.atlas.alloc(slotSize)!;
-    return this.bake(albedo, normal, w, h, slot, created.page);
+    return this.bake(albedo, normal, emissive, w, h, slot, created.page);
   }
 
   destroy(): void {
     for (const page of this.pages) {
       page.albedo.destroy(true);
       page.normal?.destroy(true);
+      page.emissive?.destroy(true);
     }
     this.pages.length = 0;
   }
@@ -207,6 +220,7 @@ export class TextureManager {
   private bake(
     albedo: Texture,
     normal: Texture | null,
+    emissive: Texture | null,
     w: number,
     h: number,
     slot: { x: number; y: number },
@@ -226,7 +240,19 @@ export class TextureManager {
       }
       normalFrame = this.renderInto(normal, slot, page.normal, w, h);
     }
-    return { albedo: albedoFrame, normal: normalFrame };
+    let emissiveFrame: Texture | null = null;
+    if (emissive) {
+      // Same lazy-parallel-page idiom as `normal` — most art has no emissive,
+      // so the third GL texture only exists once a glowing sprite packs here.
+      if (!page.emissive) {
+        page.emissive = RenderTexture.create({
+          width: page.albedo.width,
+          height: page.albedo.height,
+        });
+      }
+      emissiveFrame = this.renderInto(emissive, slot, page.emissive, w, h);
+    }
+    return { albedo: albedoFrame, normal: normalFrame, emissive: emissiveFrame };
   }
 
   /** Draw one `source` into `target` at `slot` and return a frame over the
@@ -260,7 +286,7 @@ export class TextureManager {
 
     const size = this.maxTextureSize;
     const albedo = RenderTexture.create({ width: size, height: size });
-    const page: PhysicalPage = { albedo, normal: null, atlases: [] };
+    const page: PhysicalPage = { albedo, normal: null, emissive: null, atlases: [] };
     this.pages.push(page);
     const atlas = new Atlas(0, 0);
     page.atlases.push(atlas);

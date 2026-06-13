@@ -249,7 +249,7 @@ export interface DomPanelOptions {
   storageKey?: string;
   /** Stable key used to look up content-shipped defaults in the
    *  [`DomPanel.panelDefaults`] registry (seeded once at boot from
-   *  `content/panels/defaults.json`). Defaults to `storageKey`.
+   *  `view/src/content/panels/defaults.json`). Defaults to `storageKey`.
    *  Set this explicitly on panels whose `storageKey` carries a
    *  per-instance suffix (e.g. `gameInventoryPanel:1:42`) so all
    *  instances of the same kind share one defaults entry
@@ -445,7 +445,7 @@ export interface PanelStateJSON {
 export class DomPanel {
   /** Content-shipped defaults registry, keyed by `defaultsKey` (or
    *  `storageKey` when `defaultsKey` isn't set). Seeded once at boot
-   *  by [`setPanelDefaults`] from `content/panels/defaults.json`.
+   *  by [`setPanelDefaults`] from `view/src/content/panels/defaults.json`.
    *  New panels merge their lookup entry between their constructor
    *  opts and localStorage — see [`getDefaultedRect`] / [`getDefaultedBool`] /
    *  [`getDefaultedString`]. Reset returns to whatever's here, NOT
@@ -480,7 +480,7 @@ export class DomPanel {
   /** Snapshot every live panel's current state into a single JSON
    *  object indexed by `defaultsKey ?? storageKey`. Panels without
    *  either key are skipped (nothing to address them by). Output is
-   *  paste-ready into `content/panels/defaults.json`'s `panels` map.
+   *  paste-ready into `view/src/content/panels/defaults.json`'s `panels` map.
    *  Iterates the module-level `allPanels` registry so panels
    *  created outside `PanelManager` (singletons like ChatPanel,
    *  the DebugPanel, MainLayout host panels) are still included. */
@@ -2363,7 +2363,7 @@ export class DomPanel {
    *  reflects exactly what the user sees right now. Position / size
    *  values come from the panel element's inline style (raw CSS
    *  strings: `"320px"`, `"auto"`, `"calc(…)"`). Output is shaped
-   *  to be paste-ready under `content/panels/defaults.json`'s
+   *  to be paste-ready under `view/src/content/panels/defaults.json`'s
    *  `panels.<defaultsKey>` entry. */
   serializeState(): PanelStateJSON {
     const s = this.panel.style;
@@ -2474,6 +2474,21 @@ export class DomPanel {
     // the resize corner to its default `br` position) + refresh
     // chrome to flush button visibility for the new toggle state.
     this.applyAnchor();
+
+    // Re-run the on-screen positioning `open()` performs. `applyRect`
+    // above pasted the default rect verbatim — but a content default
+    // can carry a stale / off-screen value (a panel nudged off-screen,
+    // then captured into `defaults.json`). `open()` always snaps or
+    // clamps after positioning so the user never sees that; reset has
+    // to as well, or the "I lost a panel" escape hatch strands the
+    // very panel it exists to rescue (a snapped panel keeps its raw
+    // off-screen rect because `clampToSafeArea` early-returns while
+    // snapped, and nothing re-snaps it). Both helpers no-op on an
+    // unmounted (closed) panel — those get positioned by `open()`
+    // when their taskbar entry re-launches them.
+    if (this._snap !== "none") this.applySnap();
+    else this.clampToSafeArea();
+
     this.refreshChrome();
     for (const cb of this.anchorChangeListeners)     cb(this._anchor);
     for (const cb of this.heightModeChangeListeners) cb(this._heightMode);

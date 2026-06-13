@@ -21,6 +21,9 @@ export interface AssetResolution {
    *  resolved variant has no normal map (white fallback, or art without one).
    *  Fed to the lighting shader; null → the lit prim uses a flat-up normal. */
   normal: Texture | null;
+  /** Emissive frame at the SAME atlas slot, or null when the variant has none.
+   *  Fed to the deferred emissive pass; null → the prim self-illuminates nothing. */
+  emissive: Texture | null;
   /** Multiply onto `sprite.scale` to draw `tex` at the requested CSS size. */
   scale: number;
 }
@@ -41,7 +44,7 @@ export function resolveAsset(
   opts: ResolveOpts,
 ): AssetResolution {
   const desired = Math.max(1, footprintCssPx * opts.dpr);
-  const { albedo, normal } = lod.getPair(ref.name, desired, opts.seed ?? 0, ref.index, opts.faction);
+  const { albedo, normal, emissive } = lod.getPair(ref.name, desired, opts.seed ?? 0, ref.index, opts.faction);
   const variance = opts.variance ?? 1;
-  return { texture: albedo, normal, scale: (footprintCssPx / albedo.width) * variance };
+  return { texture: albedo, normal, emissive, scale: (footprintCssPx / albedo.width) * variance };
 }

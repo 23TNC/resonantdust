@@ -16,6 +16,13 @@ import { DomPanel } from "./ui/dom/DomPanel";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
 import { SettingsMenu } from "./game/panels/titlebar/SettingsMenu";
 import { DebugPanel } from "./game/panels/titlebar/DebugPanel";
+import type { SyncStats } from "./game/panels/titlebar/DebugPanel";
+import { SyncHistory } from "./game/panels/titlebar/syncHistory";
+import type { ClockStats } from "./client/WasmClient";
+// Panel layout defaults are a pure client concern (DOM panel geometry) — NOT
+// gate-served content, so they live in the view, not the repo-root `content/`
+// tree. This is the single source of truth the panel-settings "Copy All JSON"
+// export pastes into; there is no repo-root copy to drift against.
 import panelDefaults from "./content/panels/defaults.json";
 import { WasmClient } from "./client/WasmClient";
 import { gateUrlFor } from "./client/environments";
@@ -130,6 +137,7 @@ async function main(): Promise<void> {
     definitions,
     layout: null,
     input: null,
+    logs: null,
   };
   scenes.setContext(ctx);
 
@@ -140,7 +148,18 @@ async function main(): Promise<void> {
   // world. Log Out returns to the login scene.
   const settingsMenu = new SettingsMenu(topTaskbar, uiEditMode);
   settingsMenu.onLogOut = () => { void scenes.change(new LoginScene()); };
-  const debugPanel = new DebugPanel(topTaskbar, uiEditMode);
+  // Clock-sync HUD source: the worker drains the wasm core's clock diagnostics
+  // each pump and pushes them here; the panel reads `current()` for the live
+  // values and ticks `sampleSyncHistory()` for the sparklines.
+  const syncHistory = new SyncHistory();
+  const debugPanel = new DebugPanel(topTaskbar, uiEditMode, syncHistory);
+  // Map the wasm core's diagnostics into the panel's `SyncStats`, adding the
+  // `Date.now()`-relative fields the core can't know (it only tracks its server
+  // estimate). Pre-sync (`server_now` not yet meaningful) we park at `null` so
+  // the panel shows "—" rather than a nonsensical epoch-sized offset.
+  client.onClockStats((s: ClockStats) => {
+    syncHistory.update(s.synced ? toSyncStats(s) : null);
+  });
 
   // Couple UI edit mode with the per-panel settings popup: entering edit mode
   // closes the Settings dropdown and opens the popup (bound to the last-focused
@@ -162,15 +181,45 @@ async function main(): Promise<void> {
   });
 
   // Drive the debug HUD every frame, scene-independent: frame-time → fps, GL
-  // draw-call tally, atlas occupancy. (No sync-stats source is wired yet — the
-  // clock lives in the worker — so the sync tab stays empty until a bridge
-  // lands.) Ticking from the app ticker rather than a scene's `update` keeps
-  // the HUD live in scenes that don't have a game loop (e.g. login).
+  // draw-call tally, atlas occupancy, and the live clock-sync snapshot the
+  // worker pushes (`undefined` until the clock first syncs → the sync tab and
+  // server-time rows stay at "—"). Ticking from the app ticker rather than a
+  // scene's `update` keeps the HUD live in scenes that don't have a game loop
+  // (e.g. login).
   app.ticker.add((ticker) => {
-    debugPanel.setStats(ticker.deltaMS, drawCalls.readAndReset(), textures.stats());
+    debugPanel.setStats(
+      ticker.deltaMS,
+      drawCalls.readAndReset(),
+      textures.stats(),
+      syncHistory.current() ?? undefined,
+    );
   });
 
   await scenes.change(new LoginScene());
+}
+
+/** Project the wasm core's `ClockStats` into the debug panel's `SyncStats`,
+ *  filling the `Date.now()`-relative fields the core can't compute (it tracks
+ *  only its own server estimate). `offset` is the gap between our server-time
+ *  estimate and local wall-clock — the headline clock-skew read. The panel
+ *  renames `clientDelay` → `clientLag`. Only called once `s.synced`. */
+function toSyncStats(s: ClockStats): SyncStats {
+  const dateNowMs = Date.now();
+  return {
+    serverNowMs: s.serverNowMs,
+    dateNowMs,
+    offsetMs: s.serverNowMs - dateNowMs,
+    captures: s.captures,
+    bestOffsetMs: s.bestOffsetMs,
+    worstOffsetMs: s.worstOffsetMs,
+    deltaMs: s.deltaMs,
+    clientLagMs: s.clientDelayMs,
+    rttMs: s.rttMs,
+    bestRttMs: s.bestRttMs,
+    rttSamples: s.rttSamples,
+    runningDeltaMs: s.runningDeltaMs,
+    runningDelayMs: s.runningDelayMs,
+  };
 }
 
 main().catch((e) => console.error("view: boot failed", e));

@@ -1,11 +1,9 @@
-import { ContextMenu } from "./ContextMenu";
 import { CardEditorPanel } from "./CardEditorPanel";
 import type { GameContext } from "../GameContext";
 import type { InputManager } from "../game/input/InputManager";
 import type { LayoutNode } from "../game/layout/LayoutNode";
 import type { ViewportPanel } from "../game/viewport/ViewportPanel";
 import type { DetailsPanel } from "../game/panels/details/DetailsPanel";
-import { debug } from "../debug";
 
 /** What the controller needs from the host scene — a thin seam so the scene
  *  holds only an opaque `CardEditor` handle and references no editor internals. */
@@ -21,15 +19,19 @@ export interface CardEditorDeps {
 }
 
 /**
- * Developer card-editing controller. Owns the right-click context menu, the
- * Developer gate, and the {@link CardEditorPanel} lifecycle — lifted out of the
- * world scene so no game code references editor internals. Lazily imported
- * behind `ctx.client.isDeveloper`, so this module (and the panel it pulls in)
- * never ships in a normal player's bundle — Vite splits it into its own chunk
- * that only loads when a Developer logs in.
+ * Developer card-editing controller. Owns the Developer gate and the
+ * {@link CardEditorPanel} lifecycle — lifted out of the world scene so no game
+ * code references editor internals. Lazily imported behind
+ * `ctx.client.isDeveloper`, so this module (and the panel it pulls in) never
+ * ships in a normal player's bundle — Vite splits it into its own chunk that
+ * only loads when a Developer logs in.
+ *
+ * The editor is opened via the chat `/edit` command (see `WorldScene` →
+ * {@link editCard}); right-click no longer pops an action menu. The right-click
+ * subscription is kept (it selects the card under the cursor + shows its
+ * details) as the seam for future developer right-click tools.
  */
 export class CardEditor {
-  private readonly cardMenu = new ContextMenu();
   private panel?: CardEditorPanel;
   private readonly unsubRightClick: () => void;
 
@@ -37,11 +39,12 @@ export class CardEditor {
     this.unsubRightClick = deps.input.on("right_click", (d) => this.onRightClick(d.x, d.y, d.hit));
   }
 
-  /** Right-click on a card opens the developer action menu at the cursor. The
-   *  targeted card is selected first, so "the selected card" and "the
-   *  right-clicked card" coincide when the menu opens. The native browser menu
-   *  is already suppressed in `InputManager`; for everyone else a right-click is
-   *  a no-op (this controller is only constructed for Developers). */
+  /** Right-click on a card selects it and surfaces its details — so a developer
+   *  can right-click a card and then `/edit` it. The action menu was removed in
+   *  favour of chat commands; this handler stays as the right-click seam for
+   *  future tools. The native browser menu is already suppressed in
+   *  `InputManager`; for everyone else a right-click is a no-op (this controller
+   *  is only constructed for Developers). */
   private onRightClick(x: number, y: number, hit: LayoutNode | null): void {
     const vp = this.deps.viewports().find((v) => v.ownsHit(hit));
     if (!vp) return;
@@ -52,13 +55,15 @@ export class CardEditor {
     const info = vp.cardInfo(id);
     if (info) {
       const cardLoc = { surface: vp.surfaceBand, q: info.q, r: info.r };
-      this.deps.details.showByPackedDefinition(info.packed, this.deps.ctx, undefined, cardLoc);
+      this.deps.details.showByPackedDefinition(info.packed, this.deps.ctx, undefined, cardLoc, id);
     }
-    const packed = info?.packed ?? null;
-    this.cardMenu.show(x, y, [
-      { label: "Appearance", onSelect: () => this.openEditor(id, packed) },
-      { label: "Definition", onSelect: () => this.onDefinition(id) },
-    ]);
+  }
+
+  /** Open the appearance editor against a specific card — the public entry the
+   *  chat `/edit` command drives. Same sandbox as the right-click "Appearance"
+   *  menu item; a no-op if `packed` is null (no definition to edit). */
+  editCard(cardId: number, packed: number | null): void {
+    this.openEditor(cardId, packed);
   }
 
   /** Open the Card Editor on a deep copy of the card's `:visuals` (a sandbox —
@@ -78,14 +83,8 @@ export class CardEditor {
     this.panel.show(packed, cardId);
   }
 
-  /** Developer menu → Definition. TODO: open the card's definition (DSL) view. */
-  private onDefinition(cardId: number): void {
-    debug.log(["ui"], `[CardEditor] Definition for card ${cardId} (not implemented)`, 2);
-  }
-
   dispose(): void {
     this.unsubRightClick();
-    this.cardMenu.destroy();
     this.panel?.destroy();
   }
 }

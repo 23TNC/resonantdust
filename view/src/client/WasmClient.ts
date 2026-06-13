@@ -8,10 +8,10 @@
 //! matching pass can't stall PIXI — the main thread only ever does message I/O.
 
 import ClientWorker from "./clientWorker.ts?worker";
-import type { ToWorker, FromWorker, LoginResult, ClientEvent } from "./protocol";
+import type { ToWorker, FromWorker, LoginResult, ClientEvent, ChatMessage, ClockStats } from "./protocol";
 import type { RenderRegion, RenderBatch, ViewportFeed } from "./render";
 
-export type { LoginResult };
+export type { LoginResult, ChatMessage, ClockStats };
 export type { RenderRegion, RenderBatch, ViewportFeed };
 
 /** Player name that unlocks developer-only UI (the right-click card menu,
@@ -46,6 +46,13 @@ export class WasmClient {
   /** Fired when the gate hot-swapped its content corpus (the worker reloaded its
    *  matcher bundle); the app refreshes its render-side `Content`/`Locales`. */
   private readonly contentChangedListeners = new Set<(version: string) => void>();
+  /** Fired with each batch of chat messages the worker drained from the feed. */
+  private readonly chatListeners = new Set<(messages: ChatMessage[]) => void>();
+  /** Fired each pump with the latest clock-discipline + RTT diagnostics (debug HUD). */
+  private readonly clockStatsListeners = new Set<(stats: ClockStats) => void>();
+  /** Fired when discovery resolves (or changes) our `player_soul` card_id — a
+   *  pump or two after login. The view opens the player's own inventory here. */
+  private readonly playerSoulListeners = new Set<(id: number) => void>();
   /** Per-viewport render-batch handlers, keyed by the viewId assigned in
    *  {@link openViewport}. */
   private nextViewId = 1;
@@ -87,6 +94,19 @@ export class WasmClient {
         }
         case "contentChanged":
           for (const fn of this.contentChangedListeners) fn(msg.version);
+          break;
+        case "chat":
+          for (const fn of this.chatListeners) fn(msg.messages);
+          break;
+        case "clockStats":
+          for (const fn of this.clockStatsListeners) fn(msg.stats);
+          break;
+        case "playerSoul":
+          // Discovery surfaced (or changed) our player_soul after login. Keep the
+          // cached id in sync and notify listeners so the view opens the player's
+          // own inventory even when the login reply raced ahead of discovery.
+          this._playerSoulId = msg.id;
+          for (const fn of this.playerSoulListeners) fn(msg.id);
           break;
       }
     };
@@ -148,11 +168,70 @@ export class WasmClient {
     this.post({ type: "uploadMaster", aspect, faction, variant, channel, data: dataB64 });
   }
 
+  /** Author a new version of an existing `.rd` source (art editor "save DSL").
+   *  The gate validates + hot-swaps + persists to R2, then broadcasts
+   *  `content_changed` (which `onContentChanged` listeners pick up). Fire-and-
+   *  forget; gated server-side on the content-author capability. */
+  modifyContent(lineage: string, text: string): void {
+    this.post({ type: "modifyContent", lineage, text });
+  }
+
+  /** Author a brand-new `.rd` source (a facet the card didn't ship). Same gate
+   *  validate + hot-swap + persist as {@link modifyContent}. */
+  addContent(name: string, text: string): void {
+    this.post({ type: "addContent", name, text });
+  }
+
+  /** Replace a locale domain's JSON (art editor "save locale"). The gate
+   *  validates + hot-swaps + persists, then broadcasts `content_changed`. */
+  modifyLocale(domain: string, json: string): void {
+    this.post({ type: "modifyLocale", domain, json });
+  }
+
+  /** Replace a `visuals/…` source in place (art editor "save visuals"). The gate
+   *  validates + hot-swaps + persists, then broadcasts `content_changed`. */
+  modifyVisuals(name: string, text: string): void {
+    this.post({ type: "modifyVisuals", name, text });
+  }
+
   /** Subscribe to world/state events pushed from the worker. Returns an
    *  unsubscribe fn. (Event stream is wired when the wasm core lands.) */
   onEvent(fn: (e: ClientEvent) => void): () => void {
     this.eventListeners.add(fn);
     return () => this.eventListeners.delete(fn);
+  }
+
+  /** Send a chat message to the world feed. Fire-and-forget: it arrives back
+   *  through {@link onChat} like every other client's, so the UI renders it from
+   *  the feed rather than echoing locally. The worker fills sender id/name from
+   *  the session; the shard trims/validates the body. */
+  sendChat(body: string): void {
+    this.post({ type: "sendChat", body });
+  }
+
+  /** Create a card (the dev `/give` path). `owner` owns the new `cardKey` card;
+   *  it lands in `zoneOwner`'s `surface` zone. With `worldQ/worldR === 0` and
+   *  `zoneOwner === owner` the shard auto-places it collision-free (first free
+   *  cell); otherwise it's placed at the exact resolved cell. Fire-and-forget —
+   *  the row streams back through the render feed if the zone is in view. */
+  give(owner: number, cardKey: string, zoneOwner: number, surface: number, worldQ: number, worldR: number): void {
+    this.post({ type: "give", owner, cardKey, zoneOwner, surface, worldQ, worldR });
+  }
+
+  /** Subscribe to chat messages streamed from the feed (the worker drains the
+   *  wasm core each pump and forwards non-empty batches). Returns an unsubscribe
+   *  fn. Messages arrive sorted by `sentAt`. */
+  onChat(fn: (messages: ChatMessage[]) => void): () => void {
+    this.chatListeners.add(fn);
+    return () => this.chatListeners.delete(fn);
+  }
+
+  /** Subscribe to the clock-discipline + RTT diagnostics the worker drains each
+   *  pump (server-time estimate, `client_delay`, sample-window spread, RTT). The
+   *  debug HUD's sync tab consumes this. Returns an unsubscribe fn. */
+  onClockStats(fn: (stats: ClockStats) => void): () => void {
+    this.clockStatsListeners.add(fn);
+    return () => this.clockStatsListeners.delete(fn);
   }
 
   /** Subscribe to gate content hot-swaps (a runtime add/modify, or an R2 upload
@@ -162,6 +241,16 @@ export class WasmClient {
   onContentChanged(fn: (version: string) => void): () => void {
     this.contentChangedListeners.add(fn);
     return () => this.contentChangedListeners.delete(fn);
+  }
+
+  /** Subscribe to `player_soul` resolution. Fires when discovery surfaces our
+   *  player_soul card_id after login (or if it later changes). Fires with `-1`
+   *  only on un-resolve. Returns an unsubscribe fn. The view uses this to open
+   *  the player's own inventory once the soul lands — the login reply often
+   *  carries `-1` because discovery hasn't finished a pump or two in. */
+  onPlayerSoul(fn: (id: number) => void): () => void {
+    this.playerSoulListeners.add(fn);
+    return () => this.playerSoulListeners.delete(fn);
   }
 
   /** Open a render feed for a viewport. The client streams `onBatch` chunks of
@@ -195,6 +284,8 @@ export class WasmClient {
     this.pending.clear();
     this.eventListeners.clear();
     this.contentChangedListeners.clear();
+    this.chatListeners.clear();
+    this.clockStatsListeners.clear();
     this.viewListeners.clear();
   }
 }

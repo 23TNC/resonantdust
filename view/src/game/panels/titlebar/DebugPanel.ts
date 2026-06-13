@@ -3,7 +3,19 @@ import { DomPanel } from "../../../ui/dom/DomPanel";
 import type { PanelTaskbar } from "../../../ui/dom/PanelTaskbar";
 import type { UiEditMode } from "../../../ui/dom/UiEditMode";
 import { panelTitle, panelText } from "../panelStrings";
-import { currentEnvironment } from "../../../client/environments";
+import { currentEnvironment, httpBaseFor } from "../../../client/environments";
+import { getContentVersion } from "../../definitions/contentBoot";
+
+/** The gate's `/versions` payload: baked source-closure hashes per component
+ *  (`server`) plus the gate's live content fingerprint (`content_live`). */
+interface VersionsResponse {
+  server: {
+    build: number;
+    generated: string;
+    components: Record<string, { hash: string; seq: number }>;
+  };
+  content_live: string;
+}
 
 /** Frames between history samples. At ~60fps that's roughly 2Hz —
  *  combined with the source's bounded history window, the sparkline
@@ -61,6 +73,24 @@ const TOGGLE_BTN_CSS: Partial<CSSStyleDeclaration> = {
   font: "inherit",
   padding: "0",
 };
+
+/** Versions-tab refresh button — full-width, subdued chrome. */
+const REFRESH_BTN_CSS: Partial<CSSStyleDeclaration> = {
+  display: "block",
+  width: "calc(100% - 24px)",
+  margin: "6px 12px",
+  padding: "4px 0",
+  background: "#23252e",
+  border: "1px solid #34363f",
+  borderRadius: "3px",
+  color: "#ecd6aa",
+  cursor: "pointer",
+  font: "inherit",
+};
+
+/** Versions-tab value colours: match (green) / drift (red). */
+const VERSION_OK_COLOR = "#7bd88f";
+const VERSION_DRIFT_COLOR = "#e06c75";
 
 /** Right-side cluster wrapping a sparkline canvas + the live value span. */
 const GRAPH_RIGHT_CSS: Partial<CSSStyleDeclaration> = {
@@ -214,6 +244,9 @@ export class DebugPanel {
   private readonly syncRtt:           { value: HTMLSpanElement; canvas: HTMLCanvasElement };
   private readonly syncBestRtt:       { value: HTMLSpanElement; canvas: HTMLCanvasElement };
 
+  // ── Versions tab — per-component build-hash drift ───────────────
+  private readonly versionsBody: HTMLDivElement;
+
   private fps = 60;
 
   /** Optional handle to the live sync-history source. When set,
@@ -243,6 +276,7 @@ export class DebugPanel {
     const mainContent     = document.createElement("div");
     const texturesContent = document.createElement("div");
     const syncContent     = document.createElement("div");
+    const versionsContent = document.createElement("div");
 
     // ── Main tab — at-a-glance ────────────────────────────────────
     this.addToggleRow(
@@ -280,15 +314,32 @@ export class DebugPanel {
     this.syncRtt           = this.addGraphRow(syncContent, panelText("debugPanel", "rtt"));
     this.syncBestRtt       = this.addGraphRow(syncContent, panelText("debugPanel", "rttBest"));
 
+    // ── Versions tab — client vs gate build hashes ────────────────
+    // A refresh button + a body the fetch repopulates. The client side comes
+    // from the build-injected snapshot (__BUILD_VERSIONS__); the gate side from
+    // a live /versions fetch. Compared per component to surface a stale
+    // deployment (or a stale client).
+    const refreshBtn = document.createElement("button");
+    Object.assign(refreshBtn.style, REFRESH_BTN_CSS);
+    refreshBtn.textContent = panelText("debugPanel", "refresh");
+    refreshBtn.onclick = () => { void this.refreshVersions(); };
+    versionsContent.appendChild(refreshBtn);
+    this.versionsBody = document.createElement("div");
+    versionsContent.appendChild(this.versionsBody);
+
     this.panel.addTab("main",     "🛈", mainContent);
     this.panel.addTab("textures", "🖌", texturesContent);
     this.panel.addTab("sync",     "🛰", syncContent);
+    this.panel.addTab("versions", "🏷", versionsContent);
+
+    // Initial fill (best-effort — shows "not connected" until login sets the env).
+    void this.refreshVersions();
   }
 
   get isOpen(): boolean { return this.panel.isOpen; }
 
   toggle(): void { this.panel.toggle(); }
-  open():   void { this.panel.open();   }
+  open():   void { this.panel.open(); void this.refreshVersions(); }
   close():  void { this.panel.close();  }
   destroy(): void { this.panel.destroy(); }
 
@@ -465,4 +516,103 @@ export class DebugPanel {
     parent.appendChild(row);
     return { value: valueEl, canvas };
   }
+
+  // ── Versions tab ────────────────────────────────────────────────
+
+  /** Render the client-baked hashes immediately (the core of the tab — no
+   *  network needed), then TRY to fetch the gate's `/versions` to add a
+   *  comparison column. A missing env or a failed fetch is non-fatal: the
+   *  hashes stay on screen, just without the gate column. */
+  private async refreshVersions(): Promise<void> {
+    this.renderVersions(null); // always show client hashes first
+    const env = currentEnvironment();
+    if (!env) return;
+    try {
+      const resp = await fetch(`${httpBaseFor(env)}/versions`);
+      if (resp.ok) this.renderVersions((await resp.json()) as VersionsResponse);
+      // A non-OK / unreachable gate just means no comparison — leave the
+      // client-only view in place (already rendered above).
+    } catch {
+      /* gate without /versions yet, or offline — client-only view stands. */
+    }
+  }
+
+  /** Rebuild the versions body from the build-injected snapshot. When `server`
+   *  is present, each row also compares against the gate (green ✓ / red drift);
+   *  when it's null, rows just display the client hash. */
+  private renderVersions(server: VersionsResponse | null): void {
+    const body = this.versionsBody;
+    body.replaceChildren();
+
+    const client = __BUILD_VERSIONS__;
+    if (!client) {
+      const row = document.createElement("div");
+      Object.assign(row.style, ROW_CSS);
+      row.textContent = "no build snapshot (run bin/versions)";
+      body.appendChild(row);
+      return;
+    }
+
+    // Build number (the running ledger version).
+    body.appendChild(this.versionRow(
+      panelText("debugPanel", "build"),
+      String(client.build),
+      server ? String(server.server.build) : undefined,
+    ));
+
+    // Per-component source-closure hashes. Union both key sets so a component
+    // on only one side still shows.
+    const names = new Set<string>([
+      ...Object.keys(client.components),
+      ...Object.keys(server?.server.components ?? {}),
+    ]);
+    for (const name of names) {
+      if (name === "content") continue; // shown live below, not by source hash
+      body.appendChild(this.versionRow(
+        name,
+        client.components[name]?.hash,
+        server?.server.components[name]?.hash,
+      ));
+    }
+
+    // Content hot-swaps without a rebuild, so its LIVE fingerprint is the real
+    // signal: what the client loaded vs (when available) the gate's current.
+    body.appendChild(this.versionRow(
+      panelText("debugPanel", "contentLive"),
+      getContentVersion() || undefined,
+      server?.content_live,
+    ));
+  }
+
+  /** One label → value row. With no gate value, shows the client hash plainly.
+   *  With one, compares: green ✓ on match, red `client ⇄ gate` on drift. */
+  private versionRow(label: string, clientH?: string, serverH?: string): HTMLDivElement {
+    const row = document.createElement("div");
+    Object.assign(row.style, ROW_CSS);
+    const labelEl = document.createElement("span");
+    Object.assign(labelEl.style, LABEL_CSS);
+    labelEl.textContent = label;
+    const valueEl = document.createElement("span");
+    Object.assign(valueEl.style, VALUE_CSS);
+
+    if (serverH === undefined) {
+      // No gate comparison — just display the client hash.
+      valueEl.textContent = short(clientH);
+    } else {
+      const match = !!clientH && clientH === serverH;
+      valueEl.style.color = match ? VERSION_OK_COLOR : VERSION_DRIFT_COLOR;
+      valueEl.textContent = match
+        ? `✓ ${short(clientH)}`
+        : `${short(clientH)} ⇄ ${short(serverH)}`;
+    }
+
+    row.appendChild(labelEl);
+    row.appendChild(valueEl);
+    return row;
+  }
+}
+
+/** First 10 chars of a hash (enough to eyeball), or an em dash if absent. */
+function short(h?: string): string {
+  return h ? h.slice(0, 10) : "—";
 }

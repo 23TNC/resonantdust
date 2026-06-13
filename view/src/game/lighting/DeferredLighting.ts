@@ -58,6 +58,10 @@ export class DeferredLighting {
   private readonly sprites = new Set<LitSprite>();
   private readonly lights: Light[] = [];
   private cursor: { x: number; y: number } | null = null;
+  /** Lights contributed by `light` PRIMITIVES on cards (registered by their
+   *  `LightPrim`, which mutates each entry's world position as the card moves).
+   *  Summed alongside the cursor light. */
+  private readonly cardLights = new Set<Light>();
   /** The normal G-buffer (content-local, screen resolution). Sized to the
    *  viewport by `resize`; the normal pass renders the registry's normals into
    *  it; the light pass samples it. */
@@ -68,6 +72,11 @@ export class DeferredLighting {
   /** The albedo capture — the light pass reads its ALPHA as the coverage mask
    *  so the multiply overlay only shades real geometry (no black on empty). */
   private albedoRT: RenderTexture | null = null;
+  /** The emissive accumulation buffer — `Σ emissive` from every sprite that
+   *  carries an emissive frame, ADDED over the lit composite (so glows survive
+   *  in the dark). Null until sized; the pass is skipped entirely when no
+   *  sprite emits. */
+  private emissiveRT: RenderTexture | null = null;
   /** Shared light uniforms (positions/colours in content space). */
   private readonly lightUniforms = new UniformGroup({
     uLightData: { value: new Float32Array(MAX_LIGHTS * 4), type: "vec4<f32>", size: MAX_LIGHTS },
@@ -104,17 +113,27 @@ export class DeferredLighting {
     this.sprites.delete(sprite);
   }
 
+  /** Register a card `light` primitive's live light. The caller (`LightPrim`)
+   *  keeps mutating the object's world position / shape; we just read it. */
+  registerLight(light: Light): void {
+    this.cardLights.add(light);
+  }
+  unregisterLight(light: Light): void {
+    this.cardLights.delete(light);
+  }
+
   /** Cursor position in this viewport's world space (`panLayer.toLocal`), or
    *  null to drop the cursor light. */
   setCursorWorld(x: number | null, y?: number): void {
     this.cursor = x === null ? null : { x, y: y ?? 0 };
   }
 
-  /** The active light list (just the cursor light for now). The light pass
-   *  will read this each update. */
+  /** The active light list — the cursor light plus every card `light` primitive.
+   *  The light pass reads this each update. */
   activeLights(): readonly Light[] {
     this.lights.length = 0;
     if (this.cursor) this.lights.push({ ...CURSOR_LIGHT, x: this.cursor.x, y: this.cursor.y });
+    for (const l of this.cardLights) this.lights.push(l);
     return this.lights;
   }
 
@@ -128,6 +147,8 @@ export class DeferredLighting {
     this.lightRT = RenderTexture.create({ width, height, resolution });
     this.albedoRT?.destroy(true);
     this.albedoRT = RenderTexture.create({ width, height, resolution });
+    this.emissiveRT?.destroy(true);
+    this.emissiveRT = RenderTexture.create({ width, height, resolution });
     const pos = this.lightMesh.geometry.positions;
     pos[0] = 0; pos[1] = 0;
     pos[2] = width; pos[3] = 0;
@@ -211,11 +232,54 @@ export class DeferredLighting {
     return rt;
   }
 
+  /**
+   * Render the registry's EMISSIVE frames, summed, into the emissive buffer —
+   * returned for the ADDITIVE overlay (`final = albedo×light + emissive`, so a
+   * glow survives where light is ~0). Like `renderNormals` it swaps each
+   * sprite's `texture` to its emissive frame and restores the albedo after, but
+   * it renders the emissive sprites in ADD blend over a black clear: a
+   * non-glowing sprite's black padding adds nothing (black is the additive
+   * identity), so there's no bounding-box overwrite and overlapping glows sum —
+   * none of the silhouette-alpha care the normal page needs.
+   *
+   * Returns `null` (and does NO render) when no sprite carries an emissive map —
+   * the common case — so emissive is genuinely zero-cost until art opts in.
+   */
+  renderEmissive(renderer: Renderer, world: Container): Texture | null {
+    const rt = this.emissiveRT;
+    if (!rt) return null;
+    let any = false;
+    for (const sp of this.sprites) {
+      if (sp.emissiveTexture) { any = true; break; }
+    }
+    if (!any) return null;
+
+    for (const sp of this.sprites) {
+      if (sp.emissiveTexture) {
+        sp.texture = sp.emissiveTexture;
+        sp.blendMode = "add";
+      } else {
+        sp.renderable = false;
+      }
+    }
+    renderer.render({ container: world, target: rt, clear: true, clearColor: [0, 0, 0, 0] });
+    for (const sp of this.sprites) {
+      if (sp.emissiveTexture) {
+        sp.texture = sp.albedoTexture;
+        sp.blendMode = "normal";
+      } else {
+        sp.renderable = true;
+      }
+    }
+    return rt;
+  }
+
   destroy(): void {
     this.sprites.clear();
     this.normalRT?.destroy(true);
     this.lightRT?.destroy(true);
     this.albedoRT?.destroy(true);
+    this.emissiveRT?.destroy(true);
     this.lightMesh.destroy();
     this.flatNormal.destroy(true);
   }

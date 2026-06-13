@@ -3,7 +3,7 @@
  *  domain (`content/locales/panels/<lang>.json`).
  *
  *  Schema: each panel is one locale entry keyed by its
- *  `content/panels/defaults.json` panel key. Its `label` is the
+ *  `view/src/content/panels/defaults.json` panel key. Its `label` is the
  *  title-bar text; every other string is a flat variant. So
  *  `panelTitle("settingsMenu")` → "Settings" and
  *  `panelText("settingsMenu", "logOut")` → "Log Out".

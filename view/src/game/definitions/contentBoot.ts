@@ -26,6 +26,10 @@ interface ContentPayload {
 
 let content: Content | null = null;
 let locales: Locales | null = null;
+/** The raw fetched corpus (`.rd` + locale sources). The wasm runtimes don't
+ *  expose source text, so the Card Editor reads a card's DSL / locale entries
+ *  from here. Kept in sync with the live runtimes on init + reload. */
+let sources: ContentPayload | null = null;
 let contentVersion = "";
 let initPromise: Promise<void> | null = null;
 /** The gate HTTP base `initContent` loaded from, reused by `reloadContent`. */
@@ -47,6 +51,7 @@ export async function initContent(httpBase: string): Promise<void> {
       const payload = (await resp.json()) as ContentPayload;
       content = new Content(JSON.stringify(payload.rd));
       locales = new Locales(JSON.stringify(payload.locales));
+      sources = payload;
       contentVersion = payload.version;
       httpBaseUsed = httpBase;
     })();
@@ -79,6 +84,7 @@ export async function reloadContent(): Promise<void> {
   const prevLocales = locales;
   content = nextContent;
   locales = nextLocales;
+  sources = payload;
   contentVersion = payload.version;
   // Free the superseded wasm runtimes (nothing retains them — DefinitionManager
   // reads `sharedContent()` live each call).
@@ -106,6 +112,13 @@ export function sharedContent(): Content {
 export function sharedLocales(): Locales {
   if (!locales) throw new Error("locales not initialised — await initContent() first");
   return locales;
+}
+
+/** The raw corpus sources (`.rd` pairs + locale JSON) — for tooling that needs
+ *  source text the wasm runtimes don't expose (the Card Editor's DSL/locale
+ *  tabs). `null` before {@link initContent}. */
+export function contentSources(): { rd: [string, string][]; locales: [string, string][] } | null {
+  return sources;
 }
 
 /** The loaded corpus version fingerprint (hex). Empty until `initContent()`. */

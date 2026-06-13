@@ -1,7 +1,7 @@
 import { BitmapText, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { TEXT_BAKE_PX, TEXT_FONT } from "../../../assets/fonts";
 import type { LodTextureManager } from "../../../assets/textures/LodTextureManager";
-import type { DeferredLighting } from "../../lighting/DeferredLighting";
+import type { DeferredLighting, Light } from "../../lighting/DeferredLighting";
 import { LitSprite } from "../../lighting/LitSprite";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
 import { resolveAsset } from "./resolveAsset";
@@ -174,7 +174,7 @@ export class FillPrim extends BasePrim {
       const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
         dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
       });
-      this.node.setTextures(r.texture, r.normal);
+      this.node.setTextures(r.texture, r.normal, r.emissive);
     } else if (this.kind === "hex" && this.deps.hexTexture) {
       this.node.setTextures(this.deps.hexTexture, null);
     } else {
@@ -213,7 +213,7 @@ export class SpritePrim extends BasePrim {
     const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
       dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
     });
-    this.node.setTextures(r.texture, r.normal);
+    this.node.setTextures(r.texture, r.normal, r.emissive);
     this.baseScale = r.scale;
     setAnchor(this.node, n);
   }
@@ -355,6 +355,39 @@ export class MaskPrim extends BasePrim {
   }
 }
 
+/** `light` — a point-light source, not drawn. It contributes a live light to the
+ *  viewport's deferred lighting: `pos` (eased, + the box origin) is its world
+ *  position, `tint` its colour, and `light.{height,radius,intensity}` its shape.
+ *  The node is an empty Container (renders nothing); the light object is mutated
+ *  in place as the card moves and read by the light pass. */
+export class LightPrim extends BasePrim {
+  readonly kind = "light" as const;
+  readonly node = new Container();
+  private readonly light: Light = { x: 0, y: 0, height: 0, radius: 0, color: 0xffffff, brightness: 1 };
+  constructor(private readonly deps: PrimDeps) {
+    super();
+    deps.deferred.registerLight(this.light);
+  }
+
+  protected applyDiscrete(n: VisualNode): void {
+    this.light.height = n.light?.height ?? 0;
+    this.light.radius = n.light?.radius ?? 0;
+    this.light.color = n.tint ?? 0xffffff;
+    this.light.brightness = n.light?.intensity ?? 1;
+  }
+
+  protected writeNode(): void {
+    // World position (panLayer-local, like every other prim's node position).
+    this.light.x = this.originX + this.cur.x;
+    this.light.y = this.originY + this.cur.y;
+  }
+
+  override destroy(): void {
+    this.deps.deferred.unregisterLight(this.light);
+    super.destroy();
+  }
+}
+
 function setAnchor(node: Sprite | BitmapText | LitSprite, n: VisualNode): void {
   const ax = (n.anchor?.x ?? 0) / 100;
   const ay = (n.anchor?.y ?? 0) / 100;
@@ -385,5 +418,7 @@ export function makePrimitive(kind: PrimKind, deps: PrimDeps): Primitive {
       return new ProgressPrim(deps);
     case "mask":
       return new MaskPrim();
+    case "light":
+      return new LightPrim(deps);
   }
 }

@@ -8,8 +8,10 @@
 //! lands once there's an editable paint surface — for now this exposes the tool
 //! state those handlers will read.
 
-export type ArtTool = "brush" | "pan" | "light";
-export type ArtLayer = "albedo" | "normal";
+import type { BrushShape } from "./brush";
+
+export type ArtTool = "brush" | "erase" | "bucket" | "pan" | "light";
+export type ArtLayer = "albedo" | "normal" | "emissive";
 
 const PANEL_CSS: Partial<CSSStyleDeclaration> = {
   position: "fixed",
@@ -86,15 +88,37 @@ export class ArtToolsPanel {
   tool: ArtTool = "brush";
   /** Brush radius in texels (the painting pass will read this). */
   brushSize = 4;
-  /** Brush footprint shape. One option for now. */
-  shape = "square";
+  /** Brush footprint shape. */
+  shape: BrushShape = "square";
+  /** Edge hardness, 0–1: fraction of the radius kept fully opaque before the edge
+   *  feathers out (1 = hard edge). */
+  hardness = 1;
+  /** Stroke opacity, 0–1: the dab's peak alpha — below 1, paint builds up for
+   *  blending. */
+  opacity = 1;
+  /** Paint-bucket fill tolerance, 0–255 per channel. */
+  tolerance = 32;
   /** Which channel paints target. More to come (e.g. emissive). */
   layer: ArtLayer = "albedo";
 
+  // Light tool — the variables a placed/cursor light gets (card px; intensity
+  // unitless). The light's colour is the primary swatch.
+  lightHeight = 50;
+  lightRadius = 128;
+  lightIntensity = 1.3;
+  /** Whether the preview's default (fixed white) inspection light is active.
+   *  Unchecking it previews the card's OWN lights alone. */
+  defaultLight = true;
+
   private readonly primaryInput: HTMLInputElement;
   private readonly secondaryInput: HTMLInputElement;
+  /** Option rows tagged with the tools they apply to, toggled by {@link refreshRows}. */
+  private readonly toolRows: { el: HTMLDivElement; tools: ArtTool[] }[] = [];
+  /** Fired when a change should re-light the preview (the default-light toggle). */
+  private readonly onLightingChange: () => void;
 
-  constructor() {
+  constructor(opts: { onLightingChange?: () => void } = {}) {
+    this.onLightingChange = opts.onLightingChange ?? (() => {});
     this.element = document.createElement("div");
     Object.assign(this.element.style, PANEL_CSS);
     this.element.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -109,32 +133,74 @@ export class ArtToolsPanel {
     colorRow.append(this.primaryInput, swap, this.secondaryInput);
     this.element.appendChild(colorRow);
 
+    // Default light — always visible (a preview control, not tool-specific).
+    // Uncheck to preview the card's own lights alone.
+    const defLight = checkbox("Default light", this.defaultLight, (on) => {
+      this.defaultLight = on;
+      this.onLightingChange();
+    });
+    this.element.appendChild(defLight);
+
     // Tool — a dropdown (pipette is folded into the colour selectors, so it's
-    // not a tool here). One option for now.
-    const toolSel = select([["brush", "Brush"], ["pan", "Pan"], ["light", "Light"]], this.tool, (v) => { this.tool = v as ArtTool; });
+    // not a tool here).
+    const toolSel = select(
+      [["brush", "Brush"], ["erase", "Erase"], ["bucket", "Bucket"], ["pan", "Pan"], ["light", "Light"]],
+      this.tool,
+      (v) => { this.tool = v as ArtTool; this.refreshRows(); },
+    );
     this.element.appendChild(labelled("Tool", toolSel));
 
+    // Per-tool option rows — only the active tool's are shown (see refreshRows).
+    const PAINT: ArtTool[] = ["brush", "erase"];
+
     // Brush size.
-    const sizeInput = document.createElement("input");
-    sizeInput.type = "number";
-    sizeInput.min = "1";
-    Object.assign(sizeInput.style, INPUT_CSS, { width: "100%" });
-    sizeInput.value = String(this.brushSize);
-    sizeInput.addEventListener("input", () => {
-      const v = parseInt(sizeInput.value, 10);
-      if (!Number.isNaN(v) && v > 0) this.brushSize = v;
-    });
-    this.element.appendChild(labelled("Size", sizeInput));
+    const sizeInput = numberField(this.brushSize, 1, (v) => { this.brushSize = v; });
+    this.addToolRow("Size", sizeInput, PAINT);
 
-    // Shape — one option for now.
-    const shapeSel = select([["square", "Square"]], this.shape, (v) => { this.shape = v; });
-    this.element.appendChild(labelled("Shape", shapeSel));
+    // Shape.
+    const shapeSel = select([["square", "Square"], ["round", "Round"]], this.shape, (v) => { this.shape = v as BrushShape; });
+    this.addToolRow("Shape", shapeSel, PAINT);
 
-    // Layer — paint target channel. More to come (emissive, …).
-    const layerSel = select([["albedo", "Albedo"], ["normal", "Normal"]], this.layer, (v) => {
+    // Hardness — 0–100% mapped to 0–1 (soft → hard edge).
+    const hardInput = numberField(Math.round(this.hardness * 100), 0, (v) => { this.hardness = clamp01(v / 100); }, 100);
+    this.addToolRow("Hardness", hardInput, PAINT);
+
+    // Opacity — 0–100% mapped to 0–1 (translucent build-up → solid).
+    const opacityInput = numberField(Math.round(this.opacity * 100), 0, (v) => { this.opacity = clamp01(v / 100); }, 100);
+    this.addToolRow("Opacity", opacityInput, PAINT);
+
+    // Tolerance — paint-bucket fill spread, 0–255 per channel.
+    const tolInput = numberField(this.tolerance, 0, (v) => { this.tolerance = Math.min(255, v); }, 255);
+    this.addToolRow("Tolerance", tolInput, ["bucket"]);
+
+    // Layer — paint target channel (paint + bucket).
+    const layerSel = select([["albedo", "Albedo"], ["normal", "Normal"], ["emissive", "Emissive"]], this.layer, (v) => {
       this.layer = v as ArtLayer;
     });
-    this.element.appendChild(labelled("Layer", layerSel));
+    this.addToolRow("Layer", layerSel, ["brush", "erase", "bucket"]);
+
+    // Light — the variables a placed/cursor light gets (height/radius in card px,
+    // intensity unitless; colour is the primary swatch).
+    const heightInput = numberField(this.lightHeight, 0, (v) => { this.lightHeight = v; });
+    this.addToolRow("Height", heightInput, ["light"]);
+    const radiusInput = numberField(this.lightRadius, 0, (v) => { this.lightRadius = v; });
+    this.addToolRow("Radius", radiusInput, ["light"]);
+    const intensityInput = floatField(this.lightIntensity, 0, (v) => { this.lightIntensity = v; });
+    this.addToolRow("Intensity", intensityInput, ["light"]);
+
+    this.refreshRows();
+  }
+
+  /** Append a labelled option row tagged with the tools it applies to. */
+  private addToolRow(label: string, control: HTMLElement, tools: ArtTool[]): void {
+    const el = labelled(label, control);
+    this.toolRows.push({ el, tools });
+    this.element.appendChild(el);
+  }
+
+  /** Show only the active tool's option rows. */
+  private refreshRows(): void {
+    for (const { el, tools } of this.toolRows) el.style.display = tools.includes(this.tool) ? "flex" : "none";
   }
 
   private swap(): void {
@@ -179,6 +245,56 @@ function button(text: string, title: string, onClick: () => void): HTMLButtonEle
   btn.title = title;
   btn.addEventListener("click", onClick);
   return btn;
+}
+
+/** A full-width numeric `<input>` accepting integers in `[min, max]`. */
+function numberField(value: number, min: number, onChange: (v: number) => void, max?: number): HTMLInputElement {
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = String(min);
+  if (max !== undefined) input.max = String(max);
+  Object.assign(input.style, INPUT_CSS, { width: "100%" });
+  input.value = String(value);
+  input.addEventListener("input", () => {
+    const v = parseInt(input.value, 10);
+    if (!Number.isNaN(v) && v >= min) onChange(v);
+  });
+  return input;
+}
+
+/** Like {@link numberField} but accepts fractional values (e.g. light intensity). */
+function floatField(value: number, min: number, onChange: (v: number) => void): HTMLInputElement {
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = String(min);
+  input.step = "0.1";
+  Object.assign(input.style, INPUT_CSS, { width: "100%" });
+  input.value = String(value);
+  input.addEventListener("input", () => {
+    const v = parseFloat(input.value);
+    if (!Number.isNaN(v) && v >= min) onChange(v);
+  });
+  return input;
+}
+
+/** A `[✓] label` row; calls `onChange` with the new checked state. */
+function checkbox(label: string, checked: boolean, onChange: (on: boolean) => void): HTMLDivElement {
+  const r = row();
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  Object.assign(input.style, { flex: "0 0 auto", margin: "0", cursor: "pointer" });
+  input.addEventListener("change", () => onChange(input.checked));
+  const lbl = document.createElement("label");
+  lbl.textContent = label;
+  Object.assign(lbl.style, { flex: "1 1 auto", cursor: "pointer", color: "#a0a0b0" });
+  lbl.addEventListener("click", () => { input.checked = !input.checked; onChange(input.checked); });
+  r.append(input, lbl);
+  return r;
+}
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function swatch(value: number, onChange: (v: number) => void): HTMLInputElement {

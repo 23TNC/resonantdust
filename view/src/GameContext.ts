@@ -16,6 +16,7 @@ import type { DrawCallCounter } from "./debug/DrawCallCounter";
 import type { DefinitionManager } from "./game/definitions/DefinitionManager";
 import type { LayoutManager } from "./game/layout/LayoutManager";
 import type { InputManager } from "./game/input/InputManager";
+import type { LogManager } from "./game/panels/chat/LogManager";
 
 export interface GameContext {
   readonly app: Application;
@@ -54,4 +55,9 @@ export interface GameContext {
   /** DOM→semantic input adapter (pointer/key events + hit-testing); null until a
    *  world scene installs it (the login screen uses DOM forms, not this). */
   input: InputManager | null;
+
+  /** Client-only flavor-text log feed (the chat panel's "logs" tab); null until
+   *  a world scene installs it. Distinct from `chat_messages` (server-backed,
+   *  streamed via the client) — game systems push local event blurbs here. */
+  logs: LogManager | null;
 }

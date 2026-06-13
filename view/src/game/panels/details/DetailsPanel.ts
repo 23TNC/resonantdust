@@ -156,9 +156,14 @@ export class DetailsPanel extends LayoutNode {
    *  inventory cards and any call site that didn't supply a position.
    *  Rendered as a small subtitle under the card name. */
   private coords: { surface: number; q: number; r: number } | null = null;
+  /** The card_id of the selected card, shown as `#<hex>` to the right of the
+   *  name (so commands can address it without a lookup). `null` for tiles / any
+   *  call site that didn't supply one — the id label is then hidden. */
+  private cardId: number | null = null;
 
   private readonly bg              = new Graphics();
   private readonly nameText:       Text;
+  private readonly idText:         Text;
   private readonly coordsText:     Text;
   private readonly pips:           Pip[];
   private readonly featurePips:    Pip[];
@@ -192,6 +197,22 @@ export class DetailsPanel extends LayoutNode {
     });
     this.nameText.anchor.set(0, 0);
     this.container.addChild(this.nameText);
+
+    // Card id (`#<hex>`), to the RIGHT of the name on the same line — same
+    // colour/size/style as the coords label, so they read as one meta row
+    // (`Corpus #403   world (2, 4)`). Left-anchored; positioned after the name.
+    this.idText = new Text({
+      text: "",
+      style: {
+        fill: 0x778899,
+        fontFamily: "sans-serif",
+        fontSize: COORDS_FONT_SIZE,
+        fontStyle: "italic",
+      },
+    });
+    this.idText.anchor.set(0, 0);
+    this.idText.visible = false;
+    this.container.addChild(this.idText);
 
     this.coordsText = new Text({
       text: "",
@@ -323,10 +344,12 @@ export class DetailsPanel extends LayoutNode {
     ctx: GameContext,
     stockValues?: readonly number[],
     location?: { surface: number; q: number; r: number } | null,
+    cardId?: number | null,
   ): void {
     this.def      = ctx.definitions.decode(packedDefinition);
     this.cardName = ctx.definitions.label(packedDefinition);
     this.coords   = location ?? null;
+    this.cardId   = cardId ?? null;
     this.description = ctx.definitions.description(packedDefinition);
 
     // Static aspects + stock-slot aspects. Stock pips show the current
@@ -444,6 +467,17 @@ export class DetailsPanel extends LayoutNode {
     // ── Card name ─────────────────────────────────────────────────────
     this.nameText.text = this.cardName;
     this.nameText.position.set(PADDING, NAME_Y);
+
+    // ── Card id (`#<hex>`) — right of the name, same style as coords ──
+    if (this.cardId !== null) {
+      this.idText.text = `#${this.cardId.toString(16)}`;
+      // Sit just after the name; nudged down to baseline-align with the larger
+      // name font (same offset the coords label uses).
+      this.idText.position.set(this.nameText.x + this.nameText.width + 6, NAME_Y + 2);
+      this.idText.visible = true;
+    } else {
+      this.idText.visible = false;
+    }
 
     // ── World coords (cards / tiles on a world surface) ───────────────
     if (this.coords !== null) {

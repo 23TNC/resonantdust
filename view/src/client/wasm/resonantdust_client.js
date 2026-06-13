@@ -12,6 +12,38 @@ export class WasmClient {
         wasm.__wbg_wasmclient_free(ptr, 0);
     }
     /**
+     * Author a brand-new `.rd` source named `name` with `text` (a card that
+     * shipped no source for this facet). Same authority validate + hot-swap +
+     * persist + `content_changed` as `modify_content`.
+     * @param {string} name
+     * @param {string} text
+     */
+    add_content(name, text) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.wasmclient_add_content(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * The clock-discipline + RTT diagnostics as a JSON object (the view's
+     * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
+     * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
+     * @returns {string}
+     */
+    clock_stats() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmclient_clock_stats(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Open the gate WebSocket and wire the inbound queue + open flag. Returns once
      * the socket is *created*; poll [`is_open`](Self::is_open) for the handshake.
      * @param {string} ws_url
@@ -23,6 +55,30 @@ export class WasmClient {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Create a new card via `create_card` — the chat `/give` path. `owner` owns
+     * the new card; `card_key` is the content def id (e.g. `"corpus"`); the new
+     * card lands in `zone_owner`'s `surface` zone (the gate resolves the def +
+     * stock; the shard places it).
+     *
+     * Placement: when `world_q/world_r` are `0,0` AND `zone_owner == owner`, send
+     * `macro_zone = 0` so the SHARD auto-places into the default bucket
+     * (`first_free_cell` — collision-free; this is `/give 1025 corpus` → first
+     * empty inventory slot). Otherwise resolve the global cell to an explicit
+     * `macro_zone` + local cell (world zones are owned by `0`, inventory zones by
+     * the container card) and place there (exact snap, no collision avoidance).
+     * @param {number} owner
+     * @param {string} card_key
+     * @param {number} zone_owner
+     * @param {number} surface
+     * @param {number} world_q
+     * @param {number} world_r
+     */
+    give(owner, card_key, zone_owner, surface, world_q, world_r) {
+        const ptr0 = passStringToWasm0(card_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmclient_give(this.__wbg_ptr, owner, ptr0, len0, zone_owner, surface, world_q, world_r);
     }
     /**
      * True once the WebSocket handshake completed.
@@ -53,6 +109,49 @@ export class WasmClient {
         const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmclient_login(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * Author a NEW version of an existing `.rd` source (art editor "save DSL").
+     * `lineage` is the source name the gate tracks; `text` is the full file. The
+     * authority validates + hot-swaps + persists to R2, then broadcasts
+     * `content_changed`. Fire-and-forget — gated on the content-author capability.
+     * @param {string} lineage
+     * @param {string} text
+     */
+    modify_content(lineage, text) {
+        const ptr0 = passStringToWasm0(lineage, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.wasmclient_modify_content(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * Replace locale `domain`'s JSON (art editor "save locale"). The authority
+     * validates + hot-swaps + persists + broadcasts `content_changed`. Fire-and-
+     * forget — gated on the content-author capability.
+     * @param {string} domain
+     * @param {string} json
+     */
+    modify_locale(domain, json) {
+        const ptr0 = passStringToWasm0(domain, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.wasmclient_modify_locale(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * Replace visuals source `name` (`visuals/…`) with `text` (art editor "save
+     * visuals"). The authority validates + hot-swaps + persists + broadcasts
+     * `content_changed`. Fire-and-forget — gated on the content-author capability.
+     * @param {string} name
+     * @param {string} text
+     */
+    modify_visuals(name, text) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(text, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.wasmclient_modify_visuals(this.__wbg_ptr, ptr0, len0, ptr1, len1);
     }
     constructor() {
         const ret = wasm.wasmclient_new();
@@ -138,6 +237,17 @@ export class WasmClient {
         }
     }
     /**
+     * Send a chat message to the world feed. Sender id/name come from the session;
+     * the shard trims/validates `body`. Fire-and-forget — it echoes back through
+     * our own subscription like any other message.
+     * @param {string} body
+     */
+    send_chat(body) {
+        const ptr0 = passStringToWasm0(body, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmclient_send_chat(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * Aim a viewport anchor at hex `(q, r)` on `(surface, owner)`, subscribing the
      * surrounding zones. `radius_tiles` is the VISIBLE half-extent in TILES (the
      * `AnchorRadii` tiers are tile distances, not zone counts) — the `active`
@@ -156,6 +266,34 @@ export class WasmClient {
      */
     set_anchor(surface, owner, q, r, radius_tiles) {
         wasm.wasmclient_set_anchor(this.__wbg_ptr, surface, owner, q, r, radius_tiles);
+    }
+    /**
+     * Subscribe to the world chat feed. Idempotent — call once login resolved (so
+     * our sender id/name are known); inbound messages then accumulate for
+     * [`take_chat`](Self::take_chat). Safe to re-call.
+     */
+    subscribe_chat() {
+        wasm.wasmclient_subscribe_chat(this.__wbg_ptr);
+    }
+    /**
+     * Drain chat messages folded since the last call, as a JSON array of
+     * `{ sentAt: string, senderPlayerId: number, senderName: string, body: string }`
+     * (sorted by `sentAt`; `sentAt` is a string because the packed u64 exceeds
+     * JS's safe-integer range). Empty `[]` when nothing arrived. The worker calls
+     * this each pump and posts non-empty batches to the chat UI.
+     * @returns {string}
+     */
+    take_chat() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmclient_take_chat(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * The new content version if the gate hot-swapped its corpus since the last
@@ -239,12 +377,12 @@ function __wbg_get_imports() {
             arg0.onopen = arg1;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 33, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 43, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 35, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 45, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0);
             return ret;
         },

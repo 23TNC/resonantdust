@@ -6,13 +6,35 @@ import type { UiEditMode } from "../ui/dom/UiEditMode";
 import { PixiPanel } from "../ui/dom/PixiPanel";
 import { ArtToolsPanel } from "./ArtToolsPanel";
 import { masterVariantStem, masterChannelUrl, loadMasterTexture, type MasterChannel } from "./masterTextures";
-import { type Surface, surfaceTexel, outlineRect, cssColor } from "./brush";
+import { type Surface, type SurfaceChannel, type Brush, surfaceTexel, outlineRect, cssColor, floodFill } from "./brush";
 import { PaintHistory } from "./paintHistory";
-import { type Light, composite } from "./lighting";
+import { type Light, composite, Bloom } from "./lighting";
+import { type DslLight, syncLightRegion, buildCardSource, unflattenLocale } from "./dslEdit";
 import { GenericCardFace, buildCardPrimList } from "../game/cards/generic/GenericCardFace";
 import type { PrimList, VisualNode } from "../game/cards/generic/visualSpec";
 import { global } from "../game/definitions/globals";
+import { sharedContent, contentSources } from "../game/definitions/contentBoot";
 import { debug } from "../debug";
+
+/** Base64-encode bytes in chunks — `btoa(String.fromCharCode(...all))` overflows
+ *  the call-stack for large arrays, so build the binary string a window at a time.
+ *  Standard base64 (what the gate's decoder expects). */
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+
+/** The card def shape the content wasm returns (`cardDef(packed)` JSON) — only
+ *  the fields the editor tabs read. */
+interface CardDefJson {
+  key: string;
+  type_name: string;
+  aspects: [string, number, number][];
+}
 
 export interface CardEditorPanelOptions {
   parent: LayoutNode;
@@ -39,10 +61,14 @@ const LIGHT_RADIUS = 1.6;
 const LIGHT_INTENSITY = 1.3;
 const LIGHT_MARKER_R = 8;
 const LIGHT_MARKER_COLOR = 0xffee88;
+// Preview bloom (CPU, texel space — blooms ONLY the emissive contribution).
+const BLOOM_THRESHOLD = 24;    // emissive luma 0–255 to bloom (skips near-black)
+const BLOOM_RADIUS_FRAC = 0.03; // blur radius as a fraction of the larger dim
+const BLOOM_INTENSITY = 0.9;   // add-back strength
 const LABEL_H = 16;
 const PAD = 12;
-/** Max squares the bottom row is sized for (prim + albedo + normal + 2
- *  sprite placeholders), so the prim square's size stays stable as the
+/** Max squares the bottom row is sized for (prim + albedo + normal + emissive +
+ *  1 sprite placeholder), so the prim square's size stays stable as the
  *  selection — and the square count — changes. */
 const MAX_SQUARES = 5;
 /** Fraction of the big square the card is drawn at, leaving a margin so the
@@ -51,7 +77,7 @@ const CARD_FIT = 0.84;
 /** Vertical strip reserved under the square row for the edit controls. */
 const CONTROLS_MIN = 150;
 
-type SquareKind = "prim" | "albedo" | "normal" | "placeholder";
+type SquareKind = "prim" | "albedo" | "normal" | "emissive" | "placeholder";
 interface Square { kind: SquareKind; x: number; label: string }
 
 /** Width of the right art-tools column, as a fraction of the content width,
@@ -142,6 +168,7 @@ export class CardEditorPanel extends PixiPanel {
   private readonly diffuseSprite = new Sprite();
   private readonly albedoSprite = new Sprite();
   private readonly normalSprite = new Sprite();
+  private readonly emissiveSprite = new Sprite();
   private readonly frame = new Graphics();
   private readonly cardLabel = new Text({ text: "Card", style: LABEL_STYLE });
   /** Prim-square label — "Diffuse" while a sprite's master diffuse is shown. */
@@ -188,9 +215,12 @@ export class CardEditorPanel extends PixiPanel {
   private litCtx: CanvasRenderingContext2D | null = null;
   private litTexture: Texture | null = null;
   private litOut: ImageData | null = null;
+  /** CPU bloom pass over the lit result; rebuilt with the lit canvas on resize. */
+  private bloom: Bloom | null = null;
   /** Cached source pixels (re-read on paint/undo, reused while only lights move). */
   private litAlbedoData: ImageData | null = null;
   private litNormalData: ImageData | null = null;
+  private litEmissiveData: ImageData | null = null;
   /** The stem the lit canvas was sized for (rebuild on change). */
   private litStem: string | null = null;
   /** The card's main sprite node — the preview is pinned to it, so it stays the
@@ -224,10 +254,29 @@ export class CardEditorPanel extends PixiPanel {
   private readonly select: HTMLSelectElement;
   /** DOM per-primitive edit controls, rebuilt per selection. */
   private readonly editControls: HTMLDivElement;
-  /** Always-visible tabbed section left of the card preview (content TBD). */
+  /** Always-visible tabbed section left of the card preview: the selected card's
+   *  Aspects / Visual DSL / Data DSL / Locales. */
   private readonly leftSection: HTMLDivElement;
+  private readonly leftPanes: HTMLDivElement[];
+  /** Editable text buffers inside the tab panes (Aspects / Visual / Data /
+   *  Locales). These are the working DSL/locale copies the editor patches and
+   *  that `onSave` will eventually write back. */
+  private readonly paneEditors: HTMLTextAreaElement[] = [];
+  /** The current card's `::key>` — the def name used to scaffold a visuals block
+   *  when one is authored from scratch. */
+  private cardKey = "";
+  /** Source `.rd` file each DSL tab's block came from (its `modify_content`
+   *  lineage on save); empty when the card has no such block yet. */
+  private visualFile = "";
+  private dataFile = "";
+  /** The card's locale `type` (the `cards[type][key]` bucket), for locale save. */
+  private localeType = "";
+  /** Each tab's value as loaded/last-synced — a tab is DIRTY (needs save) when its
+   *  textarea differs, catching BOTH manual edits and programmatic ones (a light
+   *  add rewrites the Visual buffer). Indexed like `paneEditors`. */
+  private loadedTab: string[] = [];
   /** Art tools right of the card preview — visible only for a sprite selection. */
-  private readonly artTools = new ArtToolsPanel();
+  private readonly artTools = new ArtToolsPanel({ onLightingChange: () => { this.relight(); this.drawLightMarkers(); } });
 
   private geom: Geom | null = null;
   private readonly unsubRelayout: () => void;
@@ -246,10 +295,21 @@ export class CardEditorPanel extends PixiPanel {
     });
     this.ctx = opts.ctx;
 
+    // Lift the inherited resize handles above this panel's DOM content. Unlike
+    // other panels, the editor fills its body with `position: fixed` overlays
+    // (the textarea panes, art tools, paint layer) at `zIndex` 25–31, while the
+    // resize handles ship with no z-index (0). Without this, the textarea panes
+    // paint over the 4px edge/corner strips, so an edge-drag lands on a textarea
+    // and selects its text instead of resizing. 40 clears the content stack.
+    for (const handle of [this.resizeCorner, this.resizeEdgeX, this.resizeEdgeY]) {
+      handle.style.zIndex = "40";
+    }
+
     this.bigFace = new GenericCardFace(opts.ctx, 0);
     this.smallFace = new GenericCardFace(opts.ctx, 0);
     this.albedoSprite.visible = false;
     this.normalSprite.visible = false;
+    this.emissiveSprite.visible = false;
 
     this.diffuseSprite.visible = false;
 
@@ -269,6 +329,7 @@ export class CardEditorPanel extends PixiPanel {
     c.addChild(this.diffuseSprite);
     c.addChild(this.albedoSprite);
     c.addChild(this.normalSprite);
+    c.addChild(this.emissiveSprite);
     c.addChild(this.cardLabel);
     c.addChild(this.primLabel);
     for (const lbl of this.rowLabels) c.addChild(lbl);
@@ -303,7 +364,9 @@ export class CardEditorPanel extends PixiPanel {
     this.editControls.addEventListener("pointerdown", (e) => e.stopPropagation());
     this.panel.appendChild(this.editControls);
 
-    this.leftSection = buildTabbedSection(["Tab 1", "Tab 2", "Tab 3", "Tab 4"]);
+    const tabbed = buildTabbedSection(["Aspects", "Visual", "Data", "Locales"]);
+    this.leftSection = tabbed.root;
+    this.leftPanes = tabbed.panes;
     this.panel.appendChild(this.leftSection);
     this.panel.appendChild(this.artTools.element);
 
@@ -369,11 +432,85 @@ export class CardEditorPanel extends PixiPanel {
     this.selectedIndex = this.workingList.length > 0 ? 0 : -1;
     this.populateSelect();
     this.select.selectedIndex = this.selectedIndex;
+    this.populateTabs(packed);
     this.redrawCard();
     this.buildControls();
     if (!this.isOpen) this.open();
     this.focus();
     this.relayout();
+  }
+
+  /** Fill the left tabs with the opened card's Aspects / Visual DSL / Data DSL /
+   *  Locales — the card's OWN entry only (not the functions it calls). */
+  private populateTabs(packed: number): void {
+    let def: CardDefJson | null = null;
+    try { def = JSON.parse(sharedContent().cardDef(packed)) as CardDefJson | null; } catch { def = null; }
+    const key = def?.key ?? "";
+    const type = def?.type_name ?? "";
+    this.cardKey = key;
+    this.localeType = type;
+
+    // Aspects — name: value, straight off the card def.
+    const aspects = (def?.aspects ?? []).map(([n, v]) => `${n}: ${v}`).join("\n");
+    this.fillPane(0, aspects || "(no aspects)");
+
+    // Visual / Data DSL — the card's `::key>` block, classified by its facet
+    // marker (`:visuals>` vs `:data>`); functions it calls are NOT included.
+    let visual: string | null = null;
+    let data: string | null = null;
+    this.visualFile = "";
+    this.dataFile = "";
+    for (const [file, text] of contentSources()?.rd ?? []) {
+      if (!key) break;
+      const block = extractCardBlock(text, key);
+      if (!block) continue;
+      if (block.includes(":visuals>")) { visual = block; this.visualFile = file; }
+      else if (block.includes(":data>")) { data = block; this.dataFile = file; }
+    }
+    this.fillPane(1, visual ?? "(no :visuals entry)");
+    this.fillPane(2, data ?? "(no :data entry)");
+
+    // Locales — the card's subtree (`cards[type][key]`) from the cards domain.
+    let loc = "(no locale entry)";
+    const cards = contentSources()?.locales.find(([d]) => d === "cards");
+    if (cards && type && key) {
+      try {
+        const tree = (JSON.parse(cards[1]) as Record<string, Record<string, unknown>>)?.[type]?.[key];
+        if (tree !== undefined) loc = flattenLocale(tree).join("\n");
+      } catch { /* leave default */ }
+    }
+    this.fillPane(3, loc);
+  }
+
+  /** Fill a tab pane with an EDITABLE monospace text buffer (the working DSL /
+   *  locale copy), stored in {@link paneEditors} for read-back on save + light
+   *  sync. */
+  private fillPane(i: number, text: string): void {
+    const pane = this.leftPanes[i];
+    if (!pane) return;
+    pane.replaceChildren();
+    pane.style.padding = "0"; // the textarea owns its own padding + scroll
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.spellcheck = false;
+    Object.assign(ta.style, {
+      display: "block", boxSizing: "border-box", width: "100%", height: "100%",
+      margin: "0", padding: "8px", border: "none", outline: "none", resize: "none",
+      background: "rgba(12, 14, 20, 0.6)", color: "#cdd3e0", whiteSpace: "pre",
+      fontFamily: "ui-monospace, monospace", fontSize: "11px", lineHeight: "1.4",
+    } satisfies Partial<CSSStyleDeclaration>);
+    // Let the textarea own keyboard + selection without the panel intercepting.
+    ta.addEventListener("pointerdown", (e) => e.stopPropagation());
+    ta.addEventListener("keydown", (e) => e.stopPropagation());
+    pane.appendChild(ta);
+    this.paneEditors[i] = ta;
+    this.loadedTab[i] = text; // baseline for dirty detection
+  }
+
+  /** A tab differs from its loaded baseline — dirtied by a manual edit OR a
+   *  programmatic one (e.g. a light add rewriting the Visual buffer). */
+  private tabDirty(i: number): boolean {
+    return (this.paneEditors[i]?.value ?? "") !== (this.loadedTab[i] ?? "");
   }
 
   private populateSelect(): void {
@@ -448,8 +585,8 @@ export class CardEditorPanel extends PixiPanel {
   }
 
   /** The squares to show for the current selection, with their content-local x.
-   *  Always the prim square; albedo + normal when textured; plus two
-   *  placeholder slots for a sprite (future channels). LEFT-justified (starting
+   *  Always the prim square; albedo + normal + emissive when textured; plus one
+   *  placeholder slot for a sprite (future channels). LEFT-justified (starting
    *  at `PAD`) so the prim square stays put as the channel squares come and go,
    *  instead of re-centring on every selection change. */
   private squareLayout(side: number): Square[] {
@@ -460,7 +597,7 @@ export class CardEditorPanel extends PixiPanel {
     if (node?.kind === "sprite") {
       squares.push({ kind: "albedo", x: 0, label: "Albedo" });
       squares.push({ kind: "normal", x: 0, label: "Normal" });
-      squares.push({ kind: "placeholder", x: 0, label: "Slot 3" });
+      squares.push({ kind: "emissive", x: 0, label: "Emissive" });
       squares.push({ kind: "placeholder", x: 0, label: "Slot 4" });
     }
     squares.forEach((s, i) => { s.x = PAD + i * (side + PAD); });
@@ -536,7 +673,7 @@ export class CardEditorPanel extends PixiPanel {
     const ch = Math.min(oy + h, g.bigY + g.bigSide) - cy;
     this.cardSurface = cw <= 0 || ch <= 0
       ? null
-      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.previewStem ?? "" };
+      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.previewStem ?? "", channel: "lit" };
   }
 
   /** Cursor (content-local) is over the card preview square. */
@@ -582,13 +719,14 @@ export class CardEditorPanel extends PixiPanel {
       const primX = g.squares.find((s) => s.kind === "prim")?.x ?? 0;
       const albedoSq = g.squares.find((s) => s.kind === "albedo");
       const normalSq = g.squares.find((s) => s.kind === "normal");
+      const emissiveSq = g.squares.find((s) => s.kind === "emissive");
       // Diffuse (read-only) fills the prim square; the small face is its
       // placeholder until the master loads. Albedo / normal show their editable
       // canvas copies (the brush paints these).
       const diffuse = this.masterTex(stem, "diffuse");
       if (diffuse) {
         this.smallFace.visible = false;
-        this.fitChannelAt(this.diffuseSprite, diffuse, primX, g.rowY, g.side, stem);
+        this.fitChannelAt(this.diffuseSprite, diffuse, primX, g.rowY, g.side, stem, "diffuse");
         this.primLabel.text = "Diffuse";
         this.primLabel.visible = true;
         this.primLabel.position.set(primX, g.rowY + g.side + 2);
@@ -597,15 +735,18 @@ export class CardEditorPanel extends PixiPanel {
         this.renderSmallFace(node, primX, g);
         this.primLabel.visible = false;
       }
-      if (albedoSq) this.fitChannelAt(this.albedoSprite, this.channelTexture(stem, "albedo"), albedoSq.x, g.rowY, g.side, stem);
+      if (albedoSq) this.fitChannelAt(this.albedoSprite, this.channelTexture(stem, "albedo"), albedoSq.x, g.rowY, g.side, stem, "albedo");
       else this.albedoSprite.visible = false;
-      if (normalSq) this.fitChannelAt(this.normalSprite, this.channelTexture(stem, "normal"), normalSq.x, g.rowY, g.side, stem);
+      if (normalSq) this.fitChannelAt(this.normalSprite, this.channelTexture(stem, "normal"), normalSq.x, g.rowY, g.side, stem, "normal");
       else this.normalSprite.visible = false;
+      if (emissiveSq) this.fitChannelAt(this.emissiveSprite, this.channelTexture(stem, "emissive"), emissiveSq.x, g.rowY, g.side, stem, "emissive");
+      else this.emissiveSprite.visible = false;
     } else if (g && node) {
       // Non-sprite: the small face renders the prim; no channel squares.
       this.diffuseSprite.visible = false;
       this.albedoSprite.visible = false;
       this.normalSprite.visible = false;
+      this.emissiveSprite.visible = false;
       this.primLabel.visible = false;
       this.renderSmallFace(node, g.squares.find((s) => s.kind === "prim")?.x ?? 0, g);
     } else {
@@ -635,9 +776,12 @@ export class CardEditorPanel extends PixiPanel {
     }
     const albedoTex = this.channelTexture(stem, "albedo");
     const normalTex = this.channelTexture(stem, "normal");
+    // Ensure the pinned sprite's emissive layer exists (blank when it ships none)
+    // so the lit composite can ADD its glow — independent of which prim is selected.
+    this.channelTexture(stem, "emissive");
     const litTex = albedoTex ? this.prepareLighting(stem, albedoTex) : null;
     this.recordCardSurface(node, albedoTex ?? normalTex ?? this.masterTex(stem, "diffuse"), litTex);
-    this.drawLightCircle();
+    this.drawLightMarkers();
   }
 
   private hideSelectionRenders(): void {
@@ -645,22 +789,30 @@ export class CardEditorPanel extends PixiPanel {
     this.diffuseSprite.visible = false;
     this.albedoSprite.visible = false;
     this.normalSprite.visible = false;
+    this.emissiveSprite.visible = false;
     this.primLabel.visible = false;
   }
 
   /** Editable display texture for a paintable channel (created from the master on
-   *  first need); `null` until the master loads or when the channel is absent. */
-  private channelTexture(stem: string, channel: "albedo" | "normal"): Texture | null {
+   *  first need); `null` until the master loads or when the channel is absent.
+   *  Emissive is allowed to start from scratch: when a sprite ships no emissive
+   *  master, we MAKE the layer blank (sized to its albedo/diffuse) so the brush
+   *  has a transparent canvas to paint glow onto. */
+  private channelTexture(stem: string, channel: "albedo" | "normal" | "emissive"): Texture | null {
     const key = `${stem}|${channel}`;
     if (this.paint.has(key)) return this.paint.getOrCreateTexture(key, Texture.EMPTY)!;
     const master = this.masterTex(stem, channel);
-    if (!master) return null;
-    return this.paint.getOrCreateTexture(key, master);
+    if (master) return this.paint.getOrCreateTexture(key, master);
+    if (channel === "emissive") {
+      const dims = this.masterTex(stem, "albedo") ?? this.masterTex(stem, "diffuse");
+      if (dims) return this.paint.getOrCreateBlank(key, dims.width || 1, dims.height || 1);
+    }
+    return null;
   }
 
   /** Fit `tex` into a channel square (or hide the sprite) and, when shown, record
    *  its paint Surface so the brush can hover / paint over it. */
-  private fitChannelAt(sprite: Sprite, tex: Texture | null, x: number, y: number, side: number, stem: string): void {
+  private fitChannelAt(sprite: Sprite, tex: Texture | null, x: number, y: number, side: number, stem: string, channel: SurfaceChannel): void {
     if (!tex) { sprite.visible = false; return; }
     const p = fitPlacement(tex, x, y, side);
     sprite.texture = tex;
@@ -671,7 +823,7 @@ export class CardEditorPanel extends PixiPanel {
     this.surfaces.push({
       rx: x, ry: y, rw: side, rh: side,
       ox: p.ox, oy: p.oy, sx: p.scale, sy: p.scale,
-      texW: tex.width || 1, texH: tex.height || 1, stem,
+      texW: tex.width || 1, texH: tex.height || 1, stem, channel,
     });
   }
 
@@ -721,9 +873,10 @@ export class CardEditorPanel extends PixiPanel {
       this.litCtx = ctx;
       this.litTexture = Texture.from(canvas);
       this.litOut = ctx.createImageData(w, h);
+      this.bloom = new Bloom(w, h);
     }
     if (this.litStem !== stem) {
-      this.fixedLight = { x: w / 2, y: h / 2 }; // new sprite → centre the light
+      this.fixedLight = { x: w * 0.15, y: h * 0.15 }; // new sprite → light from the top-left
       this.litStem = stem;
     }
     this.refreshLightingSource();
@@ -737,42 +890,162 @@ export class CardEditorPanel extends PixiPanel {
     if (!stem) { this.litAlbedoData = null; this.litNormalData = null; return; }
     this.litAlbedoData = canvasData(this.paint.channelCanvas(`${stem}|albedo`));
     this.litNormalData = canvasData(this.paint.channelCanvas(`${stem}|normal`));
+    this.litEmissiveData = canvasData(this.paint.channelCanvas(`${stem}|emissive`));
   }
 
   /** Recompute the lit canvas from the cached source + current lights. */
   private relight(): void {
     if (!this.litCtx || !this.litOut || !this.litAlbedoData || !this.litTexture) return;
-    composite(this.litOut, this.litAlbedoData, this.litNormalData, this.buildLights(), LIGHT_AMBIENT, LIGHT_Y_SIGN);
+    composite(this.litOut, this.litAlbedoData, this.litNormalData, this.litEmissiveData, this.buildLights(), LIGHT_AMBIENT, LIGHT_Y_SIGN);
+    const radius = Math.max(2, Math.round(Math.max(this.litOut.width, this.litOut.height) * BLOOM_RADIUS_FRAC));
+    this.bloom?.apply(this.litOut, this.litEmissiveData, BLOOM_THRESHOLD, radius, BLOOM_INTENSITY);
     this.litCtx.putImageData(this.litOut, 0, 0);
     this.litTexture.source.update();
   }
 
-  /** The fixed (white) light, plus the cursor light (in the art tools' primary
-   *  colour) while the Light tool is hovering. */
+  /** Every light shading the preview: the fixed (white) light, the cursor light
+   *  (art tools' primary colour) while hovering, and each `light` PRIMITIVE in
+   *  the working list (its `pos` / `tint` / `light` variables). */
   private buildLights(): Light[] {
     if (!this.litCanvas) return [];
     const dim = Math.max(this.litCanvas.width, this.litCanvas.height);
-    const mk = (x: number, y: number, r: number, gg: number, b: number): Light => ({
-      x, y, height: dim * LIGHT_HEIGHT, radius: dim * LIGHT_RADIUS, intensity: LIGHT_INTENSITY, r, g: gg, b,
+    const def = { height: dim * LIGHT_HEIGHT, radius: dim * LIGHT_RADIUS, intensity: LIGHT_INTENSITY };
+    const mk = (x: number, y: number, color: number, v = def): Light => ({
+      x, y, height: v.height, radius: v.radius, intensity: v.intensity,
+      r: ((color >> 16) & 0xff) / 255, g: ((color >> 8) & 0xff) / 255, b: (color & 0xff) / 255,
     });
-    const lights = [mk(this.fixedLight.x, this.fixedLight.y, 1, 1, 1)];
+    // Fixed + cursor lights are editor-internal (texel space). Light PRIMITIVES
+    // store the GAME unit — card px — so they round-trip to the DSL unchanged;
+    // convert them into the preview sprite's texel space for the CPU composite.
+    // The fixed (default) light is skippable via the Art Tools toggle, to preview
+    // the card's own lights alone.
+    const lights: Light[] = [];
+    if (this.artTools.defaultLight) lights.push(mk(this.fixedLight.x, this.fixedLight.y, 0xffffff));
     if (this.cursorLight) {
-      const c = this.artTools.primary;
-      lights.push(mk(this.cursorLight.x, this.cursorLight.y, ((c >> 16) & 0xff) / 255, ((c >> 8) & 0xff) / 255, (c & 0xff) / 255));
+      // Preview the cursor light with the Light tool's OWN options (card px →
+      // texel), so the hover matches the light that left-click will place.
+      lights.push(mk(this.cursorLight.x, this.cursorLight.y, this.artTools.primary, {
+        height: this.cardLenToTexel(this.artTools.lightHeight),
+        radius: this.cardLenToTexel(this.artTools.lightRadius),
+        intensity: this.artTools.lightIntensity,
+      }));
+    }
+    for (const n of this.workingList) {
+      if (n.kind !== "light" || !n.light) continue;
+      const t = this.cardToTexel(n.pos.x, n.pos.y);
+      lights.push(mk(t.tx, t.ty, n.tint ?? 0xffffff, {
+        height: this.cardLenToTexel(n.light.height),
+        radius: this.cardLenToTexel(n.light.radius),
+        intensity: n.light.intensity,
+      }));
     }
     return lights;
   }
 
-  /** Draw the fixed-light marker circle at its texel position (sprite-local, so
-   *  it pans/zooms with the preview). */
-  private drawLightCircle(): void {
+  // Light PRIMITIVES live in card-px (the game/DSL unit); the preview composites
+  // in the preview sprite's texel space. These map between the two via the sprite's
+  // card-px box (`node.pos`/`size`) ↔ the texel grid.
+  private cardToTexel(cx: number, cy: number): { tx: number; ty: number } {
+    const n = this.previewSpriteNode;
+    if (!n || !this.litCanvas) return { tx: cx, ty: cy };
+    const ax = (n.anchor?.x ?? 0) / 100;
+    const ay = (n.anchor?.y ?? 0) / 100;
+    const left = n.pos.x - ax * n.size.x;
+    const top = n.pos.y - ay * n.size.y;
+    return {
+      tx: ((cx - left) / (n.size.x || 1)) * this.litCanvas.width,
+      ty: ((cy - top) / (n.size.y || 1)) * this.litCanvas.height,
+    };
+  }
+
+  private texelToCard(tx: number, ty: number): { x: number; y: number } {
+    const n = this.previewSpriteNode;
+    if (!n || !this.litCanvas) return { x: tx, y: ty };
+    const ax = (n.anchor?.x ?? 0) / 100;
+    const ay = (n.anchor?.y ?? 0) / 100;
+    const left = n.pos.x - ax * n.size.x;
+    const top = n.pos.y - ay * n.size.y;
+    return {
+      x: left + (tx / this.litCanvas.width) * n.size.x,
+      y: top + (ty / this.litCanvas.height) * n.size.y,
+    };
+  }
+
+  /** Card-px length → texel length (uses the sprite's x-scale). */
+  private cardLenToTexel(len: number): number {
+    const n = this.previewSpriteNode;
+    if (!n || !this.litCanvas) return len;
+    return (len / (n.size.x || 1)) * this.litCanvas.width;
+  }
+
+  /** Draw a marker for every light — the fixed light + each light primitive — at
+   *  its texel position (sprite-local, so it pans/zooms with the preview). */
+  private drawLightMarkers(): void {
     this.lightGfx.clear();
     const sp = this.cardSpaceSprite;
     if (!sp || !this.litCanvas) return;
-    const lx = sp.ox + (this.fixedLight.x / sp.texW) * sp.w;
-    const ly = sp.oy + (this.fixedLight.y / sp.texH) * sp.h;
-    this.lightGfx.circle(lx, ly, LIGHT_MARKER_R).stroke({ color: LIGHT_MARKER_COLOR, width: 1.5 });
-    this.lightGfx.circle(lx, ly, 1.5).fill(LIGHT_MARKER_COLOR);
+    const mark = (tx: number, ty: number, color: number): void => {
+      const lx = sp.ox + (tx / sp.texW) * sp.w;
+      const ly = sp.oy + (ty / sp.texH) * sp.h;
+      this.lightGfx.circle(lx, ly, LIGHT_MARKER_R).stroke({ color, width: 1.5 });
+      this.lightGfx.circle(lx, ly, 1.5).fill(color);
+    };
+    if (this.artTools.defaultLight) mark(this.fixedLight.x, this.fixedLight.y, LIGHT_MARKER_COLOR);
+    for (const n of this.workingList) {
+      if (n.kind !== "light") continue;
+      const t = this.cardToTexel(n.pos.x, n.pos.y); // card-px → texel
+      mark(t.tx, t.ty, n.tint ?? 0xffffff);
+    }
+  }
+
+  /** Add a `light` primitive at texel `(tx, ty)` (Light tool, left-click), then
+   *  select it. Stored in CARD px (the game/DSL unit) — position from the click,
+   *  height/radius/intensity from the Light tool's Art Tools options, colour from
+   *  the primary swatch. Joins the working list, so it shows in the dropdown +
+   *  drives the preview lighting (and is sandbox DSL). */
+  private addLightPrim(tx: number, ty: number): void {
+    const c = this.texelToCard(tx, ty);
+    const node: VisualNode = {
+      kind: "light",
+      pos: { x: c.x, y: c.y },
+      size: { x: 0, y: 0 },
+      tint: this.artTools.primary,
+      light: { height: this.artTools.lightHeight, radius: this.artTools.lightRadius, intensity: this.artTools.lightIntensity },
+    };
+    this.workingList.push(node);
+    this.populateSelect();
+    this.selectedIndex = this.workingList.length - 1;
+    this.select.selectedIndex = this.selectedIndex;
+    this.buildControls();
+    this.relayout();
+    this.syncLightsToDsl();
+  }
+
+  /** A light primitive's variables changed — relight + redraw markers (cheap;
+   *  no relayout, so the edited field keeps focus) and re-emit the DSL. */
+  private onLightEdit(): void {
+    this.relight();
+    this.drawLightMarkers();
+    this.syncLightsToDsl();
+  }
+
+  /** The working list's light primitives, in the DSL/game unit (card px). */
+  private editorLights(): DslLight[] {
+    const out: DslLight[] = [];
+    for (const n of this.workingList) {
+      if (n.kind !== "light" || !n.light) continue;
+      out.push({ x: n.pos.x, y: n.pos.y, tint: n.tint ?? 0xffffff, height: n.light.height, radius: n.light.radius, intensity: n.light.intensity });
+    }
+    return out;
+  }
+
+  /** Patch the editor-managed `^light` region of the Visual DSL tab to match the
+   *  working list — the first instance of the editor → DSL write-back path. The
+   *  tab text stays the source of truth that {@link onSave} will persist. */
+  private syncLightsToDsl(): void {
+    const ta = this.paneEditors[1]; // Visual DSL tab
+    if (!ta) return;
+    ta.value = syncLightRegion(ta.value, this.editorLights(), this.cardKey);
   }
 
   /** Render `node` in isolation (centred + fit) in the prim square via the small
@@ -799,27 +1072,34 @@ export class CardEditorPanel extends PixiPanel {
   }
 
   /** Redraw the brush footprint outline over every surface at the hovered
-   *  texel. Cheap — called on each pointer move (not a full relayout). */
+   *  texel. Cheap — called on each pointer move (not a full relayout). The
+   *  footprint follows the brush shape (square / round) and shows for the
+   *  stamping tools (brush + erase). */
   private drawOutline(): void {
     this.outlineGfx.clear();
     const h = this.hoverTexel;
-    if (!h || this.artTools.tool !== "brush") return; // only the brush shows a footprint
+    const tool = this.artTools.tool;
+    if (!h || (tool !== "brush" && tool !== "erase")) return;
     const brush = this.artTools.brushSize;
     for (const s of this.allSurfaces()) {
       const r = outlineRect(s, h.tx, h.ty, brush);
-      this.outlineGfx.rect(r.x, r.y, r.w, r.h).stroke({ color: OUTLINE_COLOR, width: 1 });
+      if (this.artTools.shape === "round") {
+        this.outlineGfx.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2).stroke({ color: OUTLINE_COLOR, width: 1 });
+      } else {
+        this.outlineGfx.rect(r.x, r.y, r.w, r.h).stroke({ color: OUTLINE_COLOR, width: 1 });
+      }
     }
   }
 
-  /** The shared texel under a pointer event + the sprite it paints (the surface's
-   *  stem), or null if not over any surface. First matching surface wins. */
-  private locate(e: PointerEvent): { tx: number; ty: number; stem: string } | null {
+  /** The shared texel under a pointer event + the surface it hit (its stem +
+   *  channel), or null if not over any surface. First matching surface wins. */
+  private locate(e: PointerEvent): { tx: number; ty: number; stem: string; channel: SurfaceChannel } | null {
     const body = this.bodyRect;
     const lx = e.clientX - body.left;
     const ly = e.clientY - body.top;
     for (const s of this.allSurfaces()) {
       const t = surfaceTexel(s, lx, ly);
-      if (t) return { tx: t.tx, ty: t.ty, stem: s.stem };
+      if (t) return { tx: t.tx, ty: t.ty, stem: s.stem, channel: s.channel };
     }
     return null;
   }
@@ -834,7 +1114,8 @@ export class CardEditorPanel extends PixiPanel {
 
   private onPaintMove(e: PointerEvent): void {
     const tool = this.artTools.tool;
-    this.paintOverlay.style.cursor = tool === "pan" ? "grab" : tool === "light" ? "cell" : "crosshair";
+    this.paintOverlay.style.cursor =
+      tool === "pan" ? "grab" : tool === "light" ? "cell" : tool === "bucket" ? "copy" : "crosshair";
     if (this.panning) {
       this.pan = { x: this.pan.x + (e.clientX - this.lastPan.x), y: this.pan.y + (e.clientY - this.lastPan.y) };
       this.lastPan = { x: e.clientX, y: e.clientY };
@@ -852,23 +1133,33 @@ export class CardEditorPanel extends PixiPanel {
     this.hoverTexel = hit;
     this.drawOutline();
     if (this.painting && hit && hit.stem === this.paintStem) {
-      this.paint.paint(hit.tx, hit.ty, this.artTools.brushSize, this.strokeColor());
+      this.paint.paint(hit.tx, hit.ty);
     }
   }
 
   /** Mouse-down: Pan drags the preview; Light's MIDDLE click moves the fixed
-   *  light; Brush begins a stroke onto the surface's sprite (left = primary
+   *  light; Bucket flood-fills the clicked region into the selected layer;
+   *  Brush / Erase begin a stroke onto the surface's sprite (left = primary
    *  colour, right = secondary). */
   private onPaintDown(e: PointerEvent): void {
-    if (this.artTools.tool === "light") {
-      if (e.button === 1) { // middle-click moves the fixed light
-        const hit = this.locateCard(e);
-        if (hit) { e.preventDefault(); this.fixedLight = { x: hit.tx, y: hit.ty }; this.drawLightCircle(); this.relight(); }
+    const tool = this.artTools.tool;
+    if (tool === "light") {
+      const hit = this.locateCard(e);
+      if (!hit) return;
+      e.preventDefault();
+      if (e.button === 1) {
+        // Middle-click moves the fixed light.
+        this.fixedLight = { x: hit.tx, y: hit.ty };
+        this.drawLightMarkers();
+        this.relight();
+      } else if (e.button === 0) {
+        // Left-click drops a light PRIMITIVE at the cursor.
+        this.addLightPrim(hit.tx, hit.ty);
       }
       return;
     }
     if (e.button !== 0 && e.button !== 2) return;
-    if (this.artTools.tool === "pan") {
+    if (tool === "pan") {
       if (!this.overPreview(e)) return;
       e.preventDefault();
       this.panning = true;
@@ -878,16 +1169,63 @@ export class CardEditorPanel extends PixiPanel {
     }
     const hit = this.locate(e);
     if (!hit) return;
+    this.paintButton = e.button;
+    if (tool === "bucket") { e.preventDefault(); this.bucketFill(hit); return; }
+    // Brush / erase: begin a stroke on the selected layer of the hit sprite.
     const key = `${hit.stem}|${this.artTools.layer}`;
     if (!this.paint.has(key)) return; // that sprite's selected layer isn't editable
     e.preventDefault();
     this.painting = true;
-    this.paintButton = e.button;
     this.paintStem = hit.stem;
     this.paintOverlay.setPointerCapture?.(e.pointerId);
-    this.paint.begin(key);
-    this.paint.paint(hit.tx, hit.ty, this.artTools.brushSize, this.strokeColor());
+    this.paint.begin(key, this.currentBrush());
+    this.paint.paint(hit.tx, hit.ty);
     this.refreshHistoryButtons();
+  }
+
+  /** The stroke config for the active tool — `erase` reveals the channel's
+   *  backing; otherwise the dab is tinted with the held button's colour. */
+  private currentBrush(): Brush {
+    const a = this.artTools;
+    return {
+      size: a.brushSize,
+      shape: a.shape,
+      hardness: a.hardness,
+      opacity: a.opacity,
+      color: this.strokeColor(),
+      erase: a.tool === "erase",
+    };
+  }
+
+  /** Paint bucket: flood-fill the region under the cursor in the CLICKED
+   *  surface's texture, then fill that region (scaled to fit) into the SELECTED
+   *  layer of the same sprite as one undoable stroke. */
+  private bucketFill(hit: { tx: number; ty: number; stem: string; channel: SurfaceChannel }): void {
+    const src = this.surfacePixels(hit.stem, hit.channel);
+    if (!src) return;
+    const layer = this.artTools.layer;
+    this.channelTexture(hit.stem, layer); // ensure the target layer exists (blank emissive if absent)
+    const key = `${hit.stem}|${layer}`;
+    if (!this.paint.has(key)) return;
+    const mask = floodFill(src, hit.tx, hit.ty, this.artTools.tolerance);
+    this.paint.fillRegion(key, mask, this.strokeColor());
+    this.refreshHistoryButtons();
+    this.afterEdit();
+  }
+
+  /** Read a surface's source pixels for the paint bucket: the lit canvas for the
+   *  card preview, the edited channel canvas (or its master) for a paint channel,
+   *  the master for diffuse. */
+  private surfacePixels(stem: string, channel: SurfaceChannel): ImageData | null {
+    if (channel === "lit") return canvasData(this.litCanvas);
+    if (channel === "diffuse") {
+      const tex = this.masterTex(stem, "diffuse");
+      return tex ? textureData(tex) : null;
+    }
+    const edited = this.paint.channelCanvas(`${stem}|${channel}`);
+    if (edited) return canvasData(edited);
+    const tex = this.masterTex(stem, channel);
+    return tex ? textureData(tex) : null;
   }
 
   /** Mouse-up: end a pan, or finalise a stroke into the undo history (then
@@ -934,10 +1272,100 @@ export class CardEditorPanel extends PixiPanel {
     return null;
   }
 
-  /** TODO: write the edited master channels back to `public/textures/master/`
-   *  (then the LOD pyramid can be regenerated from it). */
+  /** Save: write every DIRTY tab + painted master channel back through the gate.
+   *  A tab is dirty when its buffer differs from what was loaded — covering BOTH
+   *  manual edits and programmatic ones (a light add rewrites the Visual buffer,
+   *  so it saves too). Visual + Data combine into one `::key>` card def →
+   *  `modify_content` (which VERSIONS the lineage, not a file); the Locale subtree
+   *  → `modify_locale`; painted master channels → `upload_master` (dirty-only, so
+   *  a map we never made is never written). Aspects is a read-out of the `:data`
+   *  block — authored via the Data tab, so it has no separate source to write. */
   private onSave(): void {
-    debug.log(["ui"], "[CardEditor] Save master (not implemented)", 2);
+    const src = contentSources();
+    if (!src) return;
+    const sent: string[] = [];
+
+    // Visual + Data DSL: a card is authored as ONE versioned def. `modify_content`
+    // takes the CARD LINEAGE (`key`) + a `<card>`-bucketed source defining `::key>`
+    // — it versions the lineage (`::key>` → `::key.N>`) by appending a runtime
+    // source, NOT a file rewrite. Since the loader merges facets by def NAME, the
+    // new version must carry the card's FULL def, so combine the (possibly edited)
+    // Data + Visual tab blocks into one `::key>` def. Send when either is dirty.
+    if (this.cardKey && (this.tabDirty(1) || this.tabDirty(2))) {
+      const source = buildCardSource(this.cardKey, [this.paneEditors[2]?.value ?? "", this.paneEditors[1]?.value ?? ""]);
+      if (source) {
+        this.ctx.client.modifyContent(this.cardKey, source);
+        this.loadedTab[1] = this.paneEditors[1]?.value ?? this.loadedTab[1]; // re-baseline
+        this.loadedTab[2] = this.paneEditors[2]?.value ?? this.loadedTab[2];
+        sent.push(`card:${this.cardKey}`);
+      }
+    }
+
+    // Locale: unflatten the edited subtree, merge into the cards-domain JSON → send.
+    if (this.tabDirty(3)) {
+      const loc = this.assembleLocale(src.locales);
+      if (loc) {
+        this.ctx.client.modifyLocale(loc.domain, loc.json);
+        this.loadedTab[3] = this.paneEditors[3]!.value;
+        sent.push(`locale:${loc.domain}`);
+      }
+    }
+
+    // Master-channel texture write: upload each EDITED channel. The paint key is
+    // `<stem>|<channel>`, stem `/textures/master/<aspect>/<faction>/<variant>`.
+    const dirty = this.paint.dirtyChannels();
+    for (const { key, canvas } of dirty) {
+      const bar = key.lastIndexOf("|");
+      if (bar < 0) continue;
+      const stem = key.slice(0, bar);
+      const channel = key.slice(bar + 1);
+      const m = stem.match(/^\/textures\/master\/([^/]+)\/([^/]+)\/(.+)$/);
+      if (!m) continue;
+      const [, aspect, faction, variant] = m;
+      this.uploadMasterChannel(aspect, faction, variant, channel, canvas);
+    }
+    debug.log(
+      ["ui"],
+      `[CardEditor] Save: sent [${sent.join(", ") || "no DSL"}] + ${dirty.length} master channel(s)`,
+      2,
+    );
+  }
+
+  /** Merge the edited Locale tab (a flattened `cards[type][key]` subtree) back
+   *  into the full cards-domain JSON, returning the `{domain, json}` to send.
+   *  `null` if the domain JSON is missing/unparseable or the card lacks a
+   *  type/key. */
+  private assembleLocale(locales: [string, string][]): { domain: string; json: string } | null {
+    const domain = "cards";
+    const entry = locales.find(([d]) => d === domain);
+    if (!entry || !this.localeType || !this.cardKey) return null;
+    let root: Record<string, Record<string, unknown>>;
+    try { root = JSON.parse(entry[1]) as Record<string, Record<string, unknown>>; } catch { return null; }
+    (root[this.localeType] ??= {})[this.cardKey] = unflattenLocale(this.paneEditors[3]!.value);
+    return { domain, json: JSON.stringify(root) };
+  }
+
+  /** Encode an edited channel's display canvas as a PNG and ship it to the gate
+   *  (`uploadMaster` → texture R2 bucket). Async (canvas → blob); fire-and-forget. */
+  private uploadMasterChannel(
+    aspect: string,
+    faction: string,
+    variant: string,
+    channel: string,
+    canvas: HTMLCanvasElement,
+  ): void {
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      void blob.arrayBuffer().then((buf) => {
+        const b64 = bytesToBase64(new Uint8Array(buf));
+        this.ctx.client.uploadMaster(aspect, faction, variant, channel, b64);
+        debug.log(
+          ["ui"],
+          `[CardEditor] uploaded master ${aspect}/${faction}/${variant}.${channel}.png (${blob.size}b)`,
+          2,
+        );
+      });
+    }, "image/png");
   }
 
   // ── per-primitive edit controls ─────────────────────────────────────
@@ -977,6 +1405,20 @@ export class CardEditorPanel extends PixiPanel {
         this.addRow("Width", this.numberInput(node.size.x, (v) => { node.size.x = v; this.onEdit(); }));
         this.addRow("Height", this.numberInput(node.size.y, (v) => { node.size.y = v; this.onEdit(); }));
         break;
+      case "light": {
+        // Same variables as the cursor light: position, colour, height, radius,
+        // intensity. Edits relight the preview (no full relayout — keeps focus).
+        const lt = (node.light ??= { height: 0, radius: 0, intensity: 1 });
+        this.addRow("Pos X", this.numberInput(node.pos.x, (v) => { node.pos.x = v; this.onLightEdit(); }));
+        this.addRow("Pos Y", this.numberInput(node.pos.y, (v) => { node.pos.y = v; this.onLightEdit(); }));
+        this.addRow("Color", this.colorInput(node.tint ?? 0xffffff, (v) => { node.tint = v; this.onLightEdit(); }));
+        this.addRow("Height", this.numberInput(lt.height, (v) => { lt.height = v; this.onLightEdit(); }));
+        this.addRow("Radius", this.numberInput(lt.radius, (v) => { lt.radius = v; this.onLightEdit(); }));
+        this.addRow("Intensity", this.numberInput(lt.intensity, (v) => { lt.intensity = v; this.onLightEdit(); }));
+        // Editor-authored prim → removable; the DSL region regenerates without it.
+        this.addRow("", this.actionButton("Remove", () => this.removeSelectedPrim()));
+        break;
+      }
     }
   }
 
@@ -985,6 +1427,30 @@ export class CardEditorPanel extends PixiPanel {
   private onEdit(): void {
     this.redrawCard();
     this.relayout();
+  }
+
+  /** Remove the selected primitive from the working list (only offered for
+   *  editor-authored prims, e.g. lights). Re-syncs the DSL region + preview. */
+  private removeSelectedPrim(): void {
+    const i = this.selectedIndex;
+    if (i < 0 || i >= this.workingList.length) return;
+    this.workingList.splice(i, 1);
+    this.selectedIndex = Math.min(i, this.workingList.length - 1);
+    this.populateSelect();
+    this.select.selectedIndex = this.selectedIndex;
+    this.buildControls();
+    this.redrawCard();
+    this.relayout();
+    this.syncLightsToDsl();
+  }
+
+  /** A fixed-width action button styled like the number inputs. */
+  private actionButton(label: string, onClick: () => void): HTMLButtonElement {
+    const btn = document.createElement("button");
+    Object.assign(btn.style, INPUT_CSS, { width: "84px", cursor: "pointer" });
+    btn.textContent = label;
+    btn.addEventListener("click", onClick);
+    return btn;
   }
 
   private addRow(label: string, input: HTMLElement): void {
@@ -1154,6 +1620,24 @@ function canvasData(canvas: HTMLCanvasElement | null): ImageData | null {
   return ctx ? ctx.getImageData(0, 0, canvas.width, canvas.height) : null;
 }
 
+/** Read a (master) texture's pixels by drawing its source image into a scratch
+ *  canvas — for the paint bucket to flood-fill against a channel with no editable
+ *  copy yet (diffuse, or an unpainted albedo/normal/emissive). */
+function textureData(tex: Texture): ImageData | null {
+  const src = tex.source;
+  const w = src.pixelWidth || tex.width;
+  const h = src.pixelHeight || tex.height;
+  const resource = src.resource as CanvasImageSource | undefined;
+  if (!resource || w <= 0 || h <= 0) return null;
+  const canvas = document.createElement("canvas");
+  canvas.width = w;
+  canvas.height = h;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.drawImage(resource, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h);
+}
+
 /** Set a fixed-positioned DOM element's viewport rect. */
 function place(el: HTMLElement, left: number, top: number, w: number, h: number): void {
   el.style.left = `${left}px`;
@@ -1164,7 +1648,7 @@ function place(el: HTMLElement, left: number, top: number, w: number, h: number)
 
 /** Build a fixed-positioned tabbed section: a tab bar over a stack of panes,
  *  one visible at a time. Panes start empty (content TBD). */
-function buildTabbedSection(labels: string[]): HTMLDivElement {
+function buildTabbedSection(labels: string[]): { root: HTMLDivElement; panes: HTMLDivElement[] } {
   const root = document.createElement("div");
   Object.assign(root.style, {
     position: "fixed",
@@ -1207,7 +1691,53 @@ function buildTabbedSection(labels: string[]): HTMLDivElement {
   tabs[0].style.color = "#ecd6aa";
   root.appendChild(tabBar);
   for (const p of panes) root.appendChild(p);
-  return root;
+  return { root, panes };
+}
+
+/** Extract a card's `::<key>>` block from one `.rd` source — only within a
+ *  `<card>` bucket (so a same-named `<recipe>`/`<blueprint>` def can't shadow
+ *  it). The block runs from `::key>` to the next sibling `::` def or bucket. */
+function extractCardBlock(text: string, key: string): string | null {
+  const lines = text.split("\n");
+  let inCard = false;
+  let start = -1;
+  let blockIndent = 0;
+  const out: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trimStart();
+    const indent = line.length - trimmed.length;
+    const bucket = /^<([a-z_]+)>/.exec(trimmed);
+    if (bucket) {
+      if (start >= 0) break; // a new bucket ends the block
+      inCard = bucket[1] === "card";
+      continue;
+    }
+    if (!inCard) continue;
+    const def = /^::([A-Za-z0-9_.]+)>/.exec(trimmed);
+    if (start < 0) {
+      if (def && def[1] === key) { start = 0; blockIndent = indent; out.push(line); }
+    } else if (def && indent <= blockIndent) {
+      break; // next sibling def ends the block
+    } else {
+      out.push(line);
+    }
+  }
+  if (start < 0) return null;
+  // Drop trailing blank / comment lines (a comment block usually documents the
+  // NEXT def, not this one).
+  while (out.length && (out[out.length - 1].trim() === "" || out[out.length - 1].trim().startsWith(";"))) out.pop();
+  return out.join("\n");
+}
+
+/** Flatten a locale subtree (`{label, description:{simple}}`) to `path: value`
+ *  lines. */
+function flattenLocale(obj: unknown, prefix = ""): string[] {
+  if (obj === null || typeof obj !== "object") return [`${prefix}: ${String(obj)}`];
+  const out: string[] = [];
+  for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+    out.push(...flattenLocale(v, prefix ? `${prefix}.${k}` : k));
+  }
+  return out;
 }
 
 function clamp(v: number, lo: number, hi: number): number {

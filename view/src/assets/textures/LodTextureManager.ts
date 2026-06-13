@@ -7,6 +7,7 @@ import {
   urlAtLod,
   albedoUrlFor,
   normalUrlFor,
+  emissiveUrlFor,
   LOD_SIZES,
   MIN_LOD,
 } from "../lodUrls";
@@ -252,7 +253,7 @@ export class LodTextureManager {
 
   /** The white-fallback frame as a normal-less pair. */
   private whitePair(): PackedPair {
-    return { albedo: this.ensureWhiteFallback(), normal: null };
+    return { albedo: this.ensureWhiteFallback(), normal: null, emissive: null };
   }
 
   /** Best already-cached LOD for the same `(aspect, faction,
@@ -299,22 +300,26 @@ export class LodTextureManager {
     try {
       // `url` is the variant (`<N>.png`). Load its albedo channel (the de-lit
       // `<N>.albedo.png` when present, else this lit `<N>.png`) and, alongside
-      // it, the optional `<N>.normal.png`. Both pack into one shared slot so
-      // their frames line up for the lighting pass; the normal is null until
-      // the aspect's map is generated.
+      // it, the optional `<N>.normal.png` + `<N>.emissive.png`. All pack into
+      // one shared slot so their frames line up for the lighting passes; normal
+      // and emissive are null until the aspect's maps are generated.
       const albedoUrl = albedoUrlFor(url);
       const normalUrl = normalUrlFor(url);
+      const emissiveUrl = emissiveUrlFor(url);
       await Promise.all([
         Assets.load(albedoUrl),
         normalUrl ? Assets.load(normalUrl) : Promise.resolve(),
+        emissiveUrl ? Assets.load(emissiveUrl) : Promise.resolve(),
       ]);
       const albedoSrc = Assets.get<Texture>(albedoUrl);
       if (!albedoSrc) return;
       const normalSrc = normalUrl ? Assets.get<Texture>(normalUrl) ?? null : null;
-      const packed = this.textures.pack(albedoSrc, normalSrc);
+      const emissiveSrc = emissiveUrl ? Assets.get<Texture>(emissiveUrl) ?? null : null;
+      const packed = this.textures.pack(albedoSrc, normalSrc, emissiveSrc);
       this.byUrl.set(url, {
         albedo: insetFrame(packed.albedo, FRAME_INSET),
         normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
+        emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
       });
       loaded = true;
     } catch (err) {

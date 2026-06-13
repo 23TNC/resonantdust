@@ -1,36 +1,60 @@
-//! The gate environments the view can connect to. Each maps to a gate WS port
-//! (the same ports `bin/gate` serves): dev is the user's gate, claude the
-//! isolated agent gate, test the harness gate. The host is shared (the gate runs
-//! on the same machine the view is served from) — only the port differs. The
-//! wasm client is pointed at the selected env's URL at login.
+//! The gate environments the view can connect to. Each env dictates its own
+//! endpoint — host + port + scheme — so the client can point at a LOCAL gate or a
+//! REMOTE (lightsail) one from the same login screen:
+//!  - dev / claude / test → local gates on the page's host, ports mirroring
+//!    `bin/gate` (dev is the user's, claude the agent's, test the harness's).
+//!  - alpha → the lightsail deployment at `gateway.resonantdust.com`.
+//! The wasm client is pointed at the selected env's URL at login.
 
-export type Environment = "dev" | "claude" | "test";
+export type Environment = "dev" | "claude" | "test" | "alpha";
 
-/** Selectable environments, in display order. */
-export const ENVIRONMENTS: readonly Environment[] = ["dev", "claude", "test"];
+/** Selectable environments, in display order. The login `Server` select is built
+ *  straight from this list, so adding one here surfaces it in the UI. */
+export const ENVIRONMENTS: readonly Environment[] = ["dev", "claude", "test", "alpha"];
 
-/** Gate WS port per environment — mirrors `bin/gate` (`GATE_PORT`). */
-const GATE_PORT: Record<Environment, number> = {
-  dev: 8473,
-  claude: 8474,
-  test: 8475,
-};
-
-/** The gateway WS endpoint for `env`. `host` defaults to wherever the view is
- *  served from (the gate runs alongside it). */
-export function gateUrlFor(env: Environment, host = location.hostname || "localhost"): string {
-  return `ws://${host}:${GATE_PORT[env]}/ws`;
+/** A gate endpoint. `host` omitted → the page's host (a local gate served from the
+ *  same machine); set → a fixed remote host. `secure` picks `wss`/`https` vs
+ *  `ws`/`http`. */
+interface GateEndpoint {
+  host?: string;
+  port: number;
+  secure: boolean;
 }
 
-/** The gate's HTTP origin for `env` (`http://host:port`) — for the `/content`
- *  fetch (DSL corpus). Same host/port as the WS, http scheme. */
-export function httpBaseFor(env: Environment, host = location.hostname || "localhost"): string {
-  return `http://${host}:${GATE_PORT[env]}`;
+/** Per-env endpoint. Local envs share the page host and differ only by port
+ *  (mirrors `bin/gate`'s `GATE_PORT`); alpha is the lightsail host. */
+const ENDPOINTS: Record<Environment, GateEndpoint> = {
+  dev: { port: 8473, secure: false },
+  claude: { port: 8474, secure: false },
+  test: { port: 8475, secure: false },
+  // Lightsail. The gate isn't fully up there yet, and it's plain HTTP like the
+  // lightsail spacetime server (no TLS proxy today) — flip `secure` to true and
+  // adjust `port` once a reverse proxy / final exposure lands.
+  alpha: { host: "gateway.resonantdust.com", port: 8473, secure: false },
+};
+
+/** The host for `env`: its fixed remote host, or the page's host for a local gate. */
+function hostFor(env: Environment): string {
+  return ENDPOINTS[env].host ?? (location.hostname || "localhost");
+}
+
+/** The gateway WS endpoint for `env`. `host` defaults to the env's host (local =
+ *  the page's host, alpha = lightsail); pass one to override. */
+export function gateUrlFor(env: Environment, host = hostFor(env)): string {
+  const { port, secure } = ENDPOINTS[env];
+  return `${secure ? "wss" : "ws"}://${host}:${port}/ws`;
+}
+
+/** The gate's HTTP origin for `env` (`http(s)://host:port`) — for the `/content`
+ *  fetch (DSL corpus). Same host/port as the WS, http(s) scheme. */
+export function httpBaseFor(env: Environment, host = hostFor(env)): string {
+  const { port, secure } = ENDPOINTS[env];
+  return `${secure ? "https" : "http"}://${host}:${port}`;
 }
 
 /** The env the view is currently connected to (set at login). Surfaced in the
  *  debug HUD so it's always unambiguous which gate's data you're looking at —
- *  dev vs claude vs test. `null` until the first login. */
+ *  dev / claude / test / alpha. `null` until the first login. */
 let _current: Environment | null = null;
 export function setCurrentEnvironment(env: Environment): void {
   _current = env;

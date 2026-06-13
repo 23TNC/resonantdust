@@ -49,6 +49,9 @@ interface PrimNodeJson {
    *  in from this state instead of snapping to target (e.g. a `^mask` rolling up
    *  from full height). Partial of the animatable set. */
   enter?: Partial<AnimatableFields>;
+  /** `light` primitive: its height / radius / intensity (position + colour are
+   *  `pos` + `tint`). Emitted once the DSL has a `^light` intrinsic. */
+  light?: { height: number; radius: number; intensity: number };
 }
 
 /** Map the wasm `PrimNode` JSON onto the client `VisualNode[]` — wrap texture
@@ -71,6 +74,7 @@ function mapPrims(nodes: PrimNodeJson[]): PrimList {
     z: n.z,
     source: n.source,
     enter: n.enter,
+    light: n.light,
   }));
 }
 

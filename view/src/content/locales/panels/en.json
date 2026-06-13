@@ -101,6 +101,10 @@
     "captures": "Captures",
     "captureSpread": "Capture spread",
     "rtt": "RTT",
-    "rttBest": "RTT (best)"
+    "rttBest": "RTT (best)",
+    "refresh": "Refresh",
+    "build": "Build",
+    "contentLive": "Content (live)",
+    "notConnected": "not connected"
   }
 }

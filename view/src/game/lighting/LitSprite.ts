@@ -16,8 +16,11 @@ import type { DeferredLighting } from "./DeferredLighting";
 export class LitSprite extends Sprite {
   /** Normal frame at this sprite's atlas slot, or null → flat-up fallback. */
   normalTexture: Texture | null = null;
-  /** The albedo, kept separately from the live `texture` so the normal pass can
-   *  swap `texture` to the normal, render, and restore the albedo. */
+  /** Emissive frame at this sprite's atlas slot, or null → no self-illumination.
+   *  Optional per art; the deferred emissive pass skips sprites without one. */
+  emissiveTexture: Texture | null = null;
+  /** The albedo, kept separately from the live `texture` so the normal/emissive
+   *  passes can swap `texture` to their map, render, and restore the albedo. */
   albedoTexture: Texture = Texture.EMPTY;
   private readonly deferred: DeferredLighting;
 
@@ -27,11 +30,13 @@ export class LitSprite extends Sprite {
     deferred.register(this);
   }
 
-  /** Set the displayed albedo and its normal sibling (null → flat-up). Anchor,
-   *  size, tint, scale, etc. are the stock `Sprite` API the prims already use. */
-  setTextures(albedo: Texture, normal: Texture | null): void {
+  /** Set the displayed albedo and its normal + emissive siblings (null → flat-up
+   *  / no glow). Anchor, size, tint, scale, etc. are the stock `Sprite` API the
+   *  prims already use. */
+  setTextures(albedo: Texture, normal: Texture | null, emissive: Texture | null = null): void {
     this.albedoTexture = albedo;
     this.normalTexture = normal;
+    this.emissiveTexture = emissive;
     this.texture = albedo;
   }
 

@@ -5,10 +5,36 @@ export class WasmClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Author a brand-new `.rd` source named `name` with `text` (a card that
+     * shipped no source for this facet). Same authority validate + hot-swap +
+     * persist + `content_changed` as `modify_content`.
+     */
+    add_content(name: string, text: string): void;
+    /**
+     * The clock-discipline + RTT diagnostics as a JSON object (the view's
+     * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
+     * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
+     */
+    clock_stats(): string;
+    /**
      * Open the gate WebSocket and wire the inbound queue + open flag. Returns once
      * the socket is *created*; poll [`is_open`](Self::is_open) for the handshake.
      */
     connect(ws_url: string): void;
+    /**
+     * Create a new card via `create_card` — the chat `/give` path. `owner` owns
+     * the new card; `card_key` is the content def id (e.g. `"corpus"`); the new
+     * card lands in `zone_owner`'s `surface` zone (the gate resolves the def +
+     * stock; the shard places it).
+     *
+     * Placement: when `world_q/world_r` are `0,0` AND `zone_owner == owner`, send
+     * `macro_zone = 0` so the SHARD auto-places into the default bucket
+     * (`first_free_cell` — collision-free; this is `/give 1025 corpus` → first
+     * empty inventory slot). Otherwise resolve the global cell to an explicit
+     * `macro_zone` + local cell (world zones are owned by `0`, inventory zones by
+     * the container card) and place there (exact snap, no collision avoidance).
+     */
+    give(owner: number, card_key: string, zone_owner: number, surface: number, world_q: number, world_r: number): void;
     /**
      * True once the WebSocket handshake completed.
      */
@@ -22,6 +48,25 @@ export class WasmClient {
      * Trust-on-first-use login. `player_id` lands later via `pump`.
      */
     login(name: string): void;
+    /**
+     * Author a NEW version of an existing `.rd` source (art editor "save DSL").
+     * `lineage` is the source name the gate tracks; `text` is the full file. The
+     * authority validates + hot-swaps + persists to R2, then broadcasts
+     * `content_changed`. Fire-and-forget — gated on the content-author capability.
+     */
+    modify_content(lineage: string, text: string): void;
+    /**
+     * Replace locale `domain`'s JSON (art editor "save locale"). The authority
+     * validates + hot-swaps + persists + broadcasts `content_changed`. Fire-and-
+     * forget — gated on the content-author capability.
+     */
+    modify_locale(domain: string, json: string): void;
+    /**
+     * Replace visuals source `name` (`visuals/…`) with `text` (art editor "save
+     * visuals"). The authority validates + hot-swaps + persists + broadcasts
+     * `content_changed`. Fire-and-forget — gated on the content-author capability.
+     */
+    modify_visuals(name: string, text: string): void;
     constructor();
     /**
      * Drop a card loose at a GLOBAL world cell `(q, r)` on `(surface, owner)` —
@@ -59,6 +104,12 @@ export class WasmClient {
      */
     render_region(surface: number, owner: number, center_q: number, center_r: number, half_cols: number, half_rows: number): string;
     /**
+     * Send a chat message to the world feed. Sender id/name come from the session;
+     * the shard trims/validates `body`. Fire-and-forget — it echoes back through
+     * our own subscription like any other message.
+     */
+    send_chat(body: string): void;
+    /**
      * Aim a viewport anchor at hex `(q, r)` on `(surface, owner)`, subscribing the
      * surrounding zones. `radius_tiles` is the VISIBLE half-extent in TILES (the
      * `AnchorRadii` tiers are tile distances, not zone counts) — the `active`
@@ -71,6 +122,20 @@ export class WasmClient {
      * viewports don't clobber each other. Re-call on pan.
      */
     set_anchor(surface: number, owner: number, q: number, r: number, radius_tiles: number): void;
+    /**
+     * Subscribe to the world chat feed. Idempotent — call once login resolved (so
+     * our sender id/name are known); inbound messages then accumulate for
+     * [`take_chat`](Self::take_chat). Safe to re-call.
+     */
+    subscribe_chat(): void;
+    /**
+     * Drain chat messages folded since the last call, as a JSON array of
+     * `{ sentAt: string, senderPlayerId: number, senderName: string, body: string }`
+     * (sorted by `sentAt`; `sentAt` is a string because the packed u64 exceeds
+     * JS's safe-integer range). Empty `[]` when nothing arrived. The worker calls
+     * this each pump and posts non-empty batches to the chat UI.
+     */
+    take_chat(): string;
     /**
      * The new content version if the gate hot-swapped its corpus since the last
      * call, else `undefined`. Drains the flag — the worker calls this each pump
@@ -93,10 +158,16 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmclient_free: (a: number, b: number) => void;
+    readonly wasmclient_add_content: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly wasmclient_clock_stats: (a: number) => [number, number];
     readonly wasmclient_connect: (a: number, b: number, c: number) => [number, number];
+    readonly wasmclient_give: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
     readonly wasmclient_is_open: (a: number) => number;
     readonly wasmclient_load_content: (a: number, b: number, c: number) => [number, number];
     readonly wasmclient_login: (a: number, b: number, c: number) => void;
+    readonly wasmclient_modify_content: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly wasmclient_modify_locale: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly wasmclient_modify_visuals: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmclient_new: () => number;
     readonly wasmclient_place_loose: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmclient_place_stack: (a: number, b: number, c: number, d: number) => void;
@@ -104,7 +175,10 @@ export interface InitOutput {
     readonly wasmclient_player_soul_id: (a: number) => number;
     readonly wasmclient_pump: (a: number) => number;
     readonly wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
+    readonly wasmclient_send_chat: (a: number, b: number, c: number) => void;
     readonly wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmclient_subscribe_chat: (a: number) => void;
+    readonly wasmclient_take_chat: (a: number) => [number, number];
     readonly wasmclient_take_content_changed: (a: number) => [number, number];
     readonly wasmclient_upload_master: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f: (a: number, b: number, c: any) => void;
@@ -115,8 +189,8 @@ export interface InitOutput {
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_destroy_closure: (a: number, b: number) => void;
-    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

@@ -466,6 +466,21 @@ pub struct PrimNode {
   /// with `enter.h` = the full card height and `size.y` (target) = 0 rolls up.
   #[serde(skip_serializing_if = "Option::is_none")]
   pub enter: Option<EnterFields>,
+  /// `light` primitive: its point-light shape (`&h.light.{height,radius,
+  /// intensity}` set). Position is `pos`, colour is `tint`. The client registers
+  /// a deferred light from these; the node itself isn't drawn.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub light: Option<LightFields>,
+}
+
+/// A `light` prim's variables (matching the editor's cursor light). `height` is
+/// the light's height above the sprite plane, `radius` its falloff distance,
+/// `intensity` its brightness.
+#[derive(Serialize, Clone, Debug, Default, PartialEq)]
+pub struct LightFields {
+  pub height: f64,
+  pub radius: f64,
+  pub intensity: f64,
 }
 
 /// Partial `current`-seed for a prim's `enter` (mirrors the client's
@@ -575,6 +590,15 @@ fn prim_from_cell(c: &Cell) -> Option<PrimNode> {
           tint: map_get(em, "tint").map(Cell::as_int),
         })
       }
+      _ => None,
+    },
+    // light: a point-light's shape (`&h.light.<field> set` → a nested map).
+    light: match map_get(m, "light") {
+      Some(Cell::Map(lm)) => Some(LightFields {
+        height: map_get(lm, "height").map(Cell::as_f64).unwrap_or(0.0),
+        radius: map_get(lm, "radius").map(Cell::as_f64).unwrap_or(0.0),
+        intensity: map_get(lm, "intensity").map(Cell::as_f64).unwrap_or(1.0),
+      }),
       _ => None,
     },
   })

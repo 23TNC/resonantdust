@@ -17,7 +17,7 @@
 
 import { Assets, type Texture } from "pixi.js";
 
-export type MasterChannel = "diffuse" | "albedo" | "normal";
+export type MasterChannel = "diffuse" | "albedo" | "normal" | "emissive";
 
 const MASTER_GLOB = import.meta.glob("/public/textures/master/**/*.png");
 const URLS: readonly string[] = Object.keys(MASTER_GLOB).map((k) => k.replace(/^\/public/, ""));
@@ -25,7 +25,7 @@ const URL_SET: ReadonlySet<string> = new Set(URLS);
 
 /** Drop the channel + `.png` suffix to get a variant's stem (its on-disk id). */
 function stemOf(url: string): string {
-  return url.replace(/\.(albedo|normal|diffuse)\.png$/, "").replace(/\.png$/, "");
+  return url.replace(/\.(albedo|normal|diffuse|emissive)\.png$/, "").replace(/\.png$/, "");
 }
 
 /** Numeric-aware compare so `1_2` sorts before `1_10`. */
@@ -38,7 +38,7 @@ function naturalCompare(a: string, b: string): number {
 const BY_ASPECT_FACTION: ReadonlyMap<string, string[]> = (() => {
   const stems = new Set<string>();
   for (const u of URLS) {
-    if (/\.normal\.png$/.test(u)) continue;
+    if (/\.(normal|emissive)\.png$/.test(u)) continue; // not colour variants
     stems.add(stemOf(u));
   }
   const groups = new Map<string, Set<string>>();
@@ -92,6 +92,8 @@ export function masterChannelUrl(stem: string, channel: MasterChannel): string |
   switch (channel) {
     case "normal":
       return exists(".normal.png");
+    case "emissive":
+      return exists(".emissive.png");
     case "diffuse":
       return exists(".diffuse.png") ?? exists(".png") ?? exists(".albedo.png");
     case "albedo":

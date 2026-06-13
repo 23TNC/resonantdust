@@ -45,7 +45,7 @@ const URL_SET: ReadonlySet<string> = new Set(ALL_URLS);
  * albedo first.
  */
 function stemOf(url: string): string {
-  return url.replace(/\.(albedo|normal|diffuse)\.png$/, "").replace(/\.png$/, "");
+  return url.replace(/\.(albedo|normal|diffuse|emissive)\.png$/, "").replace(/\.png$/, "");
 }
 
 /** The colour URL to display for a stem: de-lit albedo first, then lit diffuse,
@@ -64,7 +64,7 @@ function displayColourFor(stem: string): string | null {
 const VARIANT_SET: ReadonlySet<string> = (() => {
   const stems = new Set<string>();
   for (const u of ALL_URLS) {
-    if (!u.endsWith(".png") || /\.normal\.png$/.test(u)) continue;
+    if (!u.endsWith(".png") || /\.(normal|emissive)\.png$/.test(u)) continue;
     stems.add(stemOf(u));
   }
   const variants = new Set<string>();
@@ -91,6 +91,14 @@ export function albedoUrlFor(variantUrl: string): string {
 export function normalUrlFor(variantUrl: string): string | null {
   const normal = stemOf(variantUrl) + ".normal.png";
   return URL_SET.has(normal) ? normal : null;
+}
+
+/** Emissive-map URL for a variant: `<stem>.emissive.png` when present, else null
+ *  (no emissive → the sprite contributes nothing to the additive emissive pass).
+ *  Optional channel: most art has none, so null is the common case. */
+export function emissiveUrlFor(variantUrl: string): string | null {
+  const emissive = stemOf(variantUrl) + ".emissive.png";
+  return URL_SET.has(emissive) ? emissive : null;
 }
 
 /** Ascending list of LOD bucket sizes the pyramid uses. `art remaster`
