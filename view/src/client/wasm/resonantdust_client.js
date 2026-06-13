@@ -173,6 +173,31 @@ export class WasmClient {
         }
         return v1;
     }
+    /**
+     * Upload an edited master texture channel to the gate (art editor "save
+     * master"). `data_b64` is the standard-base64 PNG; the gate writes it to the
+     * texture R2 bucket at `textures/master/<aspect>/<faction>/<variant>.<channel>.png`.
+     * Fire-and-forget — gated server-side on the content-author capability;
+     * success/failure is logged gate-side.
+     * @param {string} aspect
+     * @param {string} faction
+     * @param {string} variant
+     * @param {string} channel
+     * @param {string} data_b64
+     */
+    upload_master(aspect, faction, variant, channel, data_b64) {
+        const ptr0 = passStringToWasm0(aspect, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(faction, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(variant, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(channel, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(data_b64, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        wasm.wasmclient_upload_master(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
+    }
 }
 if (Symbol.dispose) WasmClient.prototype[Symbol.dispose] = WasmClient.prototype.free;
 function __wbg_get_imports() {

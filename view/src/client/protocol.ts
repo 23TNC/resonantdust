@@ -36,7 +36,10 @@ export type ToWorker =
   // Drag-drop: place a card loose at a global cell, or stack it on a card. Fire-
   // and-forget — the outcome streams back through the render feed (no ack).
   | { type: "place"; cardId: number; surface: number; owner: number; q: number; r: number }
-  | { type: "placeStack"; cardId: number; parentId: number; direction: number };
+  | { type: "placeStack"; cardId: number; parentId: number; direction: number }
+  // Art authoring: upload an edited master texture channel (base64 PNG) to the
+  // gate, which writes it to the texture R2 bucket. Fire-and-forget.
+  | { type: "uploadMaster"; aspect: string; faction: string; variant: string; channel: string; data: string };
 
 /** Worker → main thread. `reply` is correlated to a request by `id`; `event` is
  *  an unsolicited push; `ready` fires once the worker (and later the wasm) booted;

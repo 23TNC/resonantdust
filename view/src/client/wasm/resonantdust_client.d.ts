@@ -78,6 +78,14 @@ export class WasmClient {
      * tells the main thread to refresh its render-side `Content`/`Locales`.
      */
     take_content_changed(): string | undefined;
+    /**
+     * Upload an edited master texture channel to the gate (art editor "save
+     * master"). `data_b64` is the standard-base64 PNG; the gate writes it to the
+     * texture R2 bucket at `textures/master/<aspect>/<faction>/<variant>.<channel>.png`.
+     * Fire-and-forget — gated server-side on the content-author capability;
+     * success/failure is logged gate-side.
+     */
+    upload_master(aspect: string, faction: string, variant: string, channel: string, data_b64: string): void;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -98,6 +106,7 @@ export interface InitOutput {
     readonly wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly wasmclient_take_content_changed: (a: number) => [number, number];
+    readonly wasmclient_upload_master: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

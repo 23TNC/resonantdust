@@ -15,6 +15,7 @@ export const wasmclient_pump: (a: number) => number;
 export const wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const wasmclient_take_content_changed: (a: number) => [number, number];
+export const wasmclient_upload_master: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
 export const wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f: (a: number, b: number, c: any) => void;
 export const wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0: (a: number, b: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

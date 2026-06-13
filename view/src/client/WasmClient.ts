@@ -134,6 +134,20 @@ export class WasmClient {
     this.post({ type: "placeStack", cardId, parentId, direction });
   }
 
+  /** Upload an edited master texture channel (art editor "save master"). The gate
+   *  writes the base64 PNG to the texture R2 bucket at
+   *  `textures/master/<aspect>/<faction>/<variant>.<channel>.png`. Fire-and-forget;
+   *  gated server-side on the content-author capability. */
+  uploadMaster(
+    aspect: string,
+    faction: string,
+    variant: string,
+    channel: string,
+    dataB64: string,
+  ): void {
+    this.post({ type: "uploadMaster", aspect, faction, variant, channel, data: dataB64 });
+  }
+
   /** Subscribe to world/state events pushed from the worker. Returns an
    *  unsubscribe fn. (Event stream is wired when the wasm core lands.) */
   onEvent(fn: (e: ClientEvent) => void): () => void {

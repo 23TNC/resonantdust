@@ -52,6 +52,9 @@ ctx.onmessage = (e: MessageEvent<ToWorker>): void => {
     case "placeStack":
       core?.place_stack(msg.cardId, msg.parentId, msg.direction);
       break;
+    case "uploadMaster":
+      core?.upload_master(msg.aspect, msg.faction, msg.variant, msg.channel, msg.data);
+      break;
   }
 };
 
