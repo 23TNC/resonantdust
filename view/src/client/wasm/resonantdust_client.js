@@ -157,6 +157,22 @@ export class WasmClient {
     set_anchor(surface, owner, q, r, radius_tiles) {
         wasm.wasmclient_set_anchor(this.__wbg_ptr, surface, owner, q, r, radius_tiles);
     }
+    /**
+     * The new content version if the gate hot-swapped its corpus since the last
+     * call, else `undefined`. Drains the flag — the worker calls this each pump
+     * and, on `Some`, re-fetches `/content`, reloads the matching bundle, and
+     * tells the main thread to refresh its render-side `Content`/`Locales`.
+     * @returns {string | undefined}
+     */
+    take_content_changed() {
+        const ret = wasm.wasmclient_take_content_changed(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
 }
 if (Symbol.dispose) WasmClient.prototype[Symbol.dispose] = WasmClient.prototype.free;
 function __wbg_get_imports() {

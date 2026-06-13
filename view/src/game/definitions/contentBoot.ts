@@ -28,6 +28,8 @@ let content: Content | null = null;
 let locales: Locales | null = null;
 let contentVersion = "";
 let initPromise: Promise<void> | null = null;
+/** The gate HTTP base `initContent` loaded from, reused by `reloadContent`. */
+let httpBaseUsed = "";
 
 /** Load the wasm runtime + fetch the gate corpus at `httpBase` into `Content` /
  *  `Locales`. Idempotent — one in-flight promise; subsequent calls await it.
@@ -46,6 +48,7 @@ export async function initContent(httpBase: string): Promise<void> {
       content = new Content(JSON.stringify(payload.rd));
       locales = new Locales(JSON.stringify(payload.locales));
       contentVersion = payload.version;
+      httpBaseUsed = httpBase;
     })();
   }
   await initPromise;
@@ -53,10 +56,41 @@ export async function initContent(httpBase: string): Promise<void> {
 
 const reloadListeners = new Set<() => void>();
 
-/** Subscribe to content reloads (a runtime add/modify pushed by the gate). Fired
- *  after `Content`/`Locales` are swapped, so listeners re-derive content-derived
- *  caches. Returns an unsubscribe fn. (No gate `content_changed` wiring in the
- *  view yet — present so `DefinitionManager` can subscribe.) */
+/** Re-fetch the gate corpus and swap the live `Content`/`Locales` in place — the
+ *  gate hot-swapped its content (a runtime add/modify, or an R2 upload the
+ *  authority re-polled). The new runtimes are built BEFORE the swap, so a bad
+ *  corpus throws and leaves the working content untouched. On a real change the
+ *  version bumps and `onContentReloaded` listeners fire so content-derived caches
+ *  (defs, globals, the viewport's retained nodes) rebuild. No-op before
+ *  `initContent`, or when the version is unchanged. */
+export async function reloadContent(): Promise<void> {
+  if (!content || !httpBaseUsed) return;
+  const resp = await fetch(`${httpBaseUsed}/content`);
+  if (!resp.ok) {
+    throw new Error(`content reload failed: ${resp.status} ${resp.statusText}`);
+  }
+  const payload = (await resp.json()) as ContentPayload;
+  if (payload.version === contentVersion) return; // already current — nothing to swap
+  // Build the new runtimes first; if the corpus is bad this throws here and the
+  // live content is never replaced.
+  const nextContent = new Content(JSON.stringify(payload.rd));
+  const nextLocales = new Locales(JSON.stringify(payload.locales));
+  const prevContent = content;
+  const prevLocales = locales;
+  content = nextContent;
+  locales = nextLocales;
+  contentVersion = payload.version;
+  // Free the superseded wasm runtimes (nothing retains them — DefinitionManager
+  // reads `sharedContent()` live each call).
+  prevContent?.free();
+  prevLocales?.free();
+  for (const cb of reloadListeners) cb();
+}
+
+/** Subscribe to content reloads (a gate hot-swap relayed via `content_changed`,
+ *  driving `reloadContent`). Fired after `Content`/`Locales` are swapped, so
+ *  listeners re-derive content-derived caches (`DefinitionManager`, `globals`,
+ *  the viewport's retained nodes). Returns an unsubscribe fn. */
 export function onContentReloaded(cb: () => void): () => void {
   reloadListeners.add(cb);
   return () => reloadListeners.delete(cb);

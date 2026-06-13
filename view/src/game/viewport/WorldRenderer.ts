@@ -11,6 +11,7 @@ import { atlasWhite, atlasHex } from "../cards/generic/atlasFills";
 import { cardBox } from "../cards/generic/cardBox";
 import { drawVisuals, tilePrims, type HostValue } from "../cards/generic/drawVisuals";
 import { global } from "../definitions/globals";
+import { onContentReloaded } from "../definitions/contentBoot";
 import { microIsCard, stackBranch, stackIndex, STACK_DIR_UP, STACK_DIR_DOWN } from "../../server/data/packing";
 import type { RenderRegion, RenderBatch, Renderable, ViewportFeed } from "../../client/render";
 
@@ -161,6 +162,8 @@ export class WorldRenderer extends LayoutNode {
 
   private feed: ViewportFeed | null = null;
   private lastRegion: RenderRegion | null = null;
+  /** Unsubscribe from content reloads (a gate hot-swap → rebuild retained nodes). */
+  private readonly unsubContent: () => void;
 
   private latestGen = 0;
   private readonly tiles = new Map<string, TileNode>();
@@ -233,6 +236,36 @@ export class WorldRenderer extends LayoutNode {
     // when it lands, re-resolve so they swap up (the resolver now returns the
     // cached upgrade). Coalesced to one pass per frame in `tick`.
     this.unsubLod = gctx.lodTextures.onLoad(() => { this.texturesDirty = true; });
+
+    // Gate content hot-swap: drop + rebuild retained nodes against the new defs.
+    this.unsubContent = onContentReloaded(() => this.reload());
+  }
+
+  /** Rebuild every retained tile/card against freshly-reloaded content. A def's
+   *  visuals or label can change with no data-row change, so the signature
+   *  reconcile in {@link applyBatch} won't catch it — we drop all nodes and
+   *  re-aim the feed so the next emit rebuilds them with the new `Content`.
+   *  Driven by {@link onContentReloaded} (after `Content`/`Locales` are swapped). */
+  reload(): void {
+    for (const t of this.tiles.values()) {
+      t.prims.destroy();
+      t.root.destroy({ children: true });
+    }
+    for (const c of this.cards.values()) c.node.destroy({ children: true });
+    this.tiles.clear();
+    this.cards.clear();
+    this.desiredTiles.clear();
+    this.desiredCards.clear();
+    this.presentTiles.clear();
+    this.presentCards.clear();
+    this.queuedTiles.clear();
+    this.queuedCards.clear();
+    this.tileQueue.length = 0;
+    this.cardQueue.length = 0;
+    // Force a fresh region aim so the worker re-emits the current view; the
+    // cleared maps make every reported item rebuild from scratch.
+    this.lastRegion = null;
+    this.syncRegion();
   }
 
   /** The current anchor cell (fractional). */
@@ -684,6 +717,7 @@ export class WorldRenderer extends LayoutNode {
     this.feed = null;
     this.gctx.app.stage.off("globalpointermove", this.onCursorMove);
     this.unsubLod();
+    this.unsubContent();
     this.deferred.destroy();
     for (const t of this.tiles.values()) t.prims.destroy();
     for (const c of this.cards.values()) c.node.destroy({ children: true });

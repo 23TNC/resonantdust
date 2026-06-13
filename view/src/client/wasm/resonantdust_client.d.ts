@@ -71,6 +71,13 @@ export class WasmClient {
      * viewports don't clobber each other. Re-call on pan.
      */
     set_anchor(surface: number, owner: number, q: number, r: number, radius_tiles: number): void;
+    /**
+     * The new content version if the gate hot-swapped its corpus since the last
+     * call, else `undefined`. Drains the flag — the worker calls this each pump
+     * and, on `Some`, re-fetches `/content`, reloads the matching bundle, and
+     * tells the main thread to refresh its render-side `Content`/`Locales`.
+     */
+    take_content_changed(): string | undefined;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -90,6 +97,7 @@ export interface InitOutput {
     readonly wasmclient_pump: (a: number) => number;
     readonly wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmclient_take_content_changed: (a: number) => [number, number];
     readonly wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f: (a: number, b: number, c: any) => void;
     readonly wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

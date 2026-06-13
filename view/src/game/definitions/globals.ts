@@ -1,4 +1,4 @@
-import { sharedContent } from "./contentBoot";
+import { onContentReloaded, sharedContent } from "./contentBoot";
 
 /**
  * Client mirror of the DSL `<globals>` constants — the single source of truth
@@ -14,10 +14,19 @@ import { sharedContent } from "./contentBoot";
 export type Globals = Readonly<Record<string, number>>;
 
 let cache: Globals | null = null;
+let subscribed = false;
 
-/** Build the globals map from the wasm module. Call after `initContent()`. */
+/** Build the globals map from the wasm module. Call after `initContent()`. On
+ *  the first call it also subscribes to content reloads, so a gate hot-swap that
+ *  changes a `<globals>` dimension rebuilds this cache. */
 export function initGlobals(): void {
   cache = JSON.parse(sharedContent().globals()) as Globals;
+  if (!subscribed) {
+    subscribed = true;
+    onContentReloaded(() => {
+      cache = JSON.parse(sharedContent().globals()) as Globals;
+    });
+  }
 }
 
 /** The loaded globals. Throws if `initGlobals()` wasn't called first. */

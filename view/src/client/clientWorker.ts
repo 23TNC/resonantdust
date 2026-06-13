@@ -97,8 +97,33 @@ function startPump(): void {
   if (pumpTimer !== null) return;
   pumpTimer = setInterval(() => {
     if (!core) return;
-    if (core.pump()) for (const viewId of views.keys()) emitView(viewId);
+    const changed = core.pump();
+    // The gate may have hot-swapped its corpus (runtime add/modify, or an R2
+    // upload the authority re-polled). Reload our matcher bundle + tell the main
+    // thread BEFORE re-emitting, so the redraw uses the new defs.
+    const version = core.take_content_changed();
+    if (version !== undefined) void handleContentChanged(version);
+    if (changed) for (const viewId of views.keys()) emitView(viewId);
   }, 50);
+}
+
+/** Reload content after a gate hot-swap: re-fetch `/content`, rebuild the wasm
+ *  matcher bundle, and signal the main thread (which refreshes its render-side
+ *  `Content`/`Locales` and redraws). Guarded so overlapping changes don't race;
+ *  a failed reload keeps the current bundle (the next change retries). */
+let reloadingContent = false;
+async function handleContentChanged(version: string): Promise<void> {
+  if (reloadingContent || !core) return;
+  reloadingContent = true;
+  try {
+    const rd = await fetchContent(httpBase(gateUrl));
+    core.load_content(JSON.stringify(rd));
+    post({ type: "contentChanged", version });
+  } catch (err) {
+    console.error("[worker] content reload failed", err);
+  } finally {
+    reloadingContent = false;
+  }
 }
 
 // ── render feed ─────────────────────────────────────────────────────

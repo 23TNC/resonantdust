@@ -46,4 +46,8 @@ export type FromWorker =
   | { type: "reply"; id: number; ok: true; result: LoginResult }
   | { type: "reply"; id: number; ok: false; error: string }
   | { type: "event"; event: ClientEvent }
-  | { type: "renderBatch"; batch: RenderBatch };
+  | { type: "renderBatch"; batch: RenderBatch }
+  // The gate hot-swapped its content corpus; the worker has reloaded its matcher
+  // bundle. The main thread refreshes its render-side `Content`/`Locales` and
+  // redraws. `version` is the new corpus fingerprint (for logging/dedupe).
+  | { type: "contentChanged"; version: string };

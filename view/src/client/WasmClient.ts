@@ -43,6 +43,9 @@ export class WasmClient {
    *  See {@link DEVELOPER_NAME}. */
   get isDeveloper(): boolean { return this._playerName === DEVELOPER_NAME; }
   private readonly eventListeners = new Set<(e: ClientEvent) => void>();
+  /** Fired when the gate hot-swapped its content corpus (the worker reloaded its
+   *  matcher bundle); the app refreshes its render-side `Content`/`Locales`. */
+  private readonly contentChangedListeners = new Set<(version: string) => void>();
   /** Per-viewport render-batch handlers, keyed by the viewId assigned in
    *  {@link openViewport}. */
   private nextViewId = 1;
@@ -82,6 +85,9 @@ export class WasmClient {
           fn?.(msg.batch);
           break;
         }
+        case "contentChanged":
+          for (const fn of this.contentChangedListeners) fn(msg.version);
+          break;
       }
     };
     this.worker.onerror = (e): void => console.error("[WasmClient] worker error", e.message);
@@ -135,6 +141,15 @@ export class WasmClient {
     return () => this.eventListeners.delete(fn);
   }
 
+  /** Subscribe to gate content hot-swaps (a runtime add/modify, or an R2 upload
+   *  the authority re-polled). The worker has already reloaded its matcher
+   *  bundle when this fires; the handler refreshes the render-side content
+   *  (`reloadContent`). Returns an unsubscribe fn. */
+  onContentChanged(fn: (version: string) => void): () => void {
+    this.contentChangedListeners.add(fn);
+    return () => this.contentChangedListeners.delete(fn);
+  }
+
   /** Open a render feed for a viewport. The client streams `onBatch` chunks of
    *  whatever it finds in `region` (see {@link RenderBatch}); the returned
    *  handle re-aims (`update`) or tears down (`close`) the feed. Independent of
@@ -165,6 +180,7 @@ export class WasmClient {
     this.worker.terminate();
     this.pending.clear();
     this.eventListeners.clear();
+    this.contentChangedListeners.clear();
     this.viewListeners.clear();
   }
 }

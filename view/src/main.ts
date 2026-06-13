@@ -24,6 +24,7 @@ import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
 import { smallestLodUrls } from "./assets/lodUrls";
 import { DefinitionManager } from "./game/definitions/DefinitionManager";
+import { reloadContent } from "./game/definitions/contentBoot";
 import type { GameContext } from "./GameContext";
 
 
@@ -104,6 +105,14 @@ async function main(): Promise<void> {
 
   // Packed-definition decoder (stub until content loading lands in the worker).
   const definitions = new DefinitionManager();
+
+  // Gate content hot-swap → refresh the render-side content. The worker has
+  // already reloaded its matcher bundle; `reloadContent` re-fetches `/content`,
+  // swaps `Content`/`Locales`, and fires `onContentReloaded` (DefinitionManager /
+  // globals / each WorldRenderer rebuild). Session-long; no teardown needed.
+  client.onContentChanged(() => {
+    void reloadContent();
+  });
 
   const ctx: GameContext = {
     app,
