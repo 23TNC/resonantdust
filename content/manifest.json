@@ -1,0 +1,52 @@
+{
+  "data": [
+    "data/aspect/01.rd",
+    "data/biomes/01.rd",
+    "data/blueprints/01.rd",
+    "data/cards/blueprints.rd",
+    "data/cards/faculties.rd",
+    "data/cards/requisites.rd",
+    "data/cards/souls.rd",
+    "data/cards/status.rd",
+    "data/cards/tiles.rd",
+    "data/recipes/01.rd",
+    "data/recipes/02.rd",
+    "data/recipes/03_chorus_story.rd"
+  ],
+  "visuals": [
+    "visuals/asset/01.rd",
+    "visuals/cards/blueprints.rd",
+    "visuals/cards/faculties.rd",
+    "visuals/cards/requisites.rd",
+    "visuals/cards/souls.rd",
+    "visuals/cards/status.rd",
+    "visuals/cards/tiles.rd",
+    "visuals/functions/01.rd",
+    "visuals/manifest/alter.rd",
+    "visuals/manifest/berry.rd",
+    "visuals/manifest/blueprint.rd",
+    "visuals/manifest/building.rd",
+    "visuals/manifest/concrete.rd",
+    "visuals/manifest/conifer.rd",
+    "visuals/manifest/deciduous.rd",
+    "visuals/manifest/flora.rd",
+    "visuals/manifest/flower.rd",
+    "visuals/manifest/fog.rd",
+    "visuals/manifest/fountain.rd",
+    "visuals/manifest/mushroom.rd",
+    "visuals/manifest/requisite.rd",
+    "visuals/manifest/soul_blue.rd",
+    "visuals/manifest/soul_offline.rd",
+    "visuals/manifest/soul_white.rd",
+    "visuals/manifest/soul_yellow.rd",
+    "visuals/manifest/stone.rd",
+    "visuals/manifest/symbols.rd",
+    "visuals/manifest/table_slab.rd"
+  ],
+  "locales": {
+    "aspects": "locales/aspects/en.json",
+    "cards": "locales/cards/en.json",
+    "panels": "locales/panels/en.json",
+    "recipes": "locales/recipes/en.json"
+  }
+}
