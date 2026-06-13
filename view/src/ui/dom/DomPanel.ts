@@ -2106,9 +2106,18 @@ export class DomPanel {
    *  `"none"` or the panel isn't mounted yet (the open path and
    *  the window-resize handler call this again once the panel
    *  exists in the DOM). Preserves current size — width and
-   *  height aren't touched. Anchor's CSS pinning is re-applied
-   *  by the caller after this writes, so the two stay
-   *  consistent. */
+   *  height aren't touched.
+   *
+   *  Snap pins position via `left` / `top`, which directly fights
+   *  the anchor's edge-pinning CSS (a `top-right` anchor wants
+   *  `right` fixed / `left: auto` so resize grows leftward; this
+   *  writes the opposite). So we re-apply the anchor at the end —
+   *  `applyAnchor` reads the just-snapped rect and re-expresses the
+   *  same position in anchored-edge terms, leaving the panel
+   *  snapped to its corner *and* resizing the right way. Folding it
+   *  in here (rather than relying on callers) makes the invariant
+   *  un-forgettable — the resize-end and window-resize paths used
+   *  to call `applySnap` alone and silently dropped the anchor. */
   private applySnap(): void {
     if (this._snap === "none") return;
     if (!this.panel.isConnected) return;
@@ -2139,6 +2148,9 @@ export class DomPanel {
     this.panel.style.top    = `${top}px`;
     this.panel.style.right  = "auto";
     this.panel.style.bottom = "auto";
+    // Re-express this position via the anchored edges so resize
+    // grows away from the anchored corner (see the doc comment).
+    this.applyAnchor();
   }
 
   /** Pull the panel back inside the safe area if any part of it

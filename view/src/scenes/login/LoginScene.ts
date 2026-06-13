@@ -39,9 +39,10 @@ export class LoginScene extends Scene {
   private overlay!: FormOverlay;
   private mode: Mode = "login";
   private busy = false;
-  /** Carried across mode switches so the user doesn't retype. Dev-time prefill;
-   *  drop to `""` for real users. */
-  private rememberedUsername = "Player1";
+  /** Carried across mode switches so the user doesn't retype. Dev-time prefill
+   *  of the developer account (unlocks the right-click card menu — see
+   *  `WasmClient.isDeveloper`); drop to `""` for real users. */
+  private rememberedUsername = "Developer";
   /** Carried across mode switches so the chosen gate sticks. Defaults to `test`
    *  (the harness gate) so a dev session lands there by default rather than
    *  accidentally opening dev/claude. */

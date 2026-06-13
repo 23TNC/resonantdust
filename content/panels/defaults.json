@@ -1,7 +1,7 @@
 {
   "panelSettingsPopup": {
-    "left": "909.773px",
-    "top": "65.0682px",
+    "left": "462.5px",
+    "top": "146.523px",
     "right": "auto",
     "bottom": "auto",
     "width": "260px",
@@ -23,7 +23,7 @@
   },
   "settingsMenu": {
     "left": "1648.89px",
-    "top": "32.7159px",
+    "top": "32.7045px",
     "right": "auto",
     "bottom": "auto",
     "width": "200px",
@@ -44,8 +44,8 @@
     "minimized": false
   },
   "debugPanel": {
-    "left": "212.341px",
-    "top": "375.205px",
+    "left": "1106.17px",
+    "top": "320.67px",
     "right": "auto",
     "bottom": "auto",
     "width": "463.625px",
@@ -64,23 +64,23 @@
     "titleBarHidden": false,
     "gridSnap": false,
     "masked": true,
-    "minimized": true
+    "minimized": false
   },
   "worldViewport": {
     "left": "0px",
     "top": "32px",
     "right": "auto",
     "bottom": "auto",
-    "width": "1219.93px",
+    "width": "1316.24px",
     "height": "853px",
     "anchor": "top-left",
-    "snap": "none",
+    "snap": "top-left",
     "pin": "bottom-left",
-    "heightMode": "off",
-    "draggable": true,
+    "heightMode": "full",
+    "draggable": false,
     "minimizable": true,
     "resizableX": true,
-    "resizableY": true,
+    "resizableY": false,
     "closable": true,
     "hideMinimizeBtn": false,
     "hideCloseBtn": false,
@@ -90,12 +90,12 @@
     "minimized": false
   },
   "gameDetailsPanel": {
-    "left": "802.586px",
-    "top": "32px",
+    "left": "995.207px",
+    "top": "63.5926px",
     "right": "auto",
     "bottom": "auto",
     "width": "319.655px",
-    "height": "147px",
+    "height": "137px",
     "anchor": "top-right",
     "snap": "none",
     "pin": "bottom-left",
@@ -107,17 +107,17 @@
     "closable": true,
     "hideMinimizeBtn": false,
     "hideCloseBtn": false,
-    "titleBarHidden": false,
+    "titleBarHidden": true,
     "gridSnap": true,
     "masked": true,
     "minimized": false
   },
-  "inventory:1:1032": {
-    "left": "1219.93px",
+  "inventory:1:1025": {
+    "left": "1316.25px",
     "top": "32px",
     "right": "auto",
     "bottom": "auto",
-    "width": "642.069px",
+    "width": "545.759px",
     "height": "853px",
     "anchor": "top-right",
     "snap": "top-right",
@@ -135,12 +135,12 @@
     "masked": true,
     "minimized": false
   },
-  "inventory:1:1025": {
-    "left": "1219.93px",
+  "inventory:1:1032": {
+    "left": "1316.25px",
     "top": "32px",
     "right": "auto",
     "bottom": "auto",
-    "width": "642.069px",
+    "width": "545.759px",
     "height": "853px",
     "anchor": "top-right",
     "snap": "top-right",

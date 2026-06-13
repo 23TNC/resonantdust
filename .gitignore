@@ -1,7 +1,12 @@
+# Claude local state
+.claude/scheduled_tasks.lock
+
 # Godot editor/cache data
 .import/
 .godot/
 *.import
+
+/bin/keys/*
 
 # UID files
 *.uid

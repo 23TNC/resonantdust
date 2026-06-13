@@ -5,7 +5,7 @@
 //! framework needs, wired into a minimal `GameContext`. Game subsystems
 //! (data/cards/actions/world) are rebuilt on top from here.
 
-import { Application } from "pixi.js";
+import { Application, Assets } from "pixi.js";
 import { loadFonts } from "./assets/fonts";
 import { SceneManager } from "./scenes/SceneManager";
 import { LoginScene } from "./scenes/login/LoginScene";
@@ -42,6 +42,22 @@ async function main(): Promise<void> {
   const host = document.getElementById("app");
   if (!host) throw new Error("#app element not found");
   host.appendChild(app.canvas);
+
+  // Texture asset origin. LOD textures are served from a Cloudflare R2 bucket —
+  // the only `Assets.load` consumer is LodTextureManager, and the relative
+  // `/textures/lod/...` URL keys stay unchanged: PIXI's `basePath` rewrites a
+  // leading-`/` URL against the base's origin at fetch time (see path.toAbsolute),
+  // so `/textures/lod/x.png` -> `<base>/textures/lod/x.png`. Fonts use the
+  // `FontFace` API (not Assets), so they're unaffected.
+  //
+  // Override with `VITE_TEXTURE_BASE`; set it to "" to serve same-origin from
+  // local `public/` (faster remaster iteration). NOTE: the bucket MUST return
+  // CORS headers (Access-Control-Allow-Origin) or WebGL rejects the cross-origin
+  // textures — curl 200s but the browser won't upload them to a GL texture.
+  const TEXTURE_BASE =
+    import.meta.env.VITE_TEXTURE_BASE ??
+    "https://pub-1e16a0e8062e4775a4368f0271a37496.r2.dev";
+  await Assets.init({ basePath: TEXTURE_BASE });
 
   // Content-shipped panel layout defaults — positions / sizes / toggle states
   // every `DomPanel` merges between its constructor opts and any persisted

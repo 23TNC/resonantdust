@@ -14,6 +14,12 @@ import type { RenderRegion, RenderBatch, ViewportFeed } from "./render";
 export type { LoginResult };
 export type { RenderRegion, RenderBatch, ViewportFeed };
 
+/** Player name that unlocks developer-only UI (the right-click card menu,
+ *  etc.). There's no server-side role yet — this is a client-side gate keyed
+ *  off the login name. Swap for a real permission check (the `players`
+ *  module's `PERM_*` byte) when one is wired through the gate protocol. */
+export const DEVELOPER_NAME = "Developer";
+
 type Pending = { resolve: (r: LoginResult) => void; reject: (e: Error) => void };
 
 export class WasmClient {
@@ -24,11 +30,18 @@ export class WasmClient {
   /** Cached from the last successful login. `-1` until then. */
   private _playerId = -1;
   private _playerSoulId = -1;
+  /** The name the last successful login authenticated as. `""` until then. */
+  private _playerName = "";
   /** The logged-in player's id, or -1 before login. */
   get playerId(): number { return this._playerId; }
   /** The logged-in player's `player_soul` card_id (its inventory is the
    *  player's own), or -1 before login / before discovery surfaced it. */
   get playerSoulId(): number { return this._playerSoulId; }
+  /** The name the logged-in player authenticated as, or `""` before login. */
+  get playerName(): string { return this._playerName; }
+  /** Whether the logged-in player is the developer (gates dev-only UI).
+   *  See {@link DEVELOPER_NAME}. */
+  get isDeveloper(): boolean { return this._playerName === DEVELOPER_NAME; }
   private readonly eventListeners = new Set<(e: ClientEvent) => void>();
   /** Per-viewport render-batch handlers, keyed by the viewId assigned in
    *  {@link openViewport}. */
@@ -99,6 +112,7 @@ export class WasmClient {
     });
     this._playerId = result.playerId;
     this._playerSoulId = result.playerSoulId;
+    this._playerName = name;
     return result;
   }
 

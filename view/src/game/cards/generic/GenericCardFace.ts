@@ -7,6 +7,29 @@ import { DeferredLighting } from "../../lighting/DeferredLighting";
 import { PrimitiveLayer } from "./PrimitiveLayer";
 import type { PrimDeps } from "./primitives";
 import { drawVisuals, type HostValue, type VisualHost } from "./drawVisuals";
+import type { PrimList } from "./visualSpec";
+
+/**
+ * Build the `:visuals @init` {@link PrimList} for a def WITHOUT drawing it —
+ * the same faction derivation + VM call {@link GenericCardFace.draw} runs,
+ * exposed so callers (the appearance editor) can enumerate + deep-copy the
+ * primitives as their own editable working set, then render that copy back via
+ * {@link GenericCardFace.drawList}.
+ */
+export function buildCardPrimList(
+  ctx: GameContext,
+  packedDefinition: number,
+  fallbackFaction?: string | null,
+): { list: PrimList; faction: string | undefined } {
+  const def = ctx.definitions.decode(packedDefinition);
+  const faction =
+    (def ? ctx.definitions.cardFactionOverride(def) : null) ??
+    fallbackFaction ??
+    undefined;
+  const host: VisualHost = { card_data: PREVIEW_CARD_DATA };
+  if (faction) host.faction = faction;
+  return { list: drawVisuals(packedDefinition, host, "init"), faction };
+}
 
 /**
  * A standalone, offline render of a card definition's `:visuals` — the same
@@ -54,15 +77,28 @@ export class GenericCardFace extends Container {
    *  `LayoutGenericCard.rebuildSpec`) so faction-specific cards preview the same
    *  across viewers. */
   draw(packedDefinition: number, fallbackFaction?: string | null): void {
-    const def = this.ctx.definitions.decode(packedDefinition);
-    const faction =
-      (def ? this.ctx.definitions.cardFactionOverride(def) : null) ??
-      fallbackFaction ??
-      undefined;
+    const { list, faction } = buildCardPrimList(this.ctx, packedDefinition, fallbackFaction);
     this.deps.faction = faction;
-    const host: VisualHost = { card_data: PREVIEW_CARD_DATA };
-    if (faction) host.faction = faction;
-    this.layer.draw(drawVisuals(packedDefinition, host, "init"));
+    this.layer.draw(list);
+  }
+
+  /** Render a caller-supplied {@link PrimList} instead of re-running the VM
+   *  from a packed def. The appearance editor drives this from its deep-copied
+   *  working list so tweaks show here without touching the game's live cards.
+   *
+   *  Clears the retained prims first (`draw([])`) so the following draw seeds
+   *  fresh and SNAPS to target — the face has no per-frame tick to ease a
+   *  re-draw, so an in-place reconcile would set new targets that never move.
+   *
+   *  `seed` overrides the variant-picker seed for this draw (the layer captures
+   *  `deps.seed` at draw time). Pass the source card's id so seed-picked art
+   *  (single-sprite packs — soul portraits, …) resolves to the SAME variant the
+   *  live card shows, instead of the construction-time default. */
+  drawList(list: PrimList, faction?: string | null, seed?: number): void {
+    this.deps.faction = faction ?? undefined;
+    if (seed !== undefined) this.deps.seed = seed;
+    this.layer.draw([]);
+    this.layer.draw(list);
   }
 
   override destroy(): void {

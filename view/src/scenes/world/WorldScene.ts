@@ -68,6 +68,12 @@ export class WorldScene extends Scene {
   private detailsHost!: PixiPanel;
   /** Open inventory viewports, keyed by their owning soul card_id. */
   private readonly inventories = new Map<number, ViewportPanel>();
+  /** Developer card editor — owns the right-click menu + editor panel. Lazily
+   *  imported behind `isDeveloper` so the editor code never ships in a normal
+   *  player's bundle (type-only `import(...)` here is erased at compile time). */
+  private cardEditor?: import("../../editor/CardEditor").CardEditor;
+  /** Set on `onExit` so the async editor import can't construct after teardown. */
+  private disposed = false;
   private readonly unsubs: Array<() => void> = [];
 
   onEnter(ctx: GameContext): void {
@@ -146,6 +152,22 @@ export class WorldScene extends Scene {
     // Click → select the card under the cursor in the hit viewport; open its
     // inventory if it has one.
     this.unsubs.push(this.input.on("left_click", (d) => this.onClick(d.up.x, d.up.y, d.up.hit)));
+    // Card editor (Developer-only): right-click menu + editor panel, all owned by
+    // the `CardEditor` controller in `src/editor/`. Lazily imported so none of
+    // the editor code ships in a normal player's bundle — Vite splits it into its
+    // own chunk that loads only when a Developer logs in.
+    if (ctx.client.isDeveloper) {
+      void import("../../editor/CardEditor").then(({ CardEditor }) => {
+        if (this.disposed) return; // scene exited before the chunk resolved
+        this.cardEditor = new CardEditor({
+          ctx,
+          input: this.input,
+          parent: this.overlayLayer,
+          viewports: () => this.viewports(),
+          details: this.details,
+        });
+      });
+    }
     // Space recenters the world on the origin.
     this.unsubs.push(this.input.onKey("key_down", (k) => {
       if (k.code === "Space") this.world.recenter(0, 0);
@@ -264,7 +286,9 @@ export class WorldScene extends Scene {
   }
 
   onExit(): void {
+    this.disposed = true;
     for (const u of this.unsubs) u();
+    this.cardEditor?.dispose();
     this.cardDrag.dispose();
     this.input.dispose();
     for (const inv of this.inventories.values()) inv.destroy();

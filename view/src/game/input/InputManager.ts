@@ -38,8 +38,11 @@ export interface KeyEventData {
   code: string;
 }
 
-/** Events whose payload is a single pointer sample (the press point). */
-type DownEvent = "left_down" | "left_drag_start";
+/** Events whose payload is a single pointer sample (the press point).
+ *  `right_click` fires from the native `contextmenu` event (which we
+ *  suppress) so a right-press carries the same hit-tested sample as a
+ *  left press — consumers can find what was right-clicked. */
+type DownEvent = "left_down" | "left_drag_start" | "right_click";
 /** Events whose payload is a press→release pair. */
 type UpEvent = "left_up" | "left_click" | "left_drag_stop";
 type KeyEvent = "key_down" | "key_up";
@@ -71,6 +74,7 @@ export class InputManager {
     canvas.addEventListener("pointermove", this.onPointerMove);
     canvas.addEventListener("pointerup", this.onPointerUp);
     canvas.addEventListener("pointercancel", this.onPointerCancel);
+    canvas.addEventListener("contextmenu", this.onContextMenu);
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
   }
@@ -99,6 +103,7 @@ export class InputManager {
     this.canvas.removeEventListener("pointermove", this.onPointerMove);
     this.canvas.removeEventListener("pointerup", this.onPointerUp);
     this.canvas.removeEventListener("pointercancel", this.onPointerCancel);
+    this.canvas.removeEventListener("contextmenu", this.onContextMenu);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
     this.downListeners.clear();
@@ -154,6 +159,15 @@ export class InputManager {
     this.reset();
   };
 
+  private readonly onContextMenu = (e: MouseEvent): void => {
+    // Override the browser's native right-click menu so the game can
+    // own the gesture, then surface a hit-tested right_click event for
+    // consumers (the dev card menu). preventDefault is what suppresses
+    // the OS menu; without it both would appear.
+    e.preventDefault();
+    this.emitDown("right_click", this.sample(e));
+  };
+
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     this.emitKey("key_down", { key: e.key, code: e.code });
   };
@@ -162,7 +176,10 @@ export class InputManager {
   };
 
   // ── helpers ────────────────────────────────────────────────────────
-  private sample(e: PointerEvent): PointerEventData {
+  // `MouseEvent` (not `PointerEvent`) so the `contextmenu` handler can
+  // share it — `PointerEvent extends MouseEvent`, so pointer callers
+  // still pass through unchanged.
+  private sample(e: MouseEvent): PointerEventData {
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
