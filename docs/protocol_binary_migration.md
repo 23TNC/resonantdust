@@ -347,8 +347,26 @@ the wasm→view debug summaries. Neither game hop carries it.
   `from_slice`), the wasm socket (`set_binary_type(Arraybuffer)`,
   `send_with_u8_array`, ArrayBuffer→`Vec<u8>` onmessage), and the gate sink/recv
   (`Message::Binary`). Each direction's *encoding* now migrates independently
-  without re-touching transport. **Live smoke-test still pending** (framing can
-  only be fully validated on a real socket).
+  without re-touching transport. **Verified end-to-end** against the claude gate
+  via the native NPC harness (connect / login call+reply / row streaming / action
+  proposals all round-trip over binary). Browser/web-sys path compile-verified but
+  not live-confirmed (blocked by a flapping vite dev server — env infra, not the
+  change).
+
+- **Increment 2a — typed wire row types (landed, compiles).** Additive: new
+  `shared/protocol::rows` (native CardRow/ZoneRow/RegionRow/PlayerRow/ChatRow +
+  `RowData` enum + codec-based helpers) and the postcard + codec deps on protocol.
+  Nothing wired yet — `GateMsg` still JSON. This is the type foundation for 2b.
+
+- **Increment 2b — flip GateMsg → postcard (NEXT, atomic).** Restructure `GateMsg`
+  (drop `#[serde(tag)]`; `Row { sid, op, row: RowData }`; native ints — `now_micros`
+  → `u64`, ContentChanged/ZoneObservers native); gate builds `RowData` from SDK
+  binding rows (replacing `row_json`/`normalize`) + serializes via postcard with a
+  `Vec<u8>` tx channel (the ~82 builder/send sites); client decodes postcard +
+  matches `RowData` (replacing the `table`-string match and the ad-hoc players/chat
+  `Value` parsing) + uses the shared row types (drop `client/core/rows.rs`'s
+  camelCase/`de_str_num`). Tricky bit: the generic `relay_table!` macro needs a
+  per-table SDK-row → `RowData` conversion. One flag-day; verify via the harness.
 
 ## Phased plan
 
