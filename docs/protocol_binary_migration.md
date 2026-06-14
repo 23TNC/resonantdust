@@ -410,6 +410,22 @@ the wasm→view debug summaries. Neither game hop carries it.
   expand), not big-bang. Plus P3 (`Sub` → `SubKind`, low-value) and P5 cleanup
   (drop `reqwest`/`server_uri` `/call`, native-int `server_micros`/etc.).
 
+  **P4 attempt (reverted) — the real blocker is verification.** Converted
+  `create_card` to `create_card_then` (BSATN) + threaded the upstream conns in. The
+  harness then failed repeatedly — but that was a **misdiagnosis**: (1) gate-only
+  redeploys don't `st re`, so dozens of harness runs had *polluted* the claude DBs;
+  (2) the multi-client harness is **inherently flaky** (~1/5 pass even on the
+  reverted, known-good Increment-3 gate with a fresh `redeploy --force --run`
+  reseed — concurrency races like "card held by in-flight action" / "cut_tree not
+  queued"). So the earlier single-run "PASS"es were luck, not zero-regression
+  proof. **P4 can't be verified by single harness runs.** Before retrying P4:
+  establish reliable verification (de-flake the harness / a deterministic
+  single-client reducer-call test, or many-run pass-rate comparison) — *then* do
+  the conversion. (There's also a genuine open question: the SDK `_then` fires at
+  event-observation, not commit; an `await`-via-oneshot bridge didn't obviously
+  restore the HTTP relay's ordering, though the flake masked it.) Reverted cleanly;
+  gate is back at the committed Increment-3.
+
 ## Phased plan
 
 **Part 1 — client↔gate wire:**
