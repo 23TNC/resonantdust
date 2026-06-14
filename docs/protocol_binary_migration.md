@@ -410,21 +410,26 @@ the wasm→view debug summaries. Neither game hop carries it.
   expand), not big-bang. Plus P3 (`Sub` → `SubKind`, low-value) and P5 cleanup
   (drop `reqwest`/`server_uri` `/call`, native-int `server_micros`/etc.).
 
-  **P4 attempt (reverted) — the real blocker is verification.** Converted
-  `create_card` to `create_card_then` (BSATN) + threaded the upstream conns in. The
-  harness then failed repeatedly — but that was a **misdiagnosis**: (1) gate-only
-  redeploys don't `st re`, so dozens of harness runs had *polluted* the claude DBs;
-  (2) the multi-client harness is **inherently flaky** (~1/5 pass even on the
-  reverted, known-good Increment-3 gate with a fresh `redeploy --force --run`
-  reseed — concurrency races like "card held by in-flight action" / "cut_tree not
-  queued"). So the earlier single-run "PASS"es were luck, not zero-regression
-  proof. **P4 can't be verified by single harness runs.** Before retrying P4:
-  establish reliable verification (de-flake the harness / a deterministic
-  single-client reducer-call test, or many-run pass-rate comparison) — *then* do
-  the conversion. (There's also a genuine open question: the SDK `_then` fires at
-  event-observation, not commit; an `await`-via-oneshot bridge didn't obviously
-  restore the HTTP relay's ordering, though the flake masked it.) Reverted cleanly;
-  gate is back at the committed Increment-3.
+  **P4 — STARTED (create_card landed + verified 5/5).** First reducer off the HTTP
+  relay: `relay_call` gained the 4 typed upstream conns (only `cards` used so far;
+  the rest fall through to HTTP), and `sdk_create_card` reads the gate-injected
+  args `Value` into `create_card_then` (BSATN) and **awaits** completion via a
+  oneshot — preserving the HTTP relay's per-connection ordering (the `_then` fires
+  on the conn's background loop; downstream ops rely on the serialization). Next:
+  the remaining relayed reducers (`place_card`, `move_cards`, `move_soul`,
+  `request_blueprint`, `send_chat_message`, `set_last_login`, `create_player`),
+  then the worldgen ones (`request_zone`/`ensure_region`, accept-on-dispatch), then
+  `apply.rs` + `login_relay`, then drop `reqwest`/`server_uri` `/call`.
+
+  **Verification note (important correction).** The combined harness is NOT
+  inherently flaky — it is **clean-world-dependent**: it seeds souls/cards/zones
+  and never cleans up, so re-running without a reseed pollutes the next run. With a
+  **reseed before each run** it passes reliably (5/5). I earlier mis-blamed harness
+  failures on a P4 change, then on "flakiness" — the real cause was my own repeated
+  runs polluting the world. Verify gate changes with reseed→run→reseed→run
+  (`ST_PROFILE=<env> bin/st re cards && bin/st re regions`, or `rd test … --clean`),
+  NOT N runs after one reseed. The `_then`-await-via-oneshot ordering question is
+  resolved: it matches HTTP closely enough that the combined sweep passes 5/5.
 
 ## Phased plan
 
