@@ -14,6 +14,34 @@ import { initGlobals } from "../../game/definitions/globals";
 
 type Mode = "login" | "create";
 
+/** Refuse to connect to a gate built from a different `shared/` than this client.
+ *  The wire is postcard (positional), so a protocol skew is a SILENT hang — an
+ *  older gate simply drops our binary frames and login never completes. Compare
+ *  the gate's baked `shared` component hash (`GET /versions`) against ours
+ *  (`__BUILD_VERSIONS__`, vite-injected at build) and fail loudly instead.
+ *  Skips silently when either side carries no baked snapshot or the gate is
+ *  unreachable (let the connection attempt surface that). */
+async function assertGateCompatible(server: Environment): Promise<void> {
+  const ours = __BUILD_VERSIONS__?.components?.shared?.hash;
+  if (!ours) return; // unversioned dev build — nothing to compare against
+  let gate: { server?: { components?: Record<string, { hash?: string }> } };
+  try {
+    const resp = await fetch(`${httpBaseFor(server)}/versions`);
+    if (!resp.ok) return;
+    gate = (await resp.json()) as typeof gate;
+  } catch {
+    return; // gate unreachable — let the login connection attempt report it
+  }
+  const theirs = gate.server?.components?.shared?.hash;
+  if (theirs && theirs !== ours) {
+    throw new Error(
+      `protocol skew — the ${server} gate is on a different build ` +
+        `(shared ${theirs.slice(0, 10)} vs client ${ours.slice(0, 10)}). ` +
+        `Redeploy the gate, or hard-reload the client.`,
+    );
+  }
+}
+
 /** Wire Enter on an input to a callback — pressing Enter fires the primary
  *  action (Login or Create depending on mode). */
 function attachEnterHandler(input: HTMLInputElement, onSubmit: () => void): void {
@@ -115,6 +143,9 @@ export class LoginScene extends Scene {
     this.rememberedServer = server;
     this.overlay.setStatus(`Logging in as ${username} on ${server}…`);
     try {
+      // Bail with a clear message (not a silent hang) if the gate speaks a
+      // different protocol build than this client.
+      await assertGateCompatible(server);
       // Point the wasm client at the selected environment's gate, then log in —
       // the client owns the connection.
       setCurrentEnvironment(server);
@@ -148,6 +179,7 @@ export class LoginScene extends Scene {
     this.rememberedServer = server;
     this.overlay.setStatus(`Creating user ${username} on ${server}…`);
     try {
+      await assertGateCompatible(server);
       // `claim_or_login` is trust-on-first-use: an unused name creates the player,
       // an existing one logs in. Create then bounce back to the login form.
       setCurrentEnvironment(server);
