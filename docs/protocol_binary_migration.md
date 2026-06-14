@@ -410,16 +410,20 @@ the wasm→view debug summaries. Neither game hop carries it.
   expand), not big-bang. Plus P3 (`Sub` → `SubKind`, low-value) and P5 cleanup
   (drop `reqwest`/`server_uri` `/call`, native-int `server_micros`/etc.).
 
-  **P4 — STARTED (create_card landed + verified 5/5).** First reducer off the HTTP
-  relay: `relay_call` gained the 4 typed upstream conns (only `cards` used so far;
-  the rest fall through to HTTP), and `sdk_create_card` reads the gate-injected
-  args `Value` into `create_card_then` (BSATN) and **awaits** completion via a
-  oneshot — preserving the HTTP relay's per-connection ordering (the `_then` fires
-  on the conn's background loop; downstream ops rely on the serialization). Next:
-  the remaining relayed reducers (`place_card`, `move_cards`, `move_soul`,
-  `request_blueprint`, `send_chat_message`, `set_last_login`, `create_player`),
-  then the worldgen ones (`request_zone`/`ensure_region`, accept-on-dispatch), then
-  `apply.rs` + `login_relay`, then drop `reqwest`/`server_uri` `/call`.
+  **P4 + P5 — COMPLETE (Part 2 done). Every reducer call is BSATN.** The gate→
+  SpacetimeDB reducer hop is fully off JSON-over-HTTP. Converted, each verified 5/5
+  with reseed-between: relay (`create_card`, `move_cards`, `move_soul`,
+  `send_chat_message`) — awaited via a oneshot to preserve the HTTP relay's
+  per-connection ordering; worldgen (`request_zone`/`ensure_region`) —
+  accept-on-dispatch (the promise still resolves on the regions subscription); the
+  gate-generated apply path (`claim_pending`/`apply_action_tile`/`apply_action`'s 25
+  args) with the conns threaded `handle→propose→apply`; and `claim_or_login`. Shared
+  plumbing: `reply_for`/`finish_call`/`vec_u64` (ws.rs) + `await_result` (apply.rs).
+  P5 removed the dead HTTP relay tail + the unused `Pool` db accessors — no
+  `/v1/database` or `http_client().post` left in the reducer path; warning-free.
+  `place_card`/`request_blueprint`/`set_last_login`/`create_player` were never sent
+  by the client, so they're dropped (error, not relayed). `reqwest`/`http_client`
+  remain only for content peering (legit HTTP), not reducers.
 
   **Verification note (important correction).** The combined harness is NOT
   inherently flaky — it is **clean-world-dependent**: it seeds souls/cards/zones
