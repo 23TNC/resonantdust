@@ -19,6 +19,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::rows::RowData;
+
 /// A message from a client to the gate. `t` tags the variant.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -56,21 +58,18 @@ pub enum RowOp {
 }
 
 /// A message from the gate to a client.
+///
+/// Encoded with **postcard** (binary) — NOT internally-tagged: postcard is
+/// positional/non-self-describing and doesn't support `#[serde(tag)]`, and the
+/// variant index is the discriminant anyway. Field ORDER is the wire contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "t", rename_all = "snake_case")]
 pub enum GateMsg {
     /// The subscription `sid` is applied (initial rows have been delivered).
     Applied { sid: u32 },
-    /// A row event on a subscribed table.
-    Row {
-        sid: u32,
-        table: String,
-        op: RowOp,
-        /// Present only for `RowOp::Update` — the prior row.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        old: Option<serde_json::Value>,
-        row: serde_json::Value,
-    },
+    /// A row event on a subscribed table. The table is the [`RowData`] variant —
+    /// no `table` string rides the wire. (The `old` before-image was unused by
+    /// the client and is dropped.)
+    Row { sid: u32, op: RowOp, row: RowData },
     /// Reducer call `cid` succeeded. Carries the gate's wall clock at reply time
     /// (`server_micros`) so the client gets a server-time sample piggybacked on
     /// its own round-trip — the "spacetime way" (the SDK rode the timestamp on
@@ -125,10 +124,12 @@ pub enum GateMsg {
 }
 
 impl GateMsg {
-    /// Serialize to a JSON string for the WS sink.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self)
-            .unwrap_or_else(|e| format!("{{\"t\":\"error\",\"error\":\"serialize: {e}\"}}"))
+    /// Encode to postcard bytes for the WS binary sink.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // A well-formed GateMsg never fails postcard encoding (no custom
+        // serialize errors); an empty frame on the impossible error is harmless
+        // (the client ignores an undecodable frame).
+        postcard::to_allocvec(self).unwrap_or_default()
     }
 }
 
@@ -138,50 +139,50 @@ impl GateMsg {
 // frames anyway. The wasm client gets the pure types above and never calls them.
 #[cfg(not(target_arch = "wasm32"))]
 impl GateMsg {
-    /// Build a stamped `call_ok` reply, serialized for the sink. Stamps the
-    /// gate's wall clock at call time so the client's round-trip carries a fresh
+    /// Build a stamped `call_ok` reply, encoded for the sink. Stamps the gate's
+    /// wall clock at call time so the client's round-trip carries a fresh
     /// server-time sample (see [`CallOk`](GateMsg::CallOk)).
-    pub fn call_ok(cid: u32) -> String {
+    pub fn call_ok(cid: u32) -> Vec<u8> {
         GateMsg::CallOk {
             cid,
             server_micros: now_micros(),
         }
-        .to_json()
+        .to_bytes()
     }
 
-    /// Build a stamped `call_err` reply, serialized for the sink.
-    pub fn call_err(cid: u32, error: String) -> String {
+    /// Build a stamped `call_err` reply, encoded for the sink.
+    pub fn call_err(cid: u32, error: String) -> Vec<u8> {
         GateMsg::CallErr {
             cid,
             error,
             server_micros: now_micros(),
         }
-        .to_json()
+        .to_bytes()
     }
 
-    /// Build a stamped `call_promise` reply, serialized for the sink — accept a
-    /// call for async resolution, promising a follow-up within `timeout_ms`.
-    pub fn call_promise(cid: u32, timeout_ms: u64) -> String {
+    /// Build a stamped `call_promise` reply, encoded for the sink — accept a call
+    /// for async resolution, promising a follow-up within `timeout_ms`.
+    pub fn call_promise(cid: u32, timeout_ms: u64) -> Vec<u8> {
         GateMsg::CallPromise {
             cid,
             timeout_ms,
             server_micros: now_micros(),
         }
-        .to_json()
+        .to_bytes()
     }
 
-    /// Build a `content_changed` broadcast frame, serialized for the sink.
-    pub fn content_changed(version: String) -> String {
-        GateMsg::ContentChanged { version }.to_json()
+    /// Build a `content_changed` broadcast frame, encoded for the sink.
+    pub fn content_changed(version: String) -> Vec<u8> {
+        GateMsg::ContentChanged { version }.to_bytes()
     }
 
-    /// Build a `zone_observers` broadcast frame, serialized for the sink.
-    pub fn zone_observers(macro_zone: u64, observers: u32) -> String {
+    /// Build a `zone_observers` broadcast frame, encoded for the sink.
+    pub fn zone_observers(macro_zone: u64, observers: u32) -> Vec<u8> {
         GateMsg::ZoneObservers {
             macro_zone: macro_zone.to_string(),
             observers,
         }
-        .to_json()
+        .to_bytes()
     }
 }
 

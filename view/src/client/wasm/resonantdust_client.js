@@ -431,13 +431,13 @@ function __wbg_get_imports() {
             arg0.onopen = arg1;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 37, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 15, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hc0f1032e2470c65c);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 39, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 17, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm_bindgen__convert__closures_____invoke__h890d5c3a091e35f1);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
@@ -461,12 +461,12 @@ function __wbg_get_imports() {
     };
 }
 
-function wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0(arg0, arg1) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0(arg0, arg1);
+function wasm_bindgen__convert__closures_____invoke__h890d5c3a091e35f1(arg0, arg1) {
+    wasm.wasm_bindgen__convert__closures_____invoke__h890d5c3a091e35f1(arg0, arg1);
 }
 
-function wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f(arg0, arg1, arg2) {
-    wasm.wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f(arg0, arg1, arg2);
+function wasm_bindgen__convert__closures_____invoke__hc0f1032e2470c65c(arg0, arg1, arg2) {
+    wasm.wasm_bindgen__convert__closures_____invoke__hc0f1032e2470c65c(arg0, arg1, arg2);
 }
 
 

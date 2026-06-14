@@ -197,8 +197,8 @@ export interface InitOutput {
     readonly wasmclient_take_chat: (a: number) => [number, number];
     readonly wasmclient_take_content_changed: (a: number) => [number, number];
     readonly wasmclient_upload_master: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__hd1bd04d83691b28f: (a: number, b: number, c: any) => void;
-    readonly wasm_bindgen__convert__closures_____invoke__hfd934f8036d3fba0: (a: number, b: number) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__hc0f1032e2470c65c: (a: number, b: number, c: any) => void;
+    readonly wasm_bindgen__convert__closures_____invoke__h890d5c3a091e35f1: (a: number, b: number) => void;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
