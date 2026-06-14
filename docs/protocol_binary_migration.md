@@ -375,6 +375,24 @@ the wasm→view debug summaries. Neither game hop carries it.
   as `String` (kept to avoid churning the client's clock-sample/content parsing);
   native-int cleanup can ride a later pass.
 
+- **Increment 3 — ClientMsg → postcard (LANDED, harness-verified). PART 1 COMPLETE.**
+  The client→gate direction (tx) is postcard too — **the whole WS hop is now binary;
+  JSON is gone from the client↔gate wire.** `ClientMsg::Call` carries a typed
+  `ClientCall` (one variant per reducer) + top-level `client_time_ms` instead of a
+  reducer string + `serde_json::Value` (postcard can't `deserialize_any` into
+  `Value`, so the args had to be typed). The gate computes `(reducer, args) =
+  call.to_args(client_time_ms)` at the top of the Call handler and leaves the entire
+  relay/intercept path Value-based + unchanged — **that `to_args` seam is exactly
+  what Part 2 (P4) swaps for typed SDK calls.** Every client call-site + the outbox
+  + `Command::Call` build `ClientCall`; encode via `ClientMsg::to_bytes`. Dropped the
+  internal tag + `skip_serializing_if` (postcard-incompatible). Verified: full
+  multi-client harness PASS (login/proposals/moves/zone-requests all round-trip).
+
+- **Remaining:** P3 (type `Sub` → `SubKind` — low-value polish, Sub frames are small
+  & tx-side) and **Part 2 / P4 (route reducer calls through the SDK bindings / BSATN
+  instead of reqwest-JSON — the "fix the spacetime call" work; now unblocked by the
+  typed `ClientCall`/`to_args` seam).**
+
 ## Phased plan
 
 **Part 1 — client↔gate wire:**
