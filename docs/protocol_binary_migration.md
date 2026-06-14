@@ -388,10 +388,27 @@ the wasm→view debug summaries. Neither game hop carries it.
   internal tag + `skip_serializing_if` (postcard-incompatible). Verified: full
   multi-client harness PASS (login/proposals/moves/zone-requests all round-trip).
 
-- **Remaining:** P3 (type `Sub` → `SubKind` — low-value polish, Sub frames are small
-  & tx-side) and **Part 2 / P4 (route reducer calls through the SDK bindings / BSATN
-  instead of reqwest-JSON — the "fix the spacetime call" work; now unblocked by the
-  typed `ClientCall`/`to_args` seam).**
+- **Version-skew precheck (LANDED).** The wire is positional, so a client/gate
+  build skew is a *silent hang* (an older gate drops the new client's binary
+  frames — this bit us with a stale `test` gate). `LoginScene.assertGateCompatible`
+  now fetches the gate's `/versions` and compares its baked `shared` component hash
+  to the view's `__BUILD_VERSIONS__` before connecting, failing login with a clear
+  "redeploy the gate" message instead. View-side (covers the browser); gaps: gates
+  predating the `/versions` endpoint can't be checked, and the native harness isn't
+  covered (always built+deployed together). A full wire-level `PROTOCOL_VERSION`
+  (baked into the client core) would close those but needs build-tooling.
+
+- **Remaining: Part 2 / P4 — route reducer calls through the SDK bindings (BSATN)
+  instead of reqwest-JSON ("fix the spacetime call").** Fully scoped (see below);
+  it's the largest/riskiest change — a sync-HTTP → async-`_then`-callback reply-model
+  rework on every write path + per-reducer typed `Args` construction from the
+  injected `Value` (sats-derived, no serde shortcut) + threading the 3 typed
+  upstream connections (`shard`/`players`/`chat`) into `relay_call` + `apply.rs`
+  (incl. `apply_action`'s 25 fields) + `login_relay`. Worldgen
+  (`request_zone`/`ensure_region`) accepts-on-dispatch, not on reducer-result.
+  Best done as a **staged** effort (convert one harness-exercised reducer, verify,
+  expand), not big-bang. Plus P3 (`Sub` → `SubKind`, low-value) and P5 cleanup
+  (drop `reqwest`/`server_uri` `/call`, native-int `server_micros`/etc.).
 
 ## Phased plan
 
