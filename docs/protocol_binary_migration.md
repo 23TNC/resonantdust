@@ -337,6 +337,19 @@ the wasm→view debug summaries. Neither game hop carries it.
    incremental promote, zone tier cache are orthogonal — this changes encoding,
    not those.
 
+## Progress
+
+- **Increment 1 — transport → binary frames (landed, builds green).** Split out
+  ahead of P0 to isolate the framing risk from the encoding risk: the WS now
+  carries **binary** frames (`Vec<u8>`) instead of text, encoding still JSON
+  (utf-8 bytes) in both directions — behaviour-identical. Touched the `Transport`
+  trait + native impl (`Message::Text`→`Binary`), `GateConnection` (`to_vec`/
+  `from_slice`), the wasm socket (`set_binary_type(Arraybuffer)`,
+  `send_with_u8_array`, ArrayBuffer→`Vec<u8>` onmessage), and the gate sink/recv
+  (`Message::Binary`). Each direction's *encoding* now migrates independently
+  without re-touching transport. **Live smoke-test still pending** (framing can
+  only be fully validated on a real socket).
+
 ## Phased plan
 
 **Part 1 — client↔gate wire:**
