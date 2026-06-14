@@ -13,3 +13,9 @@ crate-type = ["rlib"]
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Binary wire codec — replaces JSON per-direction (rows/rx first). `alloc` for
+# Vec output. No self-describing keys / number-stringify; numbers ride native.
+postcard = { version = "1", features = ["alloc"] }
+# The bit-layout owner: the row structs' helper methods (valid_at time, tile
+# words, placement) decode through it, so the wire row types live next to it.
+resonantdust-codec = { path = "../codec" }
