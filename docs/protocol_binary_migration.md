@@ -398,6 +398,17 @@ the wasm→view debug summaries. Neither game hop carries it.
   covered (always built+deployed together). A full wire-level `PROTOCOL_VERSION`
   (baked into the client core) would close those but needs build-tooling.
 
+- **Native-int cleanup (LANDED).** `GateMsg`'s `server_micros` (clock) and
+  `ZoneObservers.macro_zone` (move-sync observer key) now ride the postcard wire as
+  native `u64` — the client core is Rust, so the JS-safe-integer stringification is
+  obsolete. `now_micros()` returns `u64`; `sample_clock` takes `u64` (a side effect:
+  every reply incl. `CallErr` samples the clock now — the documented round-trip
+  behavior; the old `String` path skipped it on a parse error that can't happen).
+  **`ContentChanged.version` stays a `String` on purpose** — it's the content
+  fingerprint *hex* shared verbatim with the `/content`, `/content-version`, and
+  `/versions` HTTP endpoints, not a JS-safe-`u64` artifact. (I'd wrongly grouped
+  `macro_zone` with the clock earlier — it's unrelated.)
+
 - **Remaining: Part 2 / P4 — route reducer calls through the SDK bindings (BSATN)
   instead of reqwest-JSON ("fix the spacetime call").** Fully scoped (see below);
   it's the largest/riskiest change — a sync-HTTP → async-`_then`-callback reply-model
