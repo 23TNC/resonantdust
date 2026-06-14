@@ -14,8 +14,9 @@
 //! thin, stable contract — table/reducer names may later give way to
 //! intent-shaped messages.
 //!
-//! Numbers ride the wire as strings where they exceed JS's safe-integer range
-//! (`server_micros`); row payloads are coerced per-field downstream.
+//! Numbers ride the postcard wire as native integers (the client core is Rust);
+//! the lone exception is `ContentChanged.version`, a hex String mirroring the
+//! `/content` HTTP endpoint's fingerprint — not a JS-safe-integer artifact.
 
 use serde::{Deserialize, Serialize};
 
@@ -188,13 +189,13 @@ pub enum GateMsg {
     /// its own round-trip — the "spacetime way" (the SDK rode the timestamp on
     /// reducer events). Active clients sync their clock from this for free; the
     /// standalone [`Time`](GateMsg::Time) frame then only fills idle gaps.
-    CallOk { cid: u32, server_micros: String },
+    CallOk { cid: u32, server_micros: u64 },
     /// Reducer call `cid` failed. Also carries `server_micros` — a rejected call
     /// is still a round-trip, so it's a valid clock sample.
     CallErr {
         cid: u32,
         error: String,
-        server_micros: String,
+        server_micros: u64,
     },
     /// Reducer call `cid` was ACCEPTED for asynchronous resolution — the
     /// protocol's async primitive. The gate replies this instead of a premature
@@ -208,12 +209,12 @@ pub enum GateMsg {
     CallPromise {
         cid: u32,
         timeout_ms: u64,
-        server_micros: String,
+        server_micros: u64,
     },
     /// A protocol-level error not tied to a specific request.
     Error { error: String },
     /// Server-clock keepalive: the gate's wall clock in microseconds since the
-    /// unix epoch (string-encoded — exceeds JS safe-integer range). Emitted
+    /// unix epoch. Emitted
     /// **only after the socket has been idle** for the keepalive interval (the
     /// first one fires immediately on connect for a fast initial lock); active
     /// clients get their samples from `call_ok`/`call_err` instead, so this
@@ -222,7 +223,7 @@ pub enum GateMsg {
     /// future-stamps on. For one gate the gate's wall clock IS the canonical
     /// clock; multi-gate, the gate first syncs to a master clock and forwards
     /// that here (this frame is unchanged).
-    Time { server_micros: String },
+    Time { server_micros: u64 },
     /// The served DSL content changed (runtime `add_content` / `modify_content`).
     /// Carries the new corpus version fingerprint (hex). Broadcast to every
     /// connected client; each re-fetches `/content` and rebuilds. Replaces
@@ -231,9 +232,8 @@ pub enum GateMsg {
     /// Live OBSERVER count for a world `macro_zone` — distinct connections whose
     /// card-subscription covers it (gate-derived). Broadcast when it changes; a
     /// client gates its move-sync on it: a move in a zone with `observers > 1` is
-    /// shared space and must sync, `≤ 1` stays client-local. `macro_zone` is
-    /// string-encoded (exceeds JS safe-integer range).
-    ZoneObservers { macro_zone: String, observers: u32 },
+    /// shared space and must sync, `≤ 1` stays client-local.
+    ZoneObservers { macro_zone: u64, observers: u32 },
 }
 
 impl GateMsg {
@@ -291,25 +291,20 @@ impl GateMsg {
 
     /// Build a `zone_observers` broadcast frame, encoded for the sink.
     pub fn zone_observers(macro_zone: u64, observers: u32) -> Vec<u8> {
-        GateMsg::ZoneObservers {
-            macro_zone: macro_zone.to_string(),
-            observers,
-        }
-        .to_bytes()
+        GateMsg::ZoneObservers { macro_zone, observers }.to_bytes()
     }
 }
 
-/// The gate's wall clock in microseconds since the unix epoch, string-encoded
-/// (the value exceeds JS's safe-integer range, so it rides the wire as a string
-/// and the client coerces to `bigint`). The single source of `server_micros`
-/// for both the `call_ok`/`call_err` piggyback and the idle `Time` keepalive.
-/// Host-only (see the gate-side reply builders above).
+/// The gate's wall clock in microseconds since the unix epoch. Rides the postcard
+/// wire as a native `u64` (the client core is Rust and decodes it directly — no
+/// JS-safe-integer stringification). The single source of `server_micros` for both
+/// the `call_ok`/`call_err` piggyback and the idle `Time` keepalive. Host-only
+/// (see the gate-side reply builders above).
 #[cfg(not(target_arch = "wasm32"))]
-pub fn now_micros() -> String {
+pub fn now_micros() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .unwrap_or(0)
-        .to_string()
 }
