@@ -119,14 +119,13 @@ export class WasmClient {
     /**
      * Aim a viewport anchor at hex `(q, r)` on `(surface, owner)`, subscribing the
      * surrounding zones. `radius_tiles` is the VISIBLE half-extent in TILES (the
-     * `AnchorRadii` tiers are tile distances, not zone counts) — the `active`
-     * tier covers exactly what's on screen so its zones stream. The `cold` tier
-     * extends one [`PREFETCH_TILES`] ring further so the next zones' tiles
-     * materialize BEFORE they scroll into view — without it a pan reveals a
-     * blank row/col while the just-entered zone is still being requested.
-     * `owner` is `0` for the world, or the soul card_id for an inventory
-     * surface. Each `(surface, owner)` is a distinct named anchor so multiple
-     * viewports don't clobber each other. Re-call on pan.
+     * `AnchorRadii` tiers are tile distances, not zone counts). The `active` disk
+     * is the visible region plus [`ANCHOR_MARGIN_TILES`], so the macro_zones
+     * bordering the viewport are requested (Card + Zone subs) and stream as a pan
+     * reaches them. No separate prefetch ring — `hot`/`warm`/`cold` are 0.
+     * `owner` is `0` for the world, or the soul card_id for an inventory surface.
+     * Each `(surface, owner)` is a distinct named anchor so multiple viewports
+     * don't clobber each other. Re-call on pan.
      */
     set_anchor(surface: number, owner: number, q: number, r: number, radius_tiles: number): void;
     /**

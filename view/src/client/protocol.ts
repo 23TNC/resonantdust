@@ -61,7 +61,10 @@ export interface CallStat {
  *  (tx = `Sub`/`Unsub` frames, rx = the `Row`/`Applied` frames streamed back). */
 export interface SubStat {
   table: string;
+  /** Currently-open subscriptions (`Sub` − `Unsub`) — a live gauge. */
   subs: number;
+  /** Every `Sub` ever issued for this table — additive, never decremented. */
+  total: number;
   tx: number;
   rx: number;
 }

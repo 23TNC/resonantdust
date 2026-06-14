@@ -126,10 +126,12 @@ const CALLS_COLUMNS: ReadonlyArray<readonly [string, "left" | "right"]> = [
   ["rx", "right"],
 ];
 
-/** Subs-tab columns: [header label, text-align]. Order matches `renderSubs`. */
+/** Subs-tab columns: [header label, text-align]. Order matches `renderSubs`.
+ *  `cur` = currently-open subscriptions (live), `total` = ever-issued (additive). */
 const SUBS_COLUMNS: ReadonlyArray<readonly [string, "left" | "right"]> = [
   ["table", "left"],
-  ["subs", "right"],
+  ["cur", "right"],
+  ["total", "right"],
   ["tx", "right"],
   ["rx", "right"],
 ];
@@ -796,8 +798,8 @@ export class DebugPanel {
   }
 
   /** Rebuild the subs table from {@link lastSubStats}: one row per subscribed
-   *  table (open-subscription count + tx/rx byte estimates) plus a totals row.
-   *  `subs` is a LIVE gauge (current open count); `tx`/`rx` are cumulative. */
+   *  table (current open count, total ever-issued, tx/rx byte estimates) plus a
+   *  totals row. `cur` is a LIVE gauge; `total`/`tx`/`rx` are cumulative. */
   private renderSubs(): void {
     const body = this.subsBody;
     body.replaceChildren();
@@ -809,14 +811,16 @@ export class DebugPanel {
 
     const table = this.statTable(SUBS_COLUMNS);
     const tbody = table.createTBody();
-    const totals = { subs: 0, tx: 0, rx: 0 };
+    const totals = { subs: 0, total: 0, tx: 0, rx: 0 };
     for (const s of this.lastSubStats) {
       totals.subs += s.subs;
+      totals.total += s.total;
       totals.tx += s.tx;
       totals.rx += s.rx;
       const row = tbody.insertRow();
       this.statCell(row, s.table, "left");
       this.statCell(row, String(s.subs), "right");
+      this.statCell(row, String(s.total), "right");
       this.statCell(row, fmtBytes(s.tx), "right");
       this.statCell(row, fmtBytes(s.rx), "right");
     }
@@ -824,6 +828,7 @@ export class DebugPanel {
     const totalRow = tbody.insertRow();
     this.statCell(totalRow, "total", "left", undefined, true);
     this.statCell(totalRow, String(totals.subs), "right", undefined, true);
+    this.statCell(totalRow, String(totals.total), "right", undefined, true);
     this.statCell(totalRow, fmtBytes(totals.tx), "right", undefined, true);
     this.statCell(totalRow, fmtBytes(totals.rx), "right", undefined, true);
 
