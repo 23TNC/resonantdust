@@ -21,29 +21,142 @@ use serde::{Deserialize, Serialize};
 
 use crate::rows::RowData;
 
-/// A message from a client to the gate. `t` tags the variant.
+/// A message from a client to the gate.
+///
+/// Encoded with **postcard** (binary) — NOT internally-tagged (postcard is
+/// positional + doesn't support `#[serde(tag)]` or `skip_serializing_if`). Field
+/// ORDER is the wire contract.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
-    /// Subscribe to a table, optionally filtered. The gate issues the upstream
-    /// subscription and streams matching rows back as [`GateMsg::Row`].
+    /// Subscribe to a table, optionally filtered (raw SQL `WHERE` body, e.g.
+    /// `owner_id = 1024`; `None` → whole table).
     Sub {
         sid: u32,
         table: String,
-        /// Raw SQL `WHERE` clause body (without the keyword), e.g.
-        /// `owner_id = 1024`. None → whole table.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<String>,
     },
-    /// Drop a subscription. (Callback teardown is a later refinement.)
+    /// Drop a subscription.
     Unsub { sid: u32 },
-    /// Call a shard reducer with positional JSON args; the gate relays it.
+    /// Call a reducer. The [`ClientCall`] variant IS the reducer (no name string
+    /// on the wire); `client_time_ms` is the per-send clock the gate folds into
+    /// the timed reducers' args.
     Call {
         cid: u32,
-        reducer: String,
-        #[serde(default)]
-        args: serde_json::Value,
+        client_time_ms: u64,
+        call: ClientCall,
     },
+}
+
+impl ClientMsg {
+    /// Encode to postcard bytes for the WS binary sink.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_allocvec(self).unwrap_or_default()
+    }
+}
+
+/// One client-callable reducer + its CLIENT-supplied args. Gate-injected fields
+/// (tiles / distance / packed_definition / player_id / …) are NOT here — the gate
+/// adds them. The variant is the reducer; [`to_args`](ClientCall::to_args) rebuilds
+/// exactly the JSON the gate's relay/intercept path expects, so that path stays
+/// `Value`-based and unchanged (and is the seam P4 swaps for typed SDK calls).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClientCall {
+    ClaimOrLogin { name: String },
+    CreateCard { owner_id: u32, surface: u8, card_key: String, macro_zone: u64, q: u8, r: u8 },
+    MoveCards { caller_player_id: u32, card_ids: Vec<u32>, macro_zones: Vec<u64>, micro_locations: Vec<u32>, stack_states: Vec<u8> },
+    MoveSoul { caller_player_id: u32, soul_id: u32, soul_def: u16, from_q: i32, from_r: i32, dest_surface: u8, dest_macro_zone: u64, dest_micro_location: u32, depart_ms: u64, arrival_ms: u64 },
+    ProposeAction { recipe_id: u16, surface: u8, macro_zone: u64, micro_location: u32, root: u32, bindings: Vec<Vec<u32>>, caller_player_id: u32 },
+    SendChatMessage { sender_player_id: u32, sender_name: String, body: String },
+    RequestZone { macro_zone: u64 },
+    EnsureRegion { macro_zone: u64 },
+    AddContent { name: String, text: String },
+    ModifyContent { lineage: String, text: String },
+    ModifyLocale { domain: String, json: String },
+    ModifyVisuals { name: String, text: String },
+    UploadMaster { aspect: String, faction: String, variant: String, channel: String, data: String },
+    Ping,
+}
+
+impl ClientCall {
+    /// A stable label for the debug-HUD call stats (keyed by reducer), without
+    /// building the args.
+    pub fn reducer(&self) -> &'static str {
+        match self {
+            ClientCall::ClaimOrLogin { .. } => "claim_or_login",
+            ClientCall::CreateCard { .. } => "create_card",
+            ClientCall::MoveCards { .. } => "move_cards",
+            ClientCall::MoveSoul { .. } => "move_soul",
+            ClientCall::ProposeAction { .. } => "propose_action",
+            ClientCall::SendChatMessage { .. } => "send_chat_message",
+            ClientCall::RequestZone { .. } => "request_zone",
+            ClientCall::EnsureRegion { .. } => "ensure_region",
+            ClientCall::AddContent { .. } => "add_content",
+            ClientCall::ModifyContent { .. } => "modify_content",
+            ClientCall::ModifyLocale { .. } => "modify_locale",
+            ClientCall::ModifyVisuals { .. } => "modify_visuals",
+            ClientCall::UploadMaster { .. } => "upload_master",
+            ClientCall::Ping => "ping",
+        }
+    }
+
+    /// The reducer name + the JSON args the gate relays/intercepts — the exact
+    /// shape the old `ClientMsg::Call { reducer, args }` carried. `client_time_ms`
+    /// is folded into the timed reducers (the rest ignore it). Gate-side only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn to_args(&self, client_time_ms: u64) -> (&'static str, serde_json::Value) {
+        use serde_json::json;
+        match self {
+            ClientCall::ClaimOrLogin { name } => (
+                "claim_or_login",
+                json!({ "client_time_ms": client_time_ms, "name": name }),
+            ),
+            ClientCall::CreateCard { owner_id, surface, card_key, macro_zone, q, r } => (
+                "create_card",
+                json!({ "client_time_ms": client_time_ms, "owner_id": owner_id, "surface": surface, "card_key": card_key, "macro_zone": macro_zone, "q": q, "r": r }),
+            ),
+            ClientCall::MoveCards { caller_player_id, card_ids, macro_zones, micro_locations, stack_states } => (
+                "move_cards",
+                json!({ "client_time_ms": client_time_ms, "caller_player_id": caller_player_id, "card_ids": card_ids, "macro_zones": macro_zones, "micro_locations": micro_locations, "stack_states": stack_states }),
+            ),
+            ClientCall::MoveSoul { caller_player_id, soul_id, soul_def, from_q, from_r, dest_surface, dest_macro_zone, dest_micro_location, depart_ms, arrival_ms } => (
+                "move_soul",
+                json!({ "client_time_ms": client_time_ms, "caller_player_id": caller_player_id, "soul_id": soul_id, "soul_def": soul_def, "from_q": from_q, "from_r": from_r, "dest": { "surface": dest_surface, "macro_zone": dest_macro_zone, "micro_location": dest_micro_location }, "depart_ms": depart_ms, "arrival_ms": arrival_ms }),
+            ),
+            ClientCall::ProposeAction { recipe_id, surface, macro_zone, micro_location, root, bindings, caller_player_id } => (
+                "propose_action",
+                json!({ "recipe_id": recipe_id, "surface": surface, "macro_zone": macro_zone, "micro_location": micro_location, "root": root, "bindings": bindings, "caller_player_id": caller_player_id, "client_time_ms": client_time_ms }),
+            ),
+            ClientCall::SendChatMessage { sender_player_id, sender_name, body } => (
+                "send_chat_message",
+                json!({ "sender_player_id": sender_player_id, "sender_name": sender_name, "body": body }),
+            ),
+            ClientCall::RequestZone { macro_zone } => (
+                "request_zone",
+                json!({ "client_time_ms": client_time_ms, "macro_zone": macro_zone }),
+            ),
+            ClientCall::EnsureRegion { macro_zone } => (
+                "ensure_region",
+                json!({ "client_time_ms": client_time_ms, "macro_zone": macro_zone }),
+            ),
+            ClientCall::AddContent { name, text } => {
+                ("add_content", json!({ "name": name, "text": text }))
+            }
+            ClientCall::ModifyContent { lineage, text } => {
+                ("modify_content", json!({ "lineage": lineage, "text": text }))
+            }
+            ClientCall::ModifyLocale { domain, json: j } => {
+                ("modify_locale", json!({ "domain": domain, "json": j }))
+            }
+            ClientCall::ModifyVisuals { name, text } => {
+                ("modify_visuals", json!({ "name": name, "text": text }))
+            }
+            ClientCall::UploadMaster { aspect, faction, variant, channel, data } => (
+                "upload_master",
+                json!({ "aspect": aspect, "faction": faction, "variant": variant, "channel": channel, "data": data }),
+            ),
+            ClientCall::Ping => ("ping", json!({})),
+        }
+    }
 }
 
 /// A row change op on a subscribed table. Serializes to `"insert"` / `"update"`
