@@ -9,31 +9,37 @@ logic, both sides — that single shared evaluation is the point of the rewrite
 
 ## Crates
 
-- **`data/` — `resonantdust-data` (rlib).** The shared logic; no JS bindings, so
-  the gate links it directly. Modules:
-  - `parser.rs` — lexer + block-tree for the `.rd` DSL (`<bucket>` / `::def` /
-    `:facet` / `@hook` headers; `$ & * : ^ #` reference sigils).
-  - `validate.rs` — per-file checks: stack-neutrality, local labels, the op table.
-  - `resolve.rs` — whole-corpus symbol table + `$`-ref resolution, and the
-    `aspect.<name>` member lint.
-  - `vm.rs` — the interpreter: data hooks, recipe `match_recipe` / `plan_recipe`
-    (holds + effects), `^` system calls, the `Cell` store, and the `Catalog`
-    (asset / manifest / aspect `@define` records).
-  - `loader.rs` — `load(&[(name, source)]) -> Bundle`: parse all `.rd` → symbol
-    table + catalog + functions + card/recipe defs indexed by **content-derived
-    `def_id`** (sorted names; no `id.json`). Runs the corpus acceptance pass.
-  - `bridge.rs` — storage bridge: `card_view` (a stored card → the VM's
-    operating-set `Cell`, with the satisfies fold), `operating_set` (assemble a
-    frame), `pack_stock`/`unpack_stock`.
-  - `bits.rs` — `get_field`/`set_field` bit primitives.
-- **root — `resonantdust-shared` (cdylib).** Thin `wasm-bindgen` JSON wrappers over
-  `data` for the browser — the `Content` handle (`load` / `cardView` /
-  `matchRecipe` / `planRecipe`), gated on the `js` feature. The plain logic is
-  feature-independent so `cargo test`/`check` exercise it natively.
+A Cargo workspace (`members = [codec, protocol, dsl, state, rules]`) plus the
+root `resonantdust-shared` cdylib. The former monolithic `resonantdust-data` /
+`resonantdust-content` crates are **gone** — this is the carved-up form.
+
+- **`codec/` — `resonantdust-codec`.** The packing / encoding primitives shared
+  by *everything* (gate, modules, client). `packed.rs` (macro_zone / card_id /
+  `valid_at` / region packing + `region_of_zone`), `flags.rs` (the flag-field
+  **registry** — the runtime source of flag mask/shift/max, replacing the retired
+  `flags.json`), `card_model.rs` (the `Micro` placement model), `stacking.rs`
+  (`StackBits` / `match_stack`), `bits.rs` (`get_field` / `set_field`), `plan.rs`
+  (the `Plan` type).
+- **`dsl/` — `resonantdust-dsl`.** The definition-language toolchain: `parser`
+  (lexer + block-tree for `.rd`) → `validate` → `resolve` (whole-corpus symbol
+  table) → `vm` (the interpreter: data hooks, `match_recipe` / `plan_recipe`,
+  `^` system calls, the `Cell` store + `Catalog`) → `loader` (`load(&[(name,
+  src)]) -> Bundle`, def ids content-derived from sorted names) → `bridge`
+  (stored card → VM operating-set `Cell`). Plus `defs`, `recipe`, `locales`,
+  `noise`, `worldgen` (the `^biome` terrain impl), `inspect`.
+- **`state/` — `resonantdust-state`.** Client-side state machines: `recipe_state`,
+  `stack` (the leaf-aware drop resolver).
+- **`protocol/` — `resonantdust-protocol`.** The gate↔client wire types —
+  `GateMsg` / `ClientMsg`, the `call_ok` / `call_err` / `call_promise` frames.
+- **`rules/` — `resonantdust-rules`.** `dsl_recipe` — recipe rules over the DSL.
+- **root — `resonantdust-shared` (cdylib).** Thin `wasm-bindgen` JSON wrappers
+  over the crates for the browser, gated on the `js` feature so `cargo test` /
+  `check` exercise the logic natively. (The *view* loads the separate
+  `client/wasm` core for transport; this cdylib is the content/DSL surface.)
 
 ## DSL spec
 
-The language is specified in the content submodule, next to the content it
+The language is specified in the vendored `content/` tree, next to the content it
 governs: [`content/data/SYNTAX.txt`](../content/data/SYNTAX.txt) (sigils + ops)
 and [`content/data/CONVENTIONS.txt`](../content/data/CONVENTIONS.txt) (the
 slot / aspect / chain model).
@@ -49,34 +55,21 @@ All dockerized on the `clockworklabs/spacetime` image (host `cargo` is not used)
 | `bin/shared check` | `cargo check --workspace --all-targets` |
 | `bin/shared build` | the wasm bundle (`cargo build --target wasm32 --features js` + `wasm-bindgen`) → `pkg/` |
 
-## Migration status
+## Status
 
-**Done + tested** — the whole pure data + wasm layer: parser → validate →
-resolve → VM (incl. recipe match/plan, `^` system calls, the aspect satisfies
-fold) → loader → bridge → wasm bindings.
+The pure data + wasm layer is **built, tested, and integrated** end to end:
 
-**Live integration** (in the consuming codebases, not here):
-- gate: `gather` (walk card rows → an `operating_set` frame, `slot.a.b`) +
-  `apply` (a validated `Plan` → the coarse `apply_action` / `apply_action_tile`
-  reducers — one transaction/commit per shard); the `^biome`/`^seed` system-call impls.
-- client: load the wasm bundle, render via `cardView`, match locally via
-  `matchRecipe`.
-- modules: the data modules link `resonantdust-data` (the retired
-  `resonantdust-content` crate is gone); `cards`+`regions` are now the unified
-  [`shard`](../spacetime/server/modules/shard/AGENTS.md) module, `players` stays
-  separate.
+- **gate** links the crates directly: `gather` (walk card rows → an
+  `operating_set` frame) + `apply` (a validated `Plan` → the coarse
+  `apply_action` / `apply_action_tile` reducers, one commit per shard); worldgen
+  (`^biome`) computes tile bytes the regions reducer just stores.
+- **modules** (the unified [`shard`](../spacetime/server/modules/shard/AGENTS.md)
+  + `players` + `chat`) link `codec` for the packing / flag / stacking
+  primitives.
+- **client** (`client/` core, compiled to wasm) links `codec` / `dsl` / `state` /
+  `protocol` and runs the *same* matcher / VM as the gate — no TS mirror.
 
-## Planned crate decomposition (by load-side)
-
-`shared/` is the home for *all* shared Rust, split so neither runtime loads what it
-doesn't use (Cargo's dependency graph enforces it):
-
-- **SHARED** (gate + client): `core` (today's `data`) · `biome` (terrain gen,
-  the impl behind `^biome` — the client needs it too).
-- **CLIENT-ONLY**: `locales` (strings) · `render` (texture/sprite helpers). Ported
-  from the legacy `locales_core` / `texture_core`.
-- **SERVER-ONLY**: `apply` (the pure `Plan` → mutation-descriptor half; the gate
-  keeps the IO).
-
-The wasm cdylib links shared + client crates; the gate links shared + server
-crates. (Not yet carved — `data` is the seed of `core`.)
+The crate decomposition is **done** (`codec` / `dsl` / `state` / `protocol` /
+`rules`); the load-side split is enforced by Cargo's dependency graph — neither
+runtime pulls in what it doesn't use. Open work lives in
+[docs/ROADMAP.md](../docs/ROADMAP.md).
