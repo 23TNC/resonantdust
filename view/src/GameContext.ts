@@ -17,6 +17,7 @@ import type { DefinitionManager } from "./game/definitions/DefinitionManager";
 import type { LayoutManager } from "./game/layout/LayoutManager";
 import type { InputManager } from "./game/input/InputManager";
 import type { LogManager } from "./game/panels/chat/LogManager";
+import type { DebugPanel } from "./game/panels/titlebar/DebugPanel";
 
 export interface GameContext {
   readonly app: Application;
@@ -44,6 +45,10 @@ export interface GameContext {
 
   /** Per-frame GL draw-call counter (patched at boot); read by the debug panel. */
   readonly drawCalls: DrawCallCounter;
+
+  /** The stats HUD — exposed so a world scene can push the live cursor
+   *  tile/zone/region readout each frame. Late-bound after context creation. */
+  debugPanel?: DebugPanel;
 
   /** Open-panel registry — set once the active scene installs it. */
   panels: PanelManager | null;

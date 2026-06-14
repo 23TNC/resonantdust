@@ -6,6 +6,7 @@ import { PanelManager } from "../../ui/panels/PanelManager";
 import { LayoutManager } from "../../game/layout/LayoutManager";
 import { InputManager } from "../../game/input/InputManager";
 import { ViewportPanel } from "../../game/viewport/ViewportPanel";
+import { ZONE_SIZE, TILE_CENTER, REGION_SIZE, REGION_CENTER } from "../../server/data/packing";
 import { CardDragController } from "../../game/viewport/CardDragController";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import { WORLD_LAYER, INVENTORY_LAYER } from "../../server/data/packing";
@@ -393,12 +394,34 @@ export class WorldScene extends Scene {
   update(_deltaMS: number): void {
     for (const v of this.viewports()) v.tick();
     this.cardDrag.update(); // glide the drag ghost toward the cursor
+    this.updateCursorReadout();
     // Size the details panel to the host body width × its natural height so
     // its fixed-layout draw lands within the panel rect.
     if (this.details.isVisible) {
       this.details.setBounds(0, 0, this.detailsHost.content.width, this.details.currentHeight);
     }
     this.rootNode.layoutIfDirty();
+  }
+
+  /** Push the live tile / macro_zone / region under the cursor to the debug HUD.
+   *  Uses the canonical codec formula (centre-at-(0,0), 7×7 zones & regions) so
+   *  the readout is the REFERENCE to compare against where tiles actually load. */
+  private updateCursorReadout(): void {
+    const dp = this.ctx.debugPanel;
+    if (!dp?.isOpen) return;
+    const vp = this.viewports()[0];
+    if (!vp) return;
+    const p = this.input.lastPointer;
+    const tile = vp.cellAt(p.x, p.y); // global (world) tile
+    // Local cell inside the macro_zone (0..6; owner-origin at 3,3). `rem_euclid`
+    // via ((n % m) + m) % m so negatives wrap correctly.
+    const lq = (((tile.q + TILE_CENTER) % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
+    const lr = (((tile.r + TILE_CENTER) % ZONE_SIZE) + ZONE_SIZE) % ZONE_SIZE;
+    const zq = Math.floor((tile.q + TILE_CENTER) / ZONE_SIZE);
+    const zr = Math.floor((tile.r + TILE_CENTER) / ZONE_SIZE);
+    const rq = Math.floor((zq + REGION_CENTER) / REGION_SIZE);
+    const rr = Math.floor((zr + REGION_CENTER) / REGION_SIZE);
+    dp.setCursorCoords({ q: lq, r: lr }, tile, { q: zq, r: zr }, { q: rq, r: rr });
   }
 
   onExit(): void {

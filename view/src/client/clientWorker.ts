@@ -11,7 +11,7 @@
 //! async step — fetching the `/content` bundle — happens HERE in JS and is handed
 //! to `load_content`.
 
-import type { ToWorker, FromWorker, ChatMessage, ClockStats } from "./protocol";
+import type { ToWorker, FromWorker, ChatMessage, ClockStats, CallStat, SubStat } from "./protocol";
 import type { RenderRegion, Renderable } from "./render";
 import init, { WasmClient } from "./wasm/resonantdust_client.js";
 
@@ -163,6 +163,20 @@ function startPump(): void {
     // main thread skips the DOM work when the panel is closed.
     try {
       post({ type: "clockStats", stats: JSON.parse(core.clock_stats()) as ClockStats });
+    } catch {
+      /* malformed snapshot — skip this tick; the next pump's is independent */
+    }
+    // Per-reducer call tally for the debug HUD's "calls" tab — drained every
+    // pump (independent of `changed`). Cheap; the main thread skips the DOM work
+    // when the panel is closed.
+    try {
+      post({ type: "callStats", stats: JSON.parse(core.call_stats()) as CallStat[] });
+    } catch {
+      /* malformed snapshot — skip this tick; the next pump's is independent */
+    }
+    // Per-table subscription tally for the debug HUD's "subs" tab.
+    try {
+      post({ type: "subStats", stats: JSON.parse(core.sub_stats()) as SubStat[] });
     } catch {
       /* malformed snapshot — skip this tick; the next pump's is independent */
     }

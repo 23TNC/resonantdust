@@ -8,10 +8,10 @@
 //! matching pass can't stall PIXI — the main thread only ever does message I/O.
 
 import ClientWorker from "./clientWorker.ts?worker";
-import type { ToWorker, FromWorker, LoginResult, ClientEvent, ChatMessage, ClockStats } from "./protocol";
+import type { ToWorker, FromWorker, LoginResult, ClientEvent, ChatMessage, ClockStats, CallStat, SubStat } from "./protocol";
 import type { RenderRegion, RenderBatch, ViewportFeed } from "./render";
 
-export type { LoginResult, ChatMessage, ClockStats };
+export type { LoginResult, ChatMessage, ClockStats, CallStat, SubStat };
 export type { RenderRegion, RenderBatch, ViewportFeed };
 
 /** Player name that unlocks developer-only UI (the right-click card menu,
@@ -50,6 +50,10 @@ export class WasmClient {
   private readonly chatListeners = new Set<(messages: ChatMessage[]) => void>();
   /** Fired each pump with the latest clock-discipline + RTT diagnostics (debug HUD). */
   private readonly clockStatsListeners = new Set<(stats: ClockStats) => void>();
+  /** Fired each pump with the latest per-reducer gateway-call tally (debug HUD). */
+  private readonly callStatsListeners = new Set<(stats: CallStat[]) => void>();
+  /** Fired each pump with the latest per-table subscription tally (debug HUD). */
+  private readonly subStatsListeners = new Set<(stats: SubStat[]) => void>();
   /** Fired when discovery resolves (or changes) our `player_soul` card_id — a
    *  pump or two after login. The view opens the player's own inventory here. */
   private readonly playerSoulListeners = new Set<(id: number) => void>();
@@ -100,6 +104,12 @@ export class WasmClient {
           break;
         case "clockStats":
           for (const fn of this.clockStatsListeners) fn(msg.stats);
+          break;
+        case "callStats":
+          for (const fn of this.callStatsListeners) fn(msg.stats);
+          break;
+        case "subStats":
+          for (const fn of this.subStatsListeners) fn(msg.stats);
           break;
         case "playerSoul":
           // Discovery surfaced (or changed) our player_soul after login. Keep the
@@ -234,6 +244,22 @@ export class WasmClient {
     return () => this.clockStatsListeners.delete(fn);
   }
 
+  /** Subscribe to the per-reducer gateway-call tally the worker drains each pump
+   *  (request/ok/err/promise counts + tx/rx byte estimates). The debug HUD's
+   *  "calls" tab consumes this. Returns an unsubscribe fn. */
+  onCallStats(fn: (stats: CallStat[]) => void): () => void {
+    this.callStatsListeners.add(fn);
+    return () => this.callStatsListeners.delete(fn);
+  }
+
+  /** Subscribe to the per-table subscription tally the worker drains each pump
+   *  (open-subscription count + tx/rx byte estimates). The debug HUD's "subs"
+   *  tab consumes this. Returns an unsubscribe fn. */
+  onSubStats(fn: (stats: SubStat[]) => void): () => void {
+    this.subStatsListeners.add(fn);
+    return () => this.subStatsListeners.delete(fn);
+  }
+
   /** Subscribe to gate content hot-swaps (a runtime add/modify, or an R2 upload
    *  the authority re-polled). The worker has already reloaded its matcher
    *  bundle when this fires; the handler refreshes the render-side content
@@ -286,6 +312,8 @@ export class WasmClient {
     this.contentChangedListeners.clear();
     this.chatListeners.clear();
     this.clockStatsListeners.clear();
+    this.callStatsListeners.clear();
+    this.subStatsListeners.clear();
     this.viewListeners.clear();
   }
 }

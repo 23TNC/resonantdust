@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmclient_free: (a: number, b: number) => void;
 export const wasmclient_add_content: (a: number, b: number, c: number, d: number, e: number) => void;
+export const wasmclient_call_stats: (a: number) => [number, number];
 export const wasmclient_clock_stats: (a: number) => [number, number];
 export const wasmclient_connect: (a: number, b: number, c: number) => [number, number];
 export const wasmclient_give: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
@@ -21,6 +22,7 @@ export const wasmclient_pump: (a: number) => number;
 export const wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
 export const wasmclient_send_chat: (a: number, b: number, c: number) => void;
 export const wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const wasmclient_sub_stats: (a: number) => [number, number];
 export const wasmclient_subscribe_chat: (a: number) => void;
 export const wasmclient_take_chat: (a: number) => [number, number];
 export const wasmclient_take_content_changed: (a: number) => [number, number];

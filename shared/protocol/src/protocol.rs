@@ -84,6 +84,20 @@ pub enum GateMsg {
         error: String,
         server_micros: String,
     },
+    /// Reducer call `cid` was ACCEPTED for asynchronous resolution — the
+    /// protocol's async primitive. The gate replies this instead of a premature
+    /// `CallOk` when a call's true outcome isn't known at call time (it lands
+    /// later via a subscription row or a side effect). The gate will send a
+    /// follow-up `CallOk`/`CallErr` for this same `cid` once the real outcome is
+    /// known, or by `timeout_ms` at the latest. The client holds the call in an
+    /// **awaiting** state until then — it does NOT retry — and falls back to a
+    /// retry only if the promise is never kept. Like the other replies it carries
+    /// `server_micros` (a promise is still a round-trip → a clock sample).
+    CallPromise {
+        cid: u32,
+        timeout_ms: u64,
+        server_micros: String,
+    },
     /// A protocol-level error not tied to a specific request.
     Error { error: String },
     /// Server-clock keepalive: the gate's wall clock in microseconds since the
@@ -140,6 +154,17 @@ impl GateMsg {
         GateMsg::CallErr {
             cid,
             error,
+            server_micros: now_micros(),
+        }
+        .to_json()
+    }
+
+    /// Build a stamped `call_promise` reply, serialized for the sink — accept a
+    /// call for async resolution, promising a follow-up within `timeout_ms`.
+    pub fn call_promise(cid: u32, timeout_ms: u64) -> String {
+        GateMsg::CallPromise {
+            cid,
+            timeout_ms,
             server_micros: now_micros(),
         }
         .to_json()

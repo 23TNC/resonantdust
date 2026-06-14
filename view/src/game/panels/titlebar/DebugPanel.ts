@@ -5,6 +5,7 @@ import type { UiEditMode } from "../../../ui/dom/UiEditMode";
 import { panelTitle, panelText } from "../panelStrings";
 import { currentEnvironment, httpBaseFor } from "../../../client/environments";
 import { getContentVersion } from "../../definitions/contentBoot";
+import type { CallStat, SubStat } from "../../../client/WasmClient";
 
 /** The gate's `/versions` payload: baked source-closure hashes per component
  *  (`server`) plus the gate's live content fingerprint (`content_live`). */
@@ -12,7 +13,7 @@ interface VersionsResponse {
   server: {
     build: number;
     generated: string;
-    components: Record<string, { hash: string; seq: number }>;
+    components: Record<string, { hash: string; seq: number; ts: string }>;
   };
   content_live: string;
 }
@@ -91,6 +92,61 @@ const REFRESH_BTN_CSS: Partial<CSSStyleDeclaration> = {
 /** Versions-tab value colours: match (green) / drift (red). */
 const VERSION_OK_COLOR = "#7bd88f";
 const VERSION_DRIFT_COLOR = "#e06c75";
+
+/** Stat-table chrome (calls + subs tabs): full width, collapsed borders, small
+ *  monospace-ish digits. */
+const STAT_TABLE_CSS: Partial<CSSStyleDeclaration> = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: "0.82em",
+};
+
+/** Stat-table header cell — dim, ruled underline, tight padding. */
+const STAT_TH_CSS: Partial<CSSStyleDeclaration> = {
+  color: "#6a6c78",
+  fontWeight: "normal",
+  padding: "4px 6px",
+  borderBottom: "1px solid #23252e",
+};
+
+/** Stat-table body cell — value colour, tight padding. */
+const STAT_TD_CSS: Partial<CSSStyleDeclaration> = {
+  color: "#ecd6aa",
+  padding: "3px 6px",
+};
+
+/** Calls-tab columns: [header label, text-align]. Order matches `renderCalls`. */
+const CALLS_COLUMNS: ReadonlyArray<readonly [string, "left" | "right"]> = [
+  ["cmd", "left"],
+  ["req", "right"],
+  ["ok", "right"],
+  ["err", "right"],
+  ["prom", "right"],
+  ["tx", "right"],
+  ["rx", "right"],
+];
+
+/** Subs-tab columns: [header label, text-align]. Order matches `renderSubs`. */
+const SUBS_COLUMNS: ReadonlyArray<readonly [string, "left" | "right"]> = [
+  ["table", "left"],
+  ["subs", "right"],
+  ["tx", "right"],
+  ["rx", "right"],
+];
+
+/** Versions-tab value cell: hash stacked above its dim timestamp. */
+const VERSION_VALUE_CSS: Partial<CSSStyleDeclaration> = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  color: "#ecd6aa",
+};
+
+/** The per-component change timestamp under each hash — small + subdued. */
+const VERSION_TS_CSS: Partial<CSSStyleDeclaration> = {
+  color: "#6a6c78",
+  fontSize: "0.82em",
+};
 
 /** Right-side cluster wrapping a sparkline canvas + the live value span. */
 const GRAPH_RIGHT_CSS: Partial<CSSStyleDeclaration> = {
@@ -220,6 +276,12 @@ export class DebugPanel {
   private readonly mainOffset:     HTMLSpanElement;
   private readonly mainFps:        HTMLSpanElement;
   private readonly mainDrawCalls:  HTMLSpanElement;
+  // Cursor coordinate readout (debug): tile → zone (macro) → region, derived
+  // from the codec formula so it's the REFERENCE to compare against where tiles
+  // actually load/render.
+  private readonly mainTile:       HTMLSpanElement;
+  private readonly mainZone:       HTMLSpanElement;
+  private readonly mainRegion:     HTMLSpanElement;
 
   // ── Textures tab values ─────────────────────────────────────────
   private readonly texFps:         HTMLSpanElement;
@@ -246,6 +308,17 @@ export class DebugPanel {
 
   // ── Versions tab — per-component build-hash drift ───────────────
   private readonly versionsBody: HTMLDivElement;
+
+  // ── Calls tab — per-reducer gateway-call tally ──────────────────
+  private readonly callsBody: HTMLDivElement;
+  /** Latest tally pushed from the worker, retained so opening the panel can
+   *  render immediately (the worker only pushes every pump). */
+  private lastCallStats: CallStat[] = [];
+
+  // ── Subs tab — per-table subscription tally ─────────────────────
+  private readonly subsBody: HTMLDivElement;
+  /** Latest tally pushed from the worker, retained so opening renders at once. */
+  private lastSubStats: SubStat[] = [];
 
   private fps = 60;
 
@@ -277,6 +350,8 @@ export class DebugPanel {
     const texturesContent = document.createElement("div");
     const syncContent     = document.createElement("div");
     const versionsContent = document.createElement("div");
+    const callsContent    = document.createElement("div");
+    const subsContent     = document.createElement("div");
 
     // ── Main tab — at-a-glance ────────────────────────────────────
     this.addToggleRow(
@@ -290,6 +365,9 @@ export class DebugPanel {
     this.mainOffset    = this.addRow(mainContent, panelText("debugPanel", "offset"));
     this.mainFps       = this.addRow(mainContent, panelText("debugPanel", "fps"));
     this.mainDrawCalls = this.addRow(mainContent, panelText("debugPanel", "drawCalls"));
+    this.mainTile      = this.addRow(mainContent, "tile local (world)");
+    this.mainZone      = this.addRow(mainContent, "zone (q,r)");
+    this.mainRegion    = this.addRow(mainContent, "region (q,r)");
 
     // ── Textures tab — atlas / slot counts ────────────────────────
     this.texFps       = this.addRow(texturesContent, panelText("debugPanel", "fps"));
@@ -327,19 +405,51 @@ export class DebugPanel {
     this.versionsBody = document.createElement("div");
     versionsContent.appendChild(this.versionsBody);
 
+    // ── Calls tab — per-reducer gateway-call tally ────────────────
+    // A body the worker's per-pump `callStats` push repopulates with a table
+    // (one row per reducer + a totals row). Empty until the first call goes out.
+    this.callsBody = document.createElement("div");
+    callsContent.appendChild(this.callsBody);
+    this.renderCalls();
+
+    // ── Subs tab — per-table subscription tally ───────────────────
+    // A body the worker's per-pump `subStats` push repopulates with a table
+    // (one row per subscribed table + a totals row). Empty until the first sub.
+    this.subsBody = document.createElement("div");
+    subsContent.appendChild(this.subsBody);
+    this.renderSubs();
+
     this.panel.addTab("main",     "🛈", mainContent);
     this.panel.addTab("textures", "🖌", texturesContent);
     this.panel.addTab("sync",     "🛰", syncContent);
     this.panel.addTab("versions", "🏷", versionsContent);
+    this.panel.addTab("calls",    "📡", callsContent);
+    this.panel.addTab("subs",     "📥", subsContent);
 
     // Initial fill (best-effort — shows "not connected" until login sets the env).
     void this.refreshVersions();
   }
 
+  /** Live cursor coordinate readout. `tileLocal` is the cell INSIDE the current
+   *  macro_zone (0..6, the owner-origin at 3,3); `tileWorld` is the global tile.
+   *  `zone` / `region` are the macro_zone / region the cell maps to (codec
+   *  formula). Drives the debug bug-hunt for the 7×7 / centre-at-(0,0) handling. */
+  setCursorCoords(
+    tileLocal: { q: number; r: number },
+    tileWorld: { q: number; r: number },
+    zone: { q: number; r: number },
+    region: { q: number; r: number },
+  ): void {
+    if (!this.panel.isOpen) return;
+    this.mainTile.textContent   = `${tileLocal.q}, ${tileLocal.r}   (w ${tileWorld.q}, ${tileWorld.r})`;
+    this.mainZone.textContent   = `${zone.q}, ${zone.r}`;
+    this.mainRegion.textContent = `${region.q}, ${region.r}`;
+  }
+
   get isOpen(): boolean { return this.panel.isOpen; }
 
   toggle(): void { this.panel.toggle(); }
-  open():   void { this.panel.open(); void this.refreshVersions(); }
+  open():   void { this.panel.open(); void this.refreshVersions(); this.renderCalls(); this.renderSubs(); }
   close():  void { this.panel.close();  }
   destroy(): void { this.panel.destroy(); }
 
@@ -553,15 +663,17 @@ export class DebugPanel {
       return;
     }
 
-    // Build number (the running ledger version).
+    // Build number (the running ledger version), stamped with when the snapshot
+    // was generated.
     body.appendChild(this.versionRow(
       panelText("debugPanel", "build"),
       String(client.build),
       server ? String(server.server.build) : undefined,
+      client.generated,
     ));
 
-    // Per-component source-closure hashes. Union both key sets so a component
-    // on only one side still shows.
+    // Per-component source-closure hashes + the timestamp each last changed.
+    // Union both key sets so a component on only one side still shows.
     const names = new Set<string>([
       ...Object.keys(client.components),
       ...Object.keys(server?.server.components ?? {}),
@@ -572,6 +684,7 @@ export class DebugPanel {
         name,
         client.components[name]?.hash,
         server?.server.components[name]?.hash,
+        client.components[name]?.ts,
       ));
     }
 
@@ -584,32 +697,197 @@ export class DebugPanel {
     ));
   }
 
-  /** One label → value row. With no gate value, shows the client hash plainly.
-   *  With one, compares: green ✓ on match, red `client ⇄ gate` on drift. */
-  private versionRow(label: string, clientH?: string, serverH?: string): HTMLDivElement {
+  /** One row: label on the left; on the right the hash (or client ⇄ gate
+   *  comparison) above a dim timestamp of when that component last changed.
+   *  No gate value → plain client hash; otherwise green ✓ / red drift. */
+  private versionRow(label: string, clientH?: string, serverH?: string, ts?: string): HTMLDivElement {
     const row = document.createElement("div");
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
     Object.assign(labelEl.style, LABEL_CSS);
     labelEl.textContent = label;
-    const valueEl = document.createElement("span");
-    Object.assign(valueEl.style, VALUE_CSS);
 
+    const valueEl = document.createElement("div");
+    Object.assign(valueEl.style, VERSION_VALUE_CSS);
+    const hashEl = document.createElement("span");
     if (serverH === undefined) {
-      // No gate comparison — just display the client hash.
-      valueEl.textContent = short(clientH);
+      hashEl.style.color = VALUE_CSS.color ?? "";
+      hashEl.textContent = short(clientH);
     } else {
       const match = !!clientH && clientH === serverH;
-      valueEl.style.color = match ? VERSION_OK_COLOR : VERSION_DRIFT_COLOR;
-      valueEl.textContent = match
-        ? `✓ ${short(clientH)}`
-        : `${short(clientH)} ⇄ ${short(serverH)}`;
+      hashEl.style.color = match ? VERSION_OK_COLOR : VERSION_DRIFT_COLOR;
+      hashEl.textContent = match ? `✓ ${short(clientH)}` : `${short(clientH)} ⇄ ${short(serverH)}`;
+    }
+    valueEl.appendChild(hashEl);
+    if (ts) {
+      const tsEl = document.createElement("span");
+      Object.assign(tsEl.style, VERSION_TS_CSS);
+      tsEl.textContent = fmtTs(ts);
+      valueEl.appendChild(tsEl);
     }
 
     row.appendChild(labelEl);
     row.appendChild(valueEl);
     return row;
   }
+
+  // ── Calls tab ───────────────────────────────────────────────────
+
+  /** Receive the latest per-reducer gateway-call tally (pushed each pump). Retain
+   *  it so a later `open()` can render immediately, and rebuild the table now if
+   *  the panel is open (skip the DOM churn otherwise). */
+  setCallStats(stats: CallStat[]): void {
+    this.lastCallStats = stats;
+    if (this.panel.isOpen) this.renderCalls();
+  }
+
+  /** Rebuild the calls table from {@link lastCallStats}: one row per reducer
+   *  (command, request count, ok/err/promise reply counts, tx/rx byte estimates)
+   *  plus a totals row. Error counts highlight red when non-zero. */
+  private renderCalls(): void {
+    const body = this.callsBody;
+    body.replaceChildren();
+
+    if (this.lastCallStats.length === 0) {
+      body.appendChild(this.statEmpty("no gateway calls yet"));
+      return;
+    }
+
+    const table = this.statTable(CALLS_COLUMNS);
+    const tbody = table.createTBody();
+    const totals = { requests: 0, ok: 0, err: 0, promise: 0, tx: 0, rx: 0 };
+    for (const s of this.lastCallStats) {
+      totals.requests += s.requests;
+      totals.ok += s.ok;
+      totals.err += s.err;
+      totals.promise += s.promise;
+      totals.tx += s.tx;
+      totals.rx += s.rx;
+      const row = tbody.insertRow();
+      this.statCell(row, s.command, "left");
+      this.statCell(row, String(s.requests), "right");
+      this.statCell(row, String(s.ok), "right");
+      this.statCell(row, String(s.err), "right", s.err > 0 ? VERSION_DRIFT_COLOR : undefined);
+      this.statCell(row, String(s.promise), "right");
+      this.statCell(row, fmtBytes(s.tx), "right");
+      this.statCell(row, fmtBytes(s.rx), "right");
+    }
+
+    // Totals row — bold, top-ruled, to separate it from the per-reducer rows.
+    const totalRow = tbody.insertRow();
+    this.statCell(totalRow, "total", "left", undefined, true);
+    this.statCell(totalRow, String(totals.requests), "right", undefined, true);
+    this.statCell(totalRow, String(totals.ok), "right", undefined, true);
+    this.statCell(totalRow, String(totals.err), "right", totals.err > 0 ? VERSION_DRIFT_COLOR : undefined, true);
+    this.statCell(totalRow, String(totals.promise), "right", undefined, true);
+    this.statCell(totalRow, fmtBytes(totals.tx), "right", undefined, true);
+    this.statCell(totalRow, fmtBytes(totals.rx), "right", undefined, true);
+
+    body.appendChild(table);
+  }
+
+  // ── Subs tab ────────────────────────────────────────────────────
+
+  /** Receive the latest per-table subscription tally (pushed each pump). Retain
+   *  it for a later `open()`, and rebuild the table now if the panel is open. */
+  setSubStats(stats: SubStat[]): void {
+    this.lastSubStats = stats;
+    if (this.panel.isOpen) this.renderSubs();
+  }
+
+  /** Rebuild the subs table from {@link lastSubStats}: one row per subscribed
+   *  table (open-subscription count + tx/rx byte estimates) plus a totals row.
+   *  `subs` is a LIVE gauge (current open count); `tx`/`rx` are cumulative. */
+  private renderSubs(): void {
+    const body = this.subsBody;
+    body.replaceChildren();
+
+    if (this.lastSubStats.length === 0) {
+      body.appendChild(this.statEmpty("no subscriptions yet"));
+      return;
+    }
+
+    const table = this.statTable(SUBS_COLUMNS);
+    const tbody = table.createTBody();
+    const totals = { subs: 0, tx: 0, rx: 0 };
+    for (const s of this.lastSubStats) {
+      totals.subs += s.subs;
+      totals.tx += s.tx;
+      totals.rx += s.rx;
+      const row = tbody.insertRow();
+      this.statCell(row, s.table, "left");
+      this.statCell(row, String(s.subs), "right");
+      this.statCell(row, fmtBytes(s.tx), "right");
+      this.statCell(row, fmtBytes(s.rx), "right");
+    }
+
+    const totalRow = tbody.insertRow();
+    this.statCell(totalRow, "total", "left", undefined, true);
+    this.statCell(totalRow, String(totals.subs), "right", undefined, true);
+    this.statCell(totalRow, fmtBytes(totals.tx), "right", undefined, true);
+    this.statCell(totalRow, fmtBytes(totals.rx), "right", undefined, true);
+
+    body.appendChild(table);
+  }
+
+  // ── Stat-table builders (shared by the calls + subs tabs) ───────
+
+  /** An empty `<table>` with a styled header row built from `columns`. */
+  private statTable(columns: ReadonlyArray<readonly [string, "left" | "right"]>): HTMLTableElement {
+    const table = document.createElement("table");
+    Object.assign(table.style, STAT_TABLE_CSS);
+    const head = table.createTHead().insertRow();
+    for (const [label, align] of columns) {
+      const th = document.createElement("th");
+      th.textContent = label;
+      Object.assign(th.style, STAT_TH_CSS);
+      th.style.textAlign = align;
+      head.appendChild(th);
+    }
+    return table;
+  }
+
+  /** A dim "nothing yet" placeholder row for an empty stat table. */
+  private statEmpty(text: string): HTMLDivElement {
+    const empty = document.createElement("div");
+    Object.assign(empty.style, ROW_CSS);
+    Object.assign(empty.style, LABEL_CSS);
+    empty.textContent = text;
+    return empty;
+  }
+
+  /** Append one `<td>` to `row` with the stat-table cell styling. */
+  private statCell(
+    row: HTMLTableRowElement,
+    text: string,
+    align: "left" | "right",
+    color?: string,
+    total = false,
+  ): void {
+    const td = row.insertCell();
+    td.textContent = text;
+    Object.assign(td.style, STAT_TD_CSS);
+    td.style.textAlign = align;
+    if (color) td.style.color = color;
+    if (total) {
+      td.style.fontWeight = "bold";
+      td.style.borderTop = "1px solid #34363f";
+    }
+  }
+}
+
+/** Format a byte count compactly: `B` / `K` / `M` (1024-based), for the calls
+ *  tab's tx/rx columns where exact bytes would overflow the narrow cell. */
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} K`;
+  return `${(n / 1024 / 1024).toFixed(1)} M`;
+}
+
+/** Compact UTC `YYYY-MM-DD HH:MM` from an ISO timestamp (no Date parse — the
+ *  ledger stamps are already ISO `…Z`). */
+function fmtTs(iso: string): string {
+  return iso.length >= 16 ? `${iso.slice(0, 10)} ${iso.slice(11, 16)}` : iso;
 }
 
 /** First 10 chars of a hash (enough to eyeball), or an em dash if absent. */

@@ -11,6 +11,13 @@ export class WasmClient {
      */
     add_content(name: string, text: string): void;
     /**
+     * Per-reducer gateway-call tally as a JSON array (the debug HUD's "calls"
+     * tab): `[{ command, requests, ok, err, promise, tx, rx }]`, sorted by
+     * command name. `tx`/`rx` are serialized-frame byte ESTIMATES. Cheap —
+     * drained each pump.
+     */
+    call_stats(): string;
+    /**
      * The clock-discipline + RTT diagnostics as a JSON object (the view's
      * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
      * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
@@ -123,6 +130,14 @@ export class WasmClient {
      */
     set_anchor(surface: number, owner: number, q: number, r: number, radius_tiles: number): void;
     /**
+     * Per-table subscription tally as a JSON array (the debug HUD's "subs"
+     * tab): `[{ table, subs, tx, rx }]`, sorted by table name. `subs` is the
+     * currently-open count; `tx`/`rx` are serialized-frame byte ESTIMATES (tx =
+     * `Sub`/`Unsub` frames, rx = the `Row`/`Applied` frames they stream back).
+     * Cheap — drained each pump.
+     */
+    sub_stats(): string;
+    /**
      * Subscribe to the world chat feed. Idempotent — call once login resolved (so
      * our sender id/name are known); inbound messages then accumulate for
      * [`take_chat`](Self::take_chat). Safe to re-call.
@@ -159,6 +174,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmclient_free: (a: number, b: number) => void;
     readonly wasmclient_add_content: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly wasmclient_call_stats: (a: number) => [number, number];
     readonly wasmclient_clock_stats: (a: number) => [number, number];
     readonly wasmclient_connect: (a: number, b: number, c: number) => [number, number];
     readonly wasmclient_give: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
@@ -177,6 +193,7 @@ export interface InitOutput {
     readonly wasmclient_render_region: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number];
     readonly wasmclient_send_chat: (a: number, b: number, c: number) => void;
     readonly wasmclient_set_anchor: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly wasmclient_sub_stats: (a: number) => [number, number];
     readonly wasmclient_subscribe_chat: (a: number) => void;
     readonly wasmclient_take_chat: (a: number) => [number, number];
     readonly wasmclient_take_content_changed: (a: number) => [number, number];

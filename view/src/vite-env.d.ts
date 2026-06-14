@@ -5,5 +5,5 @@
 declare const __BUILD_VERSIONS__: {
   build: number;
   generated: string;
-  components: Record<string, { hash: string; seq: number }>;
+  components: Record<string, { hash: string; seq: number; ts: string }>;
 } | null;

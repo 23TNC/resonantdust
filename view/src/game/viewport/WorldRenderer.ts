@@ -500,6 +500,13 @@ export class WorldRenderer extends LayoutNode {
   /** Drain a slice of the build queue and advance any prim easing. Driven by the
    *  scene each frame; bounded by {@link BUILD_BUDGET} so large regions stream. */
   tick(): void {
+    // Re-aim the gate region EVERY frame from the current anchor. `pan.update()`
+    // moves the anchor per-frame but only marks the panel dirty; `layout()` (the
+    // sole other `syncRegion` caller) runs on the layout-flush, NOT every frame —
+    // so without this, the worker's view-anchor lags/skips the positions a pan
+    // sweeps through and those zones are never requested (permanent blank gaps).
+    // Cheap: `syncRegion`'s `sameRegion` guard no-ops unless the region changed.
+    this.syncRegion();
     let built = 0;
     while (built < BUILD_BUDGET && this.tileQueue.length > 0) {
       const key = this.tileQueue.shift()!;

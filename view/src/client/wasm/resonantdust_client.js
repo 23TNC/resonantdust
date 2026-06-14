@@ -26,6 +26,25 @@ export class WasmClient {
         wasm.wasmclient_add_content(this.__wbg_ptr, ptr0, len0, ptr1, len1);
     }
     /**
+     * Per-reducer gateway-call tally as a JSON array (the debug HUD's "calls"
+     * tab): `[{ command, requests, ok, err, promise, tx, rx }]`, sorted by
+     * command name. `tx`/`rx` are serialized-frame byte ESTIMATES. Cheap —
+     * drained each pump.
+     * @returns {string}
+     */
+    call_stats() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmclient_call_stats(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * The clock-discipline + RTT diagnostics as a JSON object (the view's
      * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
      * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
@@ -266,6 +285,26 @@ export class WasmClient {
      */
     set_anchor(surface, owner, q, r, radius_tiles) {
         wasm.wasmclient_set_anchor(this.__wbg_ptr, surface, owner, q, r, radius_tiles);
+    }
+    /**
+     * Per-table subscription tally as a JSON array (the debug HUD's "subs"
+     * tab): `[{ table, subs, tx, rx }]`, sorted by table name. `subs` is the
+     * currently-open count; `tx`/`rx` are serialized-frame byte ESTIMATES (tx =
+     * `Sub`/`Unsub` frames, rx = the `Row`/`Applied` frames they stream back).
+     * Cheap — drained each pump.
+     * @returns {string}
+     */
+    sub_stats() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmclient_sub_stats(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * Subscribe to the world chat feed. Idempotent — call once login resolved (so

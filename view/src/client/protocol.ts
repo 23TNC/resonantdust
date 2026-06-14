@@ -41,6 +41,31 @@ export interface ClockStats {
   rttSamples: number;
 }
 
+/** One reducer's gateway-call tally for the debug HUD's "calls" tab. `requests`
+ *  counts outgoing `Call` frames (an outbox retry is another request); `ok`/
+ *  `err`/`promise` count the `CallOk`/`CallErr`/`CallPromise` replies. `tx`/`rx`
+ *  are serialized-frame byte ESTIMATES (they ignore WS framing + compression). */
+export interface CallStat {
+  command: string;
+  requests: number;
+  ok: number;
+  err: number;
+  promise: number;
+  tx: number;
+  rx: number;
+}
+
+/** One table's subscription tally for the debug HUD's "subs" tab. `subs` is the
+ *  currently-open subscription count (zone/card subs are one-per-zone, so it
+ *  tracks the anchor's coverage); `tx`/`rx` are serialized-frame byte ESTIMATES
+ *  (tx = `Sub`/`Unsub` frames, rx = the `Row`/`Applied` frames streamed back). */
+export interface SubStat {
+  table: string;
+  subs: number;
+  tx: number;
+  rx: number;
+}
+
 /** One chat message from the `chat_messages` feed. `sentAt` is the packed
  *  `[time_ms | seq]` key as a STRING — the u64 exceeds JS's safe-integer range,
  *  so it's carried as text (and is a stable per-message id / sort key). */
@@ -109,6 +134,12 @@ export type FromWorker =
   // the debug HUD's "sync" tab. The raw wasm slice; the main thread adds the
   // `Date.now()`-relative fields (the core only knows its server estimate).
   | { type: "clockStats"; stats: ClockStats }
+  // Per-reducer gateway-call tally drained each pump, for the debug HUD's
+  // "calls" tab (request/ok/err/promise counts + tx/rx byte estimates).
+  | { type: "callStats"; stats: CallStat[] }
+  // Per-table subscription tally drained each pump, for the debug HUD's "subs"
+  // tab (open-subscription count + tx/rx byte estimates).
+  | { type: "subStats"; stats: SubStat[] }
   // Our `player_soul` card_id resolved (or changed). It streams in a pump or two
   // AFTER login (discovery walk: player_id → cards WHERE owner_id=player_id), so
   // the login reply often carries `-1`; this fires when it actually lands so the

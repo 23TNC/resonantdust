@@ -18,7 +18,7 @@ import { SettingsMenu } from "./game/panels/titlebar/SettingsMenu";
 import { DebugPanel } from "./game/panels/titlebar/DebugPanel";
 import type { SyncStats } from "./game/panels/titlebar/DebugPanel";
 import { SyncHistory } from "./game/panels/titlebar/syncHistory";
-import type { ClockStats } from "./client/WasmClient";
+import type { ClockStats, CallStat, SubStat } from "./client/WasmClient";
 // Panel layout defaults are a pure client concern (DOM panel geometry) — NOT
 // gate-served content, so they live in the view, not the repo-root `content/`
 // tree. This is the single source of truth the panel-settings "Copy All JSON"
@@ -153,6 +153,7 @@ async function main(): Promise<void> {
   // values and ticks `sampleSyncHistory()` for the sparklines.
   const syncHistory = new SyncHistory();
   const debugPanel = new DebugPanel(topTaskbar, uiEditMode, syncHistory);
+  ctx.debugPanel = debugPanel; // expose for the world scene's cursor coord readout
   // Map the wasm core's diagnostics into the panel's `SyncStats`, adding the
   // `Date.now()`-relative fields the core can't know (it only tracks its server
   // estimate). Pre-sync (`server_now` not yet meaningful) we park at `null` so
@@ -160,6 +161,12 @@ async function main(): Promise<void> {
   client.onClockStats((s: ClockStats) => {
     syncHistory.update(s.synced ? toSyncStats(s) : null);
   });
+  // Per-reducer gateway-call tally → the debug panel's "calls" tab. The worker
+  // drains it from the wasm bridge each pump; the panel rebuilds its table (and
+  // skips the DOM work when closed).
+  client.onCallStats((stats: CallStat[]) => debugPanel.setCallStats(stats));
+  // Per-table subscription tally → the debug panel's "subs" tab.
+  client.onSubStats((stats: SubStat[]) => debugPanel.setSubStats(stats));
 
   // Couple UI edit mode with the per-panel settings popup: entering edit mode
   // closes the Settings dropdown and opens the popup (bound to the last-focused
