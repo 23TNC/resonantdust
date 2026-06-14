@@ -234,11 +234,26 @@ impl Catalog {
 }
 
 /// A resolved path step.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Seg {
   Lit(String),  // literal name (Arr index if numeric, else Map key)
   Idx(usize),   // interpolation that read an Int — index / positional
   Key(String),  // interpolation that read a Sym — map key (e.g. faction)
+}
+
+/// Re-serialize parsed segments back into a dotted path string (the inverse of
+/// `Store::parse` for the cases `resolve_addr` produces — all literals). Joins
+/// on `.`; the consumer re-parses on both `.`/`:`, so this round-trips.
+fn seg_path(segs: &[Seg]) -> String {
+  segs
+    .iter()
+    .map(|s| match s {
+      Seg::Lit(s) => s.clone(),
+      Seg::Idx(i) => i.to_string(),
+      Seg::Key(k) => k.clone(),
+    })
+    .collect::<Vec<_>>()
+    .join(".")
 }
 
 fn step<'a>(cur: &'a Cell, seg: &Seg) -> Option<&'a Cell> {
@@ -414,6 +429,27 @@ impl Store {
   pub fn write(&mut self, path: &str, val: Cell) {
     let segs = self.follow_refs(self.parse(path));
     walk_write(&mut self.root, &segs, val);
+  }
+
+  /// Resolve an effect-TARGET address, expanding `Cell::Ref` handles into the
+  /// concrete path they name. Unlike `follow_refs` (which leaves a *terminal*
+  /// handle alone so `&h set` overwrites the handle), this also derefs a
+  /// terminal handle — an effect target wants the thing a handle points AT. So
+  /// for a card created and bound with `&log as`: `&log` → `created.0`,
+  /// `&log.inventory` → `created.0.inventory`. A non-handle path (the common
+  /// case, e.g. `slot.2.0.owner.inventory`) returns unchanged, byte-for-byte.
+  pub fn resolve_addr(&self, path: &str) -> String {
+    let orig = self.parse(path);
+    let mut segs = self.follow_refs(orig.clone());
+    // Deref a terminal handle, repeatedly in case it chains.
+    while let Some(Cell::Ref(p)) = walk_read(&self.root, &segs) {
+      segs = self.parse(p);
+    }
+    if segs == orig {
+      path.to_string()
+    } else {
+      seg_path(&segs)
+    }
   }
 
   /// Expand `Cell::Ref` symlinks in a parsed path: if a proper PREFIX resolves
@@ -690,6 +726,10 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
   let mut call: Vec<usize> = Vec::new();
   let mut ip = 0usize;
   let mut steps = 0u32;
+  // Handle to the card the most recent `create` made (`created.N`), so a
+  // following `as` can name it without `create` having to leave a value on the
+  // operand stack (keeps every `create` line stack-neutral; see `validate`).
+  let mut last_created: Option<String> = None;
 
   while ip < body.len() {
     steps += 1;
@@ -741,19 +781,22 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             // progress style, `sys.duration` is the action window, `.aspect.`
             // is a tile-stock op, `.blueprint` is a (flagged) unlock.
             if mode == Mode::Output {
-              if addr == "sys.duration" {
+              // Expand any `as`-handle root in the target so the emitted effect
+              // names the created card (`created.N`), not the alias.
+              let taddr = store.resolve_addr(&addr);
+              if taddr == "sys.duration" {
                 plan.duration = val.int();
-              } else if let Some(slot) = addr.strip_suffix(".style") {
+              } else if let Some(slot) = taddr.strip_suffix(".style") {
                 let style = match &val { Item::Sym(s) => s.clone(), _ => String::new() };
                 plan.styles.push((slot.to_string(), style));
-              } else if let Some(i) = addr.find(".aspect.") {
+              } else if let Some(i) = taddr.find(".aspect.") {
                 plan.effects.push(Effect::Stock {
-                  slot: addr[..i].to_string(),
-                  aspect: addr[i + ".aspect.".len()..].to_string(),
+                  slot: taddr[..i].to_string(),
+                  aspect: taddr[i + ".aspect.".len()..].to_string(),
                   delta: val.int(),
                   abs: true,
                 });
-              } else if let Some(slot) = addr.strip_suffix(".blueprint") {
+              } else if let Some(slot) = taddr.strip_suffix(".blueprint") {
                 let def = match &val { Item::Sym(s) => s.clone(), _ => String::new() };
                 plan.effects.push(Effect::Blueprint { def, target: slot.to_string() });
               }
@@ -939,10 +982,11 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             // `&slot.aspect.x dec` in `@output` is a per-row tile-stock change,
             // not just a scratch counter (`&var.0 inc`) — emit a stock effect.
             if mode == Mode::Output {
-              if let Some(i) = addr.find(".aspect.") {
+              let taddr = store.resolve_addr(&addr);
+              if let Some(i) = taddr.find(".aspect.") {
                 plan.effects.push(Effect::Stock {
-                  slot: addr[..i].to_string(),
-                  aspect: addr[i + ".aspect.".len()..].to_string(),
+                  slot: taddr[..i].to_string(),
+                  aspect: taddr[i + ".aspect.".len()..].to_string(),
                   delta,
                   abs: false,
                 });
@@ -1067,10 +1111,11 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
           // --- recipe @output: server mutations ---
           "destroy" if mode == Mode::Output => {
             let a = st.pop().unwrap();
-            plan.effects.push(Effect::Destroy { slot: a.addr().to_string() });
+            plan.effects.push(Effect::Destroy { slot: store.resolve_addr(a.addr()) });
           }
           "create" if mode == Mode::Output => {
-            let target = st.pop().unwrap().addr().to_string();
+            let a = st.pop().unwrap();
+            let target = store.resolve_addr(a.addr());
             let def = match st.pop().unwrap() {
               Item::Sym(s) => s,
               _ => String::new(),
@@ -1080,8 +1125,32 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             if let Some(slot) = target.strip_suffix(".blueprint") {
               plan.effects.push(Effect::Blueprint { def, target: slot.to_string() });
             } else {
+              // Remember this card as `created.N` (Nth `Create` in the plan) so a
+              // following `as` can name it. `create` stays stack-neutral — the
+              // handle lives in `last_created`, not on the operand stack — so
+              // existing bare-`create` lines still validate.
+              let idx = plan.effects.iter().filter(|e| matches!(e, Effect::Create { .. })).count();
               plan.effects.push(Effect::Create { def, target });
+              last_created = Some(format!("created.{idx}"));
             }
+          }
+          // `create … &name as` — bind a name to the card the preceding `create`
+          // made, so later lines address it as a path root (`&name…`/`*name…`).
+          // Reserved roots can't be shadowed.
+          "as" if mode == Mode::Output => {
+            let name = st.pop().unwrap();
+            let addr = name.addr().to_string();
+            let root = addr.split(['.', ':']).find(|s| !s.is_empty()).unwrap_or("");
+            if matches!(
+              root,
+              "slot" | "var" | "owner" | "aspect" | "objects" | "prims" | "sys" | "created"
+            ) {
+              return Err(format!("`as` cannot bind reserved root {root:?} (in {addr:?})"));
+            }
+            let handle = last_created
+              .clone()
+              .ok_or_else(|| format!("`as` ({addr:?}) with no preceding create"))?;
+            store.write(&addr, Cell::Ref(handle));
           }
           "rtl" | "ltr" => st.push(Item::Sym(w.clone())),
           other => st.push(Item::Sym(other.to_string())),
@@ -1624,5 +1693,48 @@ mod tests {
       Effect::Create { def: "card::corpus_dim".into(), target: "slot.1.0.owner.inventory".into() },
       Effect::Blueprint { def: "card::blueprint_nd_furnace".into(), target: "slot.1.0.owner".into() },
     ]);
+  }
+
+  // `as` binds the handle a `create` pushes; later `&log…` targets resolve
+  // through the alias to `created.N` (the Nth create in the plan).
+  const AS_HANDLE: &str = "\
+<recipe>
+  ::handle_test>
+    @output>
+      $card::log &slot.1.0.owner.inventory create &log as
+      4 &log.aspect.progress set
+      $card::pip &log.inventory create
+      &log destroy
+";
+
+  #[test]
+  fn recipe_as_binds_created_handle() {
+    let root = parse(AS_HANDLE).unwrap();
+    let (c, f) = cat_funcs();
+    let pp = plan_recipe(recipe_hook(&root, "handle_test", "output"), &mut Store::default(), &c, &f).unwrap();
+    assert_eq!(pp.effects, vec![
+      // first create → created.0
+      Effect::Create { def: "card::log".into(), target: "slot.1.0.owner.inventory".into() },
+      // stock/aspect set resolves &log → created.0
+      Effect::Stock { slot: "created.0".into(), aspect: "progress".into(), delta: 4, abs: true },
+      // nested create into the handle → target carries created.0
+      Effect::Create { def: "card::pip".into(), target: "created.0.inventory".into() },
+      // destroy targets the handle
+      Effect::Destroy { slot: "created.0".into() },
+    ]);
+  }
+
+  #[test]
+  fn recipe_as_rejects_reserved_root() {
+    let src = "\
+<recipe>
+  ::bad>
+    @output>
+      $card::log &slot.1.0.owner.inventory create &slot as
+";
+    let root = parse(src).unwrap();
+    let (c, f) = cat_funcs();
+    let err = plan_recipe(recipe_hook(&root, "bad", "output"), &mut Store::default(), &c, &f);
+    assert!(err.is_err(), "binding a reserved root must error, got {err:?}");
   }
 }

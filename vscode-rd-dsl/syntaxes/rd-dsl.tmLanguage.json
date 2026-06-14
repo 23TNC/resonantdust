@@ -97,7 +97,7 @@
         },
         {
           "comment": "actions — verbs that read/mutate state or generate values (normalize/scatter/random write a slot; count/key/recall push lookups)",
-          "match": "\\b(?:set|array|stock|range|count|key|recall|destroy|create|borrow|use|claim|share|normalize|scatter|random|vec[0-9]+)\\b",
+          "match": "\\b(?:set|array|stock|range|count|key|recall|destroy|create|as|borrow|use|claim|share|normalize|scatter|random|vec[0-9]+)\\b",
           "name": "keyword.other.action.rd-dsl"
         }
       ]

@@ -11,6 +11,7 @@ import { PaintHistory } from "./paintHistory";
 import { type Light, composite, Bloom } from "./lighting";
 import { type DslLight, syncLightRegion, buildCardSource, unflattenLocale } from "./dslEdit";
 import { GenericCardFace, buildCardPrimList } from "../game/cards/generic/GenericCardFace";
+import { tilePrims } from "../game/cards/generic/drawVisuals";
 import type { PrimList, VisualNode } from "../game/cards/generic/visualSpec";
 import { global } from "../game/definitions/globals";
 import { sharedContent, contentSources } from "../game/definitions/contentBoot";
@@ -408,11 +409,29 @@ export class CardEditorPanel extends PixiPanel {
   /** (Re)open the editor for a card. `packed` is the card's packed definition,
    *  `seed` its id (variant picker), `fallbackFaction` the viewer faction. */
   show(packed: number, seed: number, fallbackFaction?: string | null): void {
-    this.seed = seed;
     const built = buildCardPrimList(this.ctx, packed, fallbackFaction);
+    this.present(packed, seed, built.list, built.faction);
+  }
+
+  /** (Re)open the editor against a world TILE. A tile has no card row — its
+   *  appearance is SYNTHESISED from its stored stock (the ring-scattered objects
+   *  + any `:visuals` the def authors), so the working list comes from the tile
+   *  render path ({@link tilePrims}) rather than the plain-card `:visuals @init`.
+   *  Everything downstream (the def's DSL/locale tabs, save-by-key) is identical:
+   *  a tile's `packed` IS a card definition, so the editor still edits that def.
+   *  `seed` is the tile's `(q, r)` hash (matching the on-screen scatter). */
+  showTile(packed: number, stock0: number, stock1: number, seed: number, fallbackFaction?: string | null): void {
+    this.present(packed, seed, tilePrims(packed, stock0, stock1, seed), fallbackFaction ?? undefined);
+  }
+
+  /** Shared open/reset for {@link show} + {@link showTile}: adopt a freshly-built
+   *  working {@link PrimList}, reset the paint/preview sandbox, and populate the
+   *  def tabs from `packed`. */
+  private present(packed: number, seed: number, list: PrimList, faction: string | undefined): void {
+    this.seed = seed;
     // Deep copy so edits stay sandboxed from the VM-produced list.
-    this.workingList = structuredClone(built.list);
-    this.faction = built.faction;
+    this.workingList = structuredClone(list);
+    this.faction = faction;
     // Fresh card → drop the previous card's editable channel copies + history,
     // and reset the preview viewport.
     this.paint.clear();

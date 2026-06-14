@@ -183,6 +183,38 @@ pub fn pack_card_id(db: u8, shard: u16, local: u32) -> u32 {
         | (local & CARD_LOCAL_MASK)
 }
 
+// ---- reserved card_id band ---------------------------------------------
+//
+// The low `local` ids (db=0, shard=0, `local < FIRST_CARD_ID = 1024`) are a
+// reserved island below every real card. `next_card_id` only ever hands out
+// `local >= 1024`, and any card on a non-zero shard/db has high bits set, so a
+// raw `u32` in `0..1024` can never collide with a real `card_id`. We carve part
+// of that band for transient PLAN TAGS — wire-only handles the gate uses to name
+// a not-yet-created card so a sibling create can reference it (owner/root); the
+// shard maps `tag -> minted card_id` while it writes, and the tag is never
+// persisted as a card's id.
+//
+//   card_id reservations (low 20-bit local space, per shard):
+//     0          WORLD / sentinel (also `macro_zone` owner-band WORLD)
+//     1..=63     transient plan tags ([`TAG_ID_MIN`]..=[`TAG_ID_MAX`])
+//     64..1023   reserved / future
+//     1024+      real cards (`cards::FIRST_CARD_ID`)
+//
+// NB: player ids (`players::FIRST_PLAYER_ID = 512`) are a SEPARATE id space —
+// not card ids — and do not interact with this band.
+
+/// Lowest transient plan-tag value (see the reserved-band note above).
+pub const TAG_ID_MIN: u32 = 1;
+/// Highest transient plan-tag value — at most this many tagged creates per plan.
+pub const TAG_ID_MAX: u32 = 63;
+
+/// Whether `id` is a transient plan tag rather than a real `card_id`. Sound on
+/// the full `u32`: real ids are always `>= FIRST_CARD_ID` on shard 0 / db 0, or
+/// have shard/db bits set, so they never fall in `TAG_ID_MIN..=TAG_ID_MAX`.
+pub fn is_tag(id: u32) -> bool {
+    (TAG_ID_MIN..=TAG_ID_MAX).contains(&id)
+}
+
 // ---- macro_zone --------------------------------------------------------
 //
 // `macro_zone` is the complete, uniform location key:
@@ -962,6 +994,28 @@ mod tests {
         assert_eq!(card_db_of(0), CARD_DB_CARDS);
         assert_eq!(card_shard_of(0), 0);
         assert_eq!(card_local_of(0), 0);
+    }
+
+    #[test]
+    fn tags_disjoint_from_real_card_ids() {
+        // The sentinel is not a tag; the band edges are.
+        assert!(!is_tag(0));
+        assert!(is_tag(TAG_ID_MIN));
+        assert!(is_tag(TAG_ID_MAX));
+        assert!(!is_tag(TAG_ID_MAX + 1));
+
+        // No real id is ever a tag: the smallest real id (cards db, shard 0,
+        // FIRST_CARD_ID local) and anything above it, on any shard/db, sits far
+        // above the band.
+        for &(db, shard, local) in &[
+            (CARD_DB_CARDS, 0u16, 1024u32),
+            (CARD_DB_CARDS, 0, 1_048_575),
+            (CARD_DB_CARDS, 1, 1024),
+            (CARD_DB_REGIONS, 0, 1024),
+            (CARD_DB_REGIONS, CARD_SHARD_MAX, CARD_LOCAL_MASK),
+        ] {
+            assert!(!is_tag(pack_card_id(db, shard, local)));
+        }
     }
 
     #[test]

@@ -6,6 +6,7 @@ import { PanelManager } from "../../ui/panels/PanelManager";
 import { LayoutManager } from "../../game/layout/LayoutManager";
 import { InputManager } from "../../game/input/InputManager";
 import { ViewportPanel } from "../../game/viewport/ViewportPanel";
+import { cellHash } from "../../game/viewport/WorldRenderer";
 import { ZONE_SIZE, TILE_CENTER, REGION_SIZE, REGION_CENTER } from "../../server/data/packing";
 import { CardDragController } from "../../game/viewport/CardDragController";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
@@ -228,7 +229,7 @@ export class WorldScene extends Scene {
     const vp = this.viewports().find((v) => v.ownsHit(hit));
     // Clicking a non-world surface (chrome / empty) clears selection + details.
     if (!vp) {
-      for (const v of this.viewports()) v.selectCard(null);
+      for (const v of this.viewports()) { v.selectCard(null); v.selectTile(null); }
       this.details.hide();
       return;
     }
@@ -239,9 +240,12 @@ export class WorldScene extends Scene {
     const id = vp.cardAt(x, y);
     for (const v of this.viewports()) v.selectCard(v === vp ? id : null);
     if (id === null) {
-      // No card under the click — fall through to the underlying TILE and show
-      // its details (the tile is a packed def + per-slot stock, like a card).
+      // No card under the click — fall through to the underlying TILE: select it
+      // (so `/edit` can target it) and show its details. The tile is a packed def
+      // + per-slot stock, like a card. Selection is single across all viewports,
+      // so clear tiles on the others (cards already cleared by the loop above).
       const tile = vp.tileAt(x, y);
+      for (const v of this.viewports()) v.selectTile(v === vp && tile ? { q: tile.q, r: tile.r } : null);
       if (tile) {
         const tileLoc = { surface: vp.surfaceBand, q: tile.q, r: tile.r };
         this.details.showByPackedDefinition(tile.packed, this.ctx, [tile.stock0, tile.stock1], tileLoc);
@@ -250,6 +254,8 @@ export class WorldScene extends Scene {
       }
       return;
     }
+    // A card was selected — clear any tile selection (card OR tile, not both).
+    for (const v of this.viewports()) v.selectTile(null);
 
     const info = vp.cardInfo(id);
     if (info === null) { this.details.hide(); return; }
@@ -320,16 +326,34 @@ export class WorldScene extends Scene {
     return null;
   }
 
-  /** `/edit` chat command — open the card editor against the selected card.
-   *  Returns a feedback line for the chat feed. The editor is Developer-only and
-   *  lazily imported, so this handles "not a dev" and "still loading" cleanly. */
+  /** The world tile currently selected in any viewport (at most one across all,
+   *  mutually exclusive with a card selection). Null when none is selected. */
+  private selectedTileInfo(): { packed: number; q: number; r: number; stock0: number; stock1: number } | null {
+    for (const vp of this.viewports()) {
+      const t = vp.selectedTileInfo();
+      if (t) return t;
+    }
+    return null;
+  }
+
+  /** `/edit` chat command — open the card editor against the selected card OR
+   *  the selected world tile. A tile has no card row, so it's edited by
+   *  synthesising its appearance from its stock (the editor still edits the
+   *  tile's packed DEFINITION). Returns a feedback line for the chat feed. The
+   *  editor is Developer-only and lazily imported, so this handles "not a dev"
+   *  and "still loading" cleanly. */
   private editSelectedCard(): string {
     if (!this.ctx.client.isDeveloper) return "The card editor is developer-only.";
-    const sel = this.selectedCardInfo();
-    if (!sel) return "No card selected — click a card first, then /edit.";
+    const card = this.selectedCardInfo();
+    const tile = card ? null : this.selectedTileInfo();
+    if (!card && !tile) return "Nothing selected — click a card or tile first, then /edit.";
     if (!this.cardEditor) return "Card editor still loading — try /edit again in a moment.";
-    this.cardEditor.editCard(sel.id, sel.packed);
-    return `Editing card #${sel.id.toString(16)}.`;
+    if (card) {
+      this.cardEditor.editCard(card.id, card.packed);
+      return `Editing card #${card.id.toString(16)}.`;
+    }
+    this.cardEditor.editTile(tile!.packed, tile!.stock0, tile!.stock1, cellHash(tile!.q, tile!.r));
+    return `Editing tile (${tile!.q}, ${tile!.r}).`;
   }
 
   /** `/give <ownerId> <def> [zoneId] [surface] [q] [r]` — create a card via the

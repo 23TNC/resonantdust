@@ -66,11 +66,25 @@ export class CardEditor {
     this.openEditor(cardId, packed);
   }
 
+  /** Open the appearance editor against a world TILE — the `/edit` path when a
+   *  tile (not a card) is selected. A tile has no card row, so the editor builds
+   *  its working prims by synthesising the tile from its stored stock (see
+   *  {@link CardEditorPanel.showTile}); it still edits the tile's `packed`
+   *  definition (DSL / locale / master art). */
+  editTile(packed: number, stock0: number, stock1: number, seed: number): void {
+    this.ensurePanel().showTile(packed, stock0, stock1, seed);
+  }
+
   /** Open the Card Editor on a deep copy of the card's `:visuals` (a sandbox —
    *  edits never touch the live card). `cardId` seeds variant picking so art
    *  matches the on-screen card. */
   private openEditor(cardId: number, packed: number | null): void {
     if (packed === null) return;
+    this.ensurePanel().show(packed, cardId);
+  }
+
+  /** Lazily construct the (single) editor panel + register it, returning it. */
+  private ensurePanel(): CardEditorPanel {
     if (!this.panel) {
       this.panel = new CardEditorPanel({
         parent: this.deps.parent,
@@ -80,7 +94,7 @@ export class CardEditor {
       });
       this.deps.ctx.panels?.registerNode(this.panel.content, this.panel);
     }
-    this.panel.show(packed, cardId);
+    return this.panel;
   }
 
   dispose(): void {

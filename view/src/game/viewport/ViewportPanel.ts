@@ -119,6 +119,16 @@ export class ViewportPanel extends PixiPanel {
     return this.world.selectedCard();
   }
 
+  /** Highlight a world tile cell (or clear with null). */
+  selectTile(cell: { q: number; r: number } | null): void {
+    this.world.selectTile(cell);
+  }
+
+  /** The selected tile's display info — packed def + cell + raw stock — or null. */
+  selectedTileInfo(): { packed: number; q: number; r: number; stock0: number; stock1: number } | null {
+    return this.world.selectedTileInfo();
+  }
+
   /** The packed definition of a known card (for an aspect lookup), or null. */
   cardPacked(id: number): number | null {
     return this.world.cardPacked(id);

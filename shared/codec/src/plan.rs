@@ -27,7 +27,15 @@ pub enum Effect {
   /// Mark a card dead (`destroy_card`).
   Destroy { card_id: u32 },
   /// Spawn a card into an owner's inventory bucket (`create_card`).
-  Create { def_key: String, surface: u8, macro_zone: u64, owner_id: u32 },
+  ///
+  /// `stock` is the new card's full per-card `stock` u32 — the def default with
+  /// any same-plan `&handle.aspect.x set` folded in, so a created card needs no
+  /// separate `SetCardStock`. `owner_id` is either a real `card_id` or a
+  /// transient plan TAG (`codec::packed::is_tag`) naming a sibling `Create` in
+  /// this plan whose card this one nests in; the shard resolves the tag to the
+  /// minted id while applying. `tag` (0 = none) is THIS card's own tag, set when
+  /// a sibling references it, so the shard can register `tag -> minted_id`.
+  Create { def_key: String, surface: u8, macro_zone: u64, owner_id: u32, stock: u32, tag: u32 },
   /// Spawn a deferred stack member anchored to `host_card_id`.
   CreateDeferred { def_key: String, host_card_id: u32 },
   /// Mutate the synthetic tile's per-cell stock `slot` (`set_tile_stock`) — the

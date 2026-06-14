@@ -54,6 +54,10 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
     "array" => (2, 0),
     "destroy" => (1, 0),
     "create" => (2, 0),
+    // `as` names the card the preceding `create` made (tracked in a register, so
+    // `create` stays stack-neutral and bare creates still validate): pops the
+    // name address, pushes nothing.
+    "as" => (1, 0),
     "borrow" | "use" | "claim" | "share" => (1, 0),
     "if" | "!if" => (1, 0),
     "goto" => (1, 0),

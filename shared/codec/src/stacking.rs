@@ -1,8 +1,8 @@
 //! Canonical stacking eligibility — the bundle-free core, shared by the client
 //! (drag/feasibility), the gate, and the placement model (`state::stack`). The
 //! `bundle → StackBits` lookup lives in the bundle-aware layer
-//! (`rules::stacking::stack_bits`); everything here is pure bit math over
-//! `StackBits`, so the lowest crate can host it (no circular `state → rules`).
+//! (`dsl::defs::stack_bits`); everything here is pure bit math over `StackBits`,
+//! so the lowest crate can host it (no circular `state → dsl`).
 //!
 //! **Bit-fields are indexed by `stack_id`** (the value stored in a card's
 //! `stack_state` nibble): bit `i` = stack `i`, where
@@ -13,10 +13,12 @@
 //!   - `hosts` — stacks this card SOURCES as a root (slots others attach to)
 //!   - `joins` — stacks this card can OCCUPY as a member
 //!
-//! Drop `a` onto `b`: try `a` joins `b` (`b.hosts & a.joins`), else `b` joins
-//! `a` (`a.hosts & b.joins`). Lowest stack wins (hex 1 preferred); the drop
-//! direction breaks a top/bottom tie. The root is always the host side — which
-//! is what makes a card-onto-tile drop push the *tile* into the card's stack 1.
+//! [`match_stack`] is the single primitive here: the `stack_id` a joiner takes on
+//! a host (`host.hosts & joiner.joins`, lowest stack wins, hex 1 preferred, drop
+//! direction breaks a top/bottom tie). The *leaf-aware, bidirectional* drop
+//! resolution (forward + invert re-root, capping on non-hosting leaves) is built
+//! on top of this in `state::stack::resolve_stack`, which needs the store and so
+//! can't live in this bundle-free layer.
 
 use crate::packed::STACK_DIR_DOWN;
 
@@ -69,34 +71,6 @@ pub fn match_stack(host: StackBits, joiner: StackBits, drop_dir: u8) -> Option<u
     None
 }
 
-/// The outcome of a drop resolution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StackResolution {
-    /// `true` → the dragged card joins the target (target is root): the normal
-    /// card-onto-card stack. `false` → the target joins the dragged card (dragged
-    /// is root, target absorbed into its stack 1): the card-onto-tile case.
-    pub dragged_is_member: bool,
-    /// `stack_id` the member occupies on the root.
-    pub stack: u8,
-}
-
-/// Bidirectional resolve for dropping `dragged` onto `target`. Forward first
-/// (dragged joins target), then reverse (target joins dragged). `None` = the two
-/// can't stack either way → caller rejects / falls back.
-pub fn resolve_stack_drop(
-    dragged: StackBits,
-    target: StackBits,
-    drop_dir: u8,
-) -> Option<StackResolution> {
-    if let Some(stack) = match_stack(target, dragged, drop_dir) {
-        return Some(StackResolution { dragged_is_member: true, stack });
-    }
-    if let Some(stack) = match_stack(dragged, target, drop_dir) {
-        return Some(StackResolution { dragged_is_member: false, stack });
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,28 +78,20 @@ mod tests {
 
     #[test]
     fn regular_onto_regular_uses_drop_dir_for_top_bottom() {
-        let up = resolve_stack_drop(DEFAULT_BITS, DEFAULT_BITS, STACK_DIR_UP).unwrap();
-        assert_eq!(up, StackResolution { dragged_is_member: true, stack: STACK_TOP });
-        let down = resolve_stack_drop(DEFAULT_BITS, DEFAULT_BITS, STACK_DIR_DOWN).unwrap();
-        assert_eq!(down, StackResolution { dragged_is_member: true, stack: STACK_BOTTOM });
+        assert_eq!(match_stack(DEFAULT_BITS, DEFAULT_BITS, STACK_DIR_UP), Some(STACK_TOP));
+        assert_eq!(match_stack(DEFAULT_BITS, DEFAULT_BITS, STACK_DIR_DOWN), Some(STACK_BOTTOM));
     }
 
     #[test]
-    fn card_onto_tile_pushes_tile_into_card_hex() {
-        // Forward fails (tile hosts nothing); reverse makes the card the root and
-        // the tile joins its hex stack (1).
-        let r = resolve_stack_drop(DEFAULT_BITS, TILE_BITS, STACK_DIR_UP).unwrap();
-        assert_eq!(r, StackResolution { dragged_is_member: false, stack: STACK_HEX });
-    }
-
-    #[test]
-    fn dragging_tile_onto_card_joins_hex_forward() {
-        let r = resolve_stack_drop(TILE_BITS, DEFAULT_BITS, STACK_DIR_UP).unwrap();
-        assert_eq!(r, StackResolution { dragged_is_member: true, stack: STACK_HEX });
+    fn tile_hosts_nothing_but_joins_a_card_hex() {
+        // A tile hosts nothing, so a card never joins it...
+        assert_eq!(match_stack(TILE_BITS, DEFAULT_BITS, STACK_DIR_UP), None);
+        // ...but a tile joins a card's hex stack (the card is the host/root).
+        assert_eq!(match_stack(DEFAULT_BITS, TILE_BITS, STACK_DIR_UP), Some(STACK_HEX));
     }
 
     #[test]
     fn two_tiles_cannot_stack() {
-        assert_eq!(resolve_stack_drop(TILE_BITS, TILE_BITS, STACK_DIR_UP), None);
+        assert_eq!(match_stack(TILE_BITS, TILE_BITS, STACK_DIR_UP), None);
     }
 }

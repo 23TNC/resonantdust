@@ -139,3 +139,19 @@
 
     @output>
       &slot.0.0.aspect.progress inc
+
+  ; `as` handle-binding validation: a ROOT-ONLY recipe firing once on an `anvil`
+  ; (gated `forged < 1`, set to 1 to self-terminate). Creates a `widget` into the
+  ; owner's inventory, binds it `&h as`, folds its progress stock 1→4 (same-card
+  ; set, folds into the Create — no SetCardStock), then nests a `pip` into the
+  ; widget's own inventory (owner carried as a tag the shard resolves to the
+  ; minted widget id).
+  ::forge>
+    @input>
+      $card::anvil *slot.0.0.def_id eq *slot.0.0.aspect.forged 1 lt and if &slot.0.0 use
+
+    @output>
+      $card::widget &slot.0.0.owner.inventory create &h as
+      4 &h.aspect.progress set
+      $card::pip &h.inventory create
+      1 &slot.0.0.aspect.forged set

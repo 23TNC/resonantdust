@@ -211,6 +211,11 @@
   ::progress>
     @define>
       0 &visibility set
+  ; `forged` is a 1-bit per-card flag (stock) marking a `forge` test-marker card as
+  ; already fired, so its root-only recipe runs exactly once. Sim-only.
+  ::forged>
+    @define>
+      0 &visibility set
   ; Stacking bit-fields (bit i = stack i: 0 loose, 1 hex/under, 2 top, 3 bottom).
   ; stack_hosts = stacks this card sources as root; stack_joins = stacks it can
   ; occupy. Absent => client default (regular card: hosts 0b1110, joins 0b1100).

@@ -7,15 +7,24 @@ import { currentEnvironment, httpBaseFor } from "../../../client/environments";
 import { getContentVersion } from "../../definitions/contentBoot";
 import type { CallStat, SubStat } from "../../../client/WasmClient";
 
-/** The gate's `/versions` payload: baked source-closure hashes per component
- *  (`server`) plus the gate's live content fingerprint (`content_live`). */
+/** A `versions.json` snapshot: a build number + per-component source-closure
+ *  hashes. Both the gate's baked copy (`server`) and the freshest pushed copy
+ *  (`latest`) share this shape. */
+interface VersionsSnapshot {
+  build: number;
+  generated: string;
+  components: Record<string, { hash: string; seq: number; ts: string }>;
+}
+
+/** The gate's `/versions` payload: the gate's baked snapshot (`server`), its live
+ *  content fingerprint (`content_live`), and the freshest snapshot the build host
+ *  pushed (`latest`, `null` until one is pushed/seeded). `latest` is the
+ *  out-of-band "newest deployed build" — it can flag a stale gate too, not just a
+ *  stale client. */
 interface VersionsResponse {
-  server: {
-    build: number;
-    generated: string;
-    components: Record<string, { hash: string; seq: number; ts: string }>;
-  };
+  server: VersionsSnapshot;
   content_live: string;
+  latest: VersionsSnapshot | null;
 }
 
 /** Frames between history samples. At ~60fps that's roughly 2Hz —
@@ -665,6 +674,8 @@ export class DebugPanel {
       return;
     }
 
+    const latest = server?.latest ?? null;
+
     // Build number (the running ledger version), stamped with when the snapshot
     // was generated.
     body.appendChild(this.versionRow(
@@ -672,13 +683,15 @@ export class DebugPanel {
       String(client.build),
       server ? String(server.server.build) : undefined,
       client.generated,
+      latest ? String(latest.build) : undefined,
     ));
 
     // Per-component source-closure hashes + the timestamp each last changed.
-    // Union both key sets so a component on only one side still shows.
+    // Union all key sets so a component on only one side still shows.
     const names = new Set<string>([
       ...Object.keys(client.components),
       ...Object.keys(server?.server.components ?? {}),
+      ...Object.keys(latest?.components ?? {}),
     ]);
     for (const name of names) {
       if (name === "content") continue; // shown live below, not by source hash
@@ -687,6 +700,7 @@ export class DebugPanel {
         client.components[name]?.hash,
         server?.server.components[name]?.hash,
         client.components[name]?.ts,
+        latest?.components[name]?.hash,
       ));
     }
 
@@ -699,10 +713,21 @@ export class DebugPanel {
     ));
   }
 
-  /** One row: label on the left; on the right the hash (or client ⇄ gate
-   *  comparison) above a dim timestamp of when that component last changed.
-   *  No gate value → plain client hash; otherwise green ✓ / red drift. */
-  private versionRow(label: string, clientH?: string, serverH?: string, ts?: string): HTMLDivElement {
+  /** One row: label on the left; on the right the hash comparison above a dim
+   *  timestamp of when that component last changed.
+   *
+   *  Three display modes by what's available:
+   *   - no gate value         → plain client hash (gate unreachable).
+   *   - gate, no `latest`      → client ⇄ gate (✓ / drift) — the legacy two-way.
+   *   - `latest` present       → `latest` is the authority: ✓ when client AND gate
+   *     both match it, else red with `c`/`s` tags showing which side drifted. */
+  private versionRow(
+    label: string,
+    clientH?: string,
+    serverH?: string,
+    ts?: string,
+    latestH?: string,
+  ): HTMLDivElement {
     const row = document.createElement("div");
     Object.assign(row.style, ROW_CSS);
     const labelEl = document.createElement("span");
@@ -715,10 +740,26 @@ export class DebugPanel {
     if (serverH === undefined) {
       hashEl.style.color = VALUE_CSS.color ?? "";
       hashEl.textContent = short(clientH);
-    } else {
+    } else if (latestH === undefined) {
       const match = !!clientH && clientH === serverH;
       hashEl.style.color = match ? VERSION_OK_COLOR : VERSION_DRIFT_COLOR;
       hashEl.textContent = match ? `✓ ${short(clientH)}` : `${short(clientH)} ⇄ ${short(serverH)}`;
+    } else {
+      // `latest` is the reference. Tag client (c) and gate (s) only when they
+      // drift from it; all-aligned collapses to a single ✓.
+      const cOk = clientH === latestH;
+      const sOk = serverH === latestH;
+      if (cOk && sOk) {
+        hashEl.style.color = VERSION_OK_COLOR;
+        hashEl.textContent = `✓ ${short(latestH)}`;
+      } else {
+        hashEl.style.color = VERSION_DRIFT_COLOR;
+        const tags = [
+          cOk ? "" : `c⇄${short(clientH)}`,
+          sOk ? "" : `s⇄${short(serverH)}`,
+        ].filter(Boolean).join("  ");
+        hashEl.textContent = `latest ${short(latestH)}  ·  ${tags}`;
+      }
     }
     valueEl.appendChild(hashEl);
     if (ts) {

@@ -108,3 +108,27 @@
         requisite &aspect.type set
         8 &aspect.progress stock
         1 &aspect.progress set
+
+  ; `as` handle-binding test trio (see the `forge` recipe). `anvil` is the
+  ; root-only marker: a 1-bit `forged` flag (default 0) the recipe sets to 1 so it
+  ; fires exactly once. `widget` is the card `forge` creates + binds `as h`, then
+  ; folds its progress stock (default 1) up to 4 — proving same-card stock folds
+  ; into the Create row. `pip` is the inert child nested into the widget's
+  ; inventory — its owner_id resolving to the widget's minted id proves the shard
+  ; tag → id resolution.
+  ::anvil>
+    :data>
+      @define>
+        requisite &aspect.type set
+        1 &aspect.forged stock
+        0 &aspect.forged set
+  ::widget>
+    :data>
+      @define>
+        requisite &aspect.type set
+        8 &aspect.progress stock
+        1 &aspect.progress set
+  ::pip>
+    :data>
+      @define>
+        requisite &aspect.type set

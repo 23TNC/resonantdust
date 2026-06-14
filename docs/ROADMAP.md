@@ -110,6 +110,18 @@ per-soul watermark memory) has Phase A landed. Phases B–E pending. Note the
 viewport prefetch simplification above made the tiers dormant for the world
 viewport — revisit when soul-scope / fog-of-war anchors need them.
 
+## Wire protocol (binary)
+
+JSON taxes **both** game hops, with one root cause — dynamic `serde_json::Value`
+args. **Part 1:** client↔gate wire → **postcard** (typed `ClientCall`/`RowData`
+drop field names + u64-stringify; `Row`/rx first — it's the server-upload binding
+constraint, ~450 B→~120 B/zone row). **Part 2:** the gate calls reducers via raw
+`reqwest` JSON-over-HTTP, bypassing the generated bindings — route them through
+`reducers.X_then(typed, cb)` (BSATN) instead. Version guard reuses the existing
+`shared` build-hash (handshake hard-reject); view needs zero edits (off the wire);
+no JSON escape hatch. **Scoped, not started.** Phases P0–P5. Full design +
+touchpoint inventory: [docs/protocol_binary_migration.md](protocol_binary_migration.md).
+
 ## Deploy
 
 This session's fixes (current-value regions, promise protocol, prefetch, render

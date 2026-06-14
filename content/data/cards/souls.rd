@@ -40,4 +40,5 @@
         ; subscription filters `packed_definition >= 0xFFF0`.
         4095 &aspect.def_id set
         1 &aspect.soul set
-        1 &aspect.inventory set
+        3 &aspect.inventory stock
+        2 &aspect.inventory set

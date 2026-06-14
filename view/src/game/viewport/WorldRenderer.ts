@@ -26,8 +26,10 @@ const BUILD_BUDGET = 24;
 const OVERSCAN_MARGIN = 1;
 
 /** Cheap stable per-cell hash → the tile's `^seed` (deterministic variant
- *  scatter that survives leaving + re-entering the viewport). */
-function cellHash(q: number, r: number): number {
+ *  scatter that survives leaving + re-entering the viewport). Exported so the
+ *  card editor can rebuild a tile's synthetic prims with the SAME seed the
+ *  on-screen tile drew with (otherwise the scatter re-rolls in the preview). */
+export function cellHash(q: number, r: number): number {
   let h = (q * 73856093) ^ (r * 19349663);
   h = (h ^ (h >>> 13)) >>> 0;
   return h;
@@ -162,6 +164,10 @@ export class WorldRenderer extends LayoutNode {
   /** Selection highlight, drawn over the selected card's footprint. */
   private readonly selectionGfx = new Graphics();
   private selectedCardId: number | null = null;
+  /** Selected world tile cell, or null. Mutually exclusive with a card
+   *  selection (the scene clears one when it sets the other). Stored as the cell
+   *  key — `desiredTiles` carries its live packed/stock. */
+  private selectedTile: { q: number; r: number } | null = null;
 
   private feed: ViewportFeed | null = null;
   private lastRegion: RenderRegion | null = null;
@@ -381,6 +387,22 @@ export class WorldRenderer extends LayoutNode {
     return this.selectedCardId;
   }
 
+  /** Highlight a world tile cell (or clear with `null`). Like {@link selectCard}
+   *  the outline tracks the cell each frame in `tick`. */
+  selectTile(cell: { q: number; r: number } | null): void {
+    this.selectedTile = cell;
+    if (cell === null) this.selectionGfx.clear();
+  }
+
+  /** The selected tile's display info — packed def + cell + raw stock slots — or
+   *  null. Mirrors {@link cardInfo}; feeds the `/edit` tile path. */
+  selectedTileInfo(): { packed: number; q: number; r: number; stock0: number; stock1: number } | null {
+    if (!this.selectedTile) return null;
+    const spec = this.desiredTiles.get(`${this.selectedTile.q},${this.selectedTile.r}`);
+    if (!spec) return null;
+    return { packed: spec.packed, q: spec.q, r: spec.r, stock0: spec.stock0, stock1: spec.stock1 };
+  }
+
   /** The packed definition of a known card (for an aspect lookup), or null. */
   cardPacked(id: number): number | null {
     return this.desiredCards.get(id)?.packed ?? null;
@@ -596,20 +618,31 @@ export class WorldRenderer extends LayoutNode {
    *  with `panLayer`, so this stays aligned). Cleared when nothing is selected or
    *  the selected card left the view. */
   private drawSelection(): void {
-    const id = this.selectedCardId;
-    if (id === null) return;
-    const spec = this.cards.has(id) ? this.desiredCards.get(id) : undefined;
     this.selectionGfx.clear();
-    if (!spec) return;
-    const cw = global("card_width");
-    const bh = global("body_height");
-    const c = this.grid.cellToPixel(spec.q, spec.r);
-    const x0 = c.x - cw / 2 + spec.offsetX;
-    const y0 = c.y - bh / 2 + spec.offsetY;
-    this.selectionGfx
-      .roundRect(x0 - 3, y0 - 3, cw + 6, bh + 6, 4)
-      .stroke({ color: 0xffd54f, width: 3, alpha: 0.95 });
     this.selectionGfx.zIndex = 1e9; // above cards within panLayer
+    // Card selection — a rounded rect around the (possibly fanned) card body.
+    const id = this.selectedCardId;
+    const cardSpec = id !== null && this.cards.has(id) ? this.desiredCards.get(id) : undefined;
+    if (cardSpec) {
+      const cw = global("card_width");
+      const bh = global("body_height");
+      const c = this.grid.cellToPixel(cardSpec.q, cardSpec.r);
+      const x0 = c.x - cw / 2 + cardSpec.offsetX;
+      const y0 = c.y - bh / 2 + cardSpec.offsetY;
+      this.selectionGfx
+        .roundRect(x0 - 3, y0 - 3, cw + 6, bh + 6, 4)
+        .stroke({ color: 0xffd54f, width: 3, alpha: 0.95 });
+    }
+    // Tile selection — a hex outline tracing the cell (only while it's built).
+    const t = this.selectedTile;
+    if (t && this.tiles.has(`${t.q},${t.r}`)) {
+      const c = this.grid.cellToPixel(t.q, t.r);
+      // Same radius the tile body is baked + spaced at, so the outline traces the
+      // hex edge exactly (width = √3·r, height = 2·r — see `hexSize`).
+      this.selectionGfx
+        .poly(hexPoints(c.x, c.y, worldHexRadius()))
+        .stroke({ color: 0xffd54f, width: 3, alpha: 0.95 });
+    }
   }
 
   private buildTile(key: string, spec: TileSpec): void {
