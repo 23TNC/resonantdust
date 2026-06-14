@@ -358,15 +358,22 @@ the wasm→view debug summaries. Neither game hop carries it.
   `RowData` enum + codec-based helpers) and the postcard + codec deps on protocol.
   Nothing wired yet — `GateMsg` still JSON. This is the type foundation for 2b.
 
-- **Increment 2b — flip GateMsg → postcard (NEXT, atomic).** Restructure `GateMsg`
-  (drop `#[serde(tag)]`; `Row { sid, op, row: RowData }`; native ints — `now_micros`
-  → `u64`, ContentChanged/ZoneObservers native); gate builds `RowData` from SDK
-  binding rows (replacing `row_json`/`normalize`) + serializes via postcard with a
-  `Vec<u8>` tx channel (the ~82 builder/send sites); client decodes postcard +
-  matches `RowData` (replacing the `table`-string match and the ad-hoc players/chat
-  `Value` parsing) + uses the shared row types (drop `client/core/rows.rs`'s
-  camelCase/`de_str_num`). Tricky bit: the generic `relay_table!` macro needs a
-  per-table SDK-row → `RowData` conversion. One flag-day; verify via the harness.
+- **Increment 2b — flip GateMsg → postcard (LANDED, harness-verified).** The whole
+  gate→client direction (rx — the server-upload constraint) is postcard now.
+  `GateMsg` dropped the serde tag (postcard is positional + doesn't support
+  internal tagging), `Row { sid, op, row: RowData }` carries the typed payload (no
+  `table` string / `old` before-image), and `to_bytes()`/the reply builders/the
+  gate `tx` channel are `Vec<u8>`. Gate builds `RowData` from SDK binding rows via
+  a `ToRowData` trait (one explicit field copy per table) — `row_json`/`normalize`/
+  camelCase/number-stringify deleted; the unreachable souls/soul_privates/
+  player_profiles routes dropped. Client decodes postcard + matches `RowData`
+  (replacing the table-string match + the players/chat `Value` poking);
+  `client/core/rows.rs` is now a re-export of the shared types. Verified: full
+  multi-client harness PASS against the rebuilt gate (Card/Zone/Region/Player rows
+  all decode; recipes, stacking, cross-client isolation intact).
+  **Deferred (cheap, low-value):** `server_micros`/`version`/`macro_zone` still ride
+  as `String` (kept to avoid churning the client's clock-sample/content parsing);
+  native-int cleanup can ride a later pass.
 
 ## Phased plan
 
