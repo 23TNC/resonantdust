@@ -54,8 +54,18 @@ interface PrimNodeJson {
   light?: { height: number; radius: number; intensity: number };
 }
 
+/** Parse a wasm texture reference into an `AssetRef`. The DSL emits a single
+ *  `"<category>/<object>"` string (the manifest reference); a value without a
+ *  slash is treated as `category === object` (degenerate — resolves only if such
+ *  a self-named pack exists). */
+function assetRefOf(texture: string, index?: number): { category: string; name: string; index?: number } {
+  const slash = texture.indexOf("/");
+  if (slash > 0) return { category: texture.slice(0, slash), name: texture.slice(slash + 1), index };
+  return { category: texture, name: texture, index };
+}
+
 /** Map the wasm `PrimNode` JSON onto the client `VisualNode[]` — wrap texture
- *  names as `{name}`, resolve `text` locale keys via the locales runtime. */
+ *  references as `AssetRef`, resolve `text` locale keys via the locales runtime. */
 function mapPrims(nodes: PrimNodeJson[]): PrimList {
   const loc = sharedLocales();
   return nodes.map((n) => ({
@@ -67,7 +77,7 @@ function mapPrims(nodes: PrimNodeJson[]): PrimList {
     rot: n.rot,
     alpha: n.alpha,
     tint: n.tint,
-    texture: n.texture != null ? { name: n.texture, index: n.index } : null,
+    texture: n.texture != null ? assetRefOf(n.texture, n.index) : null,
     text: n.text != null ? (loc.string(n.text) ?? n.text) : undefined,
     target: n.target,
     style: n.style,

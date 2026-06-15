@@ -29,7 +29,6 @@ import { gateUrlFor } from "./client/environments";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
-import { smallestLodUrls } from "./assets/lodUrls";
 import { DefinitionManager } from "./game/definitions/DefinitionManager";
 import { reloadContent } from "./game/definitions/contentBoot";
 import type { GameContext } from "./GameContext";
@@ -87,7 +86,7 @@ async function main(): Promise<void> {
   const textures = new TextureManager(app.renderer);
   const lodTextures = new LodTextureManager(textures, app.renderer);
   const objects = new ObjectManager(lodTextures);
-  const assetsReady = lodTextures.prewarm(smallestLodUrls());
+  const assetsReady = lodTextures.prewarm();
 
   const scenes = new SceneManager(app);
 

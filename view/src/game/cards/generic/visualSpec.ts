@@ -26,10 +26,15 @@ export interface Vec2 {
   y: number;
 }
 
-/** Reference to a LOD-pyramid asset (sprite art, or a textured fill). `name`
- *  is the aspect/object catalog key; `index` pins `<index>.png`, else the
- *  renderer picks pseudo-randomly per seed. */
+/** Reference to a LOD-pyramid asset (sprite art, or a textured fill) in the
+ *  unified `<category>/<object>/<variation>` layout. `category` + `name` (the
+ *  object) identify the art; `index` pins the variation (1-based fixed), else the
+ *  renderer picks pseudo-randomly per seed (random variation). The biome/faction
+ *  modifier axes are NOT here — they're resolved from game state at draw time. */
 export interface AssetRef {
+  /** Top-level catalog grouping (e.g. `forest`, `requisite`, `soul`). */
+  category: string;
+  /** Object within the category (e.g. `flora`, `axe`, `portrait`). */
   name: string;
   index?: number;
 }

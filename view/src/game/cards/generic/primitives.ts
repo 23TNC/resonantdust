@@ -29,7 +29,10 @@ export interface PrimDeps {
   whiteTexture: Texture;
   /** Per-card seed for variant picking (row/def id). */
   seed: number;
+  /** Object-axis art modifier — `<object.faction>` dirs resolve first. */
   faction?: string;
+  /** Category-axis art modifier — `<category.biome>` dirs resolve first. */
+  biome?: string;
   /** White hex-mask texture (atlas-packed) for `hex` fills. Until wired, `hex`
    *  falls back to the rectangular white fill with a one-time warning. */
   hexTexture?: Texture;
@@ -172,7 +175,7 @@ export class FillPrim extends BasePrim {
     // fallback and they get distance falloff + ambient only.
     if (n.texture) {
       const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
-        dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
+        dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction, biome: this.deps.biome,
       });
       this.node.setTextures(r.texture, r.normal, r.emissive);
     } else if (this.kind === "hex" && this.deps.hexTexture) {
@@ -211,7 +214,7 @@ export class SpritePrim extends BasePrim {
     }
     this.node.visible = true;
     const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
-      dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction,
+      dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction, biome: this.deps.biome,
     });
     this.node.setTextures(r.texture, r.normal, r.emissive);
     this.baseScale = r.scale;

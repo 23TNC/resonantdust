@@ -30,7 +30,10 @@ export interface AssetResolution {
 
 export interface ResolveOpts {
   dpr: number;
+  /** Object-axis modifier — `<object.faction>` dirs resolve first. */
   faction?: string;
+  /** Category-axis modifier — `<category.biome>` dirs resolve first. */
+  biome?: string;
   /** Variant picker when `ref.index` is unset (typically the card/tile id). */
   seed?: number;
   /** Per-instance scale jitter (world objects); default 1. */
@@ -44,7 +47,15 @@ export function resolveAsset(
   opts: ResolveOpts,
 ): AssetResolution {
   const desired = Math.max(1, footprintCssPx * opts.dpr);
-  const { albedo, normal, emissive } = lod.getPair(ref.name, desired, opts.seed ?? 0, ref.index, opts.faction);
+  const { albedo, normal, emissive } = lod.getPair({
+    category: ref.category,
+    object: ref.name,
+    desiredSize: desired,
+    seed: opts.seed ?? 0,
+    index: ref.index,
+    biome: opts.biome,
+    faction: opts.faction,
+  });
   const variance = opts.variance ?? 1;
   return { texture: albedo, normal, emissive, scale: (footprintCssPx / albedo.width) * variance };
 }

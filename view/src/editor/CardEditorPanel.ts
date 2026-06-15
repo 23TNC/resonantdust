@@ -1555,16 +1555,30 @@ export class CardEditorPanel extends PixiPanel {
       case "progress":
         this.addRow("Style", this.numberInput(node.style ?? 1, (v) => { node.style = v; this.onEdit(); }));
         break;
-      case "sprite":
-        this.addRow("Texture", this.textInput(node.texture?.name ?? "", (v) => {
-          node.texture = { name: v, index: node.texture?.index };
+      case "sprite": {
+        // The Texture field edits the combined `<category>/<object>` path (the
+        // unified layout); a value with no slash is treated as category===object.
+        const texPath = (t?: { category: string; name: string } | null) => (t ? `${t.category}/${t.name}` : "");
+        const parseTex = (v: string) => {
+          const slash = v.indexOf("/");
+          return slash > 0
+            ? { category: v.slice(0, slash), name: v.slice(slash + 1) }
+            : { category: v, name: v };
+        };
+        this.addRow("Texture", this.textInput(texPath(node.texture), (v) => {
+          node.texture = { ...parseTex(v), index: node.texture?.index };
           this.onEdit();
         }, false));
         // Variant index: 1-based pin; 0/empty → unset, so the card seed picks it.
         this.addRow("Index", this.numberInput(node.texture?.index ?? 0, (v) => {
-          node.texture = { name: node.texture?.name ?? "", index: v > 0 ? v : undefined };
+          node.texture = {
+            category: node.texture?.category ?? "",
+            name: node.texture?.name ?? "",
+            index: v > 0 ? v : undefined,
+          };
           this.onEdit();
         }));
+      }
         this.addRow("Pos X", this.numberInput(node.pos.x, (v) => { node.pos.x = v; this.onEdit(); }));
         this.addRow("Pos Y", this.numberInput(node.pos.y, (v) => { node.pos.y = v; this.onEdit(); }));
         this.addRow("Width", this.numberInput(node.size.x, (v) => { node.size.x = v; this.onEdit(); }));
