@@ -75,6 +75,30 @@
       &slot.0.0 destroy
       $card::dread &slot.0.0.owner.inventory create
 
+  ; `gloom` magnet recipes — the short-window twin of despair, for the harness
+  ; magnetic FAILURE test. Success mirrors despair_success; failure (fired when the
+  ; 4s window lapses with no candidate) destroys the magnet + spawns a dread in the
+  ; owner's inventory. Short action durations (2s) keep the test fast.
+  ::gloom_success>
+    @input>
+      $card::gloom *slot.0.0.def_id eq if &slot.0.0 use
+      $card::dread *slot.2.0.def_id eq if &slot.2.0 claim
+
+    @output>
+      2 &sys.duration set
+      &slot.2.0 destroy
+      &slot.0.0 destroy
+      $card::corpus &slot.2.0.owner.inventory create
+
+  ::gloom_failure>
+    @input>
+      $card::gloom *slot.0.0.def_id eq if &slot.0.0 use
+
+    @output>
+      2 &sys.duration set
+      &slot.0.0 destroy
+      $card::dread &slot.0.0.owner.inventory create
+
   ::strike_success>
     @input>
       $card::strike *slot.0.0.def_id eq if &slot.0.0 use

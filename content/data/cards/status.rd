@@ -37,3 +37,18 @@
         $recipe::strike_failure &magnetic.failure set
         3 &magnetic.radius set
         60000 &magnetic.duration set
+
+  ; `gloom` is a SHORT-window magnet (4s) for harness coverage of the magnetic
+  ; FAILURE/deadline path — placed with no candidate in range, its window lapses
+  ; fast and `gloom_failure` fires (vs `despair`'s 60s gameplay window). Same shape
+  ; as despair otherwise.
+  ::gloom>
+    :data>
+      @define>
+        event &aspect.type set
+        2 &aspect.stack_joins set
+        12 &aspect.stack_hosts set
+        $recipe::gloom_success &magnetic.recipe set
+        $recipe::gloom_failure &magnetic.failure set
+        3 &magnetic.radius set
+        4000 &magnetic.duration set

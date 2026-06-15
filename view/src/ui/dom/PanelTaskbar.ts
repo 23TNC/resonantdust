@@ -416,28 +416,21 @@ export class PanelTaskbar {
   }
 
   private handleClick(panel: DomPanel): void {
-    if (!panel.isOpen) {
-      // Closed → open (which also focuses).
-      panel.open();
-      return;
-    }
-    if (panel.isMinimized) {
-      // Minimized → restore + focus (focus brings it to the front).
-      panel.restore();
-      panel.focus();
-      return;
-    }
-    // Visible (open + not minimized). If this panel is already the
-    // frontmost / focused one, a click minimizes it (toggle away).
-    // Otherwise it's buried behind a peer — bring it to front and
-    // select it in a single click. `focus()` raises both the DOM
-    // chrome z-index and the Pixi nodes (via PixiPanel's onFocus
-    // reorder hook), so surfacing a buried panel no longer needs a
-    // click-on-body or a second taskbar click.
-    if (this.focusedPanel === panel) {
+    // Single robust rule: only a panel that is *genuinely* the
+    // frontmost, on-screen one toggles away (minimize) on click.
+    // Every other state — closed, minimized, buried behind a peer,
+    // or wedged invisible despite its flags (off-screen saved rect,
+    // a stale `display:none`, a detached node) — is force-surfaced
+    // via `ensureVisible`, which asserts the canonical visible state
+    // from scratch. This makes it impossible to get stuck: a taskbar
+    // click can never leave a panel hidden. We test the live DOM
+    // (`isEffectivelyVisible`) rather than the `isOpen`/`isMinimized`
+    // flag pair precisely because that pair is what drifts in the
+    // stuck case.
+    if (panel.isEffectivelyVisible && this.focusedPanel === panel) {
       panel.minimize();
     } else {
-      panel.focus();
+      panel.ensureVisible();
     }
   }
 

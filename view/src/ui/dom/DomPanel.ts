@@ -1268,6 +1268,76 @@ export class DomPanel {
     if (this._minimized) this.restore(); else this.minimize();
   }
 
+  /** Force the panel into a known-good *visible* state, regardless of
+   *  how its open / minimized / display state got out of sync. This is
+   *  the robust recovery path: the flag pair (`_open`, `_minimized`)
+   *  can drift from the actual CSS (a wedged `display:none`, an
+   *  off-screen saved rect, a detached node after an HMR / scene
+   *  swap), and the conditional restore in `applyMinimized` only
+   *  un-hides the cases it recorded. `ensureVisible` instead *asserts*
+   *  the canonical visible state from scratch, so a taskbar click (or
+   *  any "bring it back" caller) can never fail to surface a panel.
+   *  Idempotent: calling it on an already-visible panel only re-raises
+   *  it to the front. */
+  ensureVisible(): void {
+    // Mount if needed — covers a closed panel and the `_open`-true-
+    // but-detached desync (HMR, host element replaced).
+    if (!this.panel.isConnected) {
+      const host = document.getElementById(HOST_ID) ?? document.body;
+      host.appendChild(this.panel);
+    }
+    const wasClosed    = !this._open;
+    const wasMinimized = this._minimized;
+    this._open           = true;
+    this._minimized      = false;
+    this.hiddenForTaskbar = false;
+    this.savedHeight     = null;
+    // Hard-reset every CSS knob a minimize / wedge could have left
+    // hiding the panel back to the canonical visible layout. `flex`
+    // (not `""`) because `PANEL_CSS` only sets flex inline — see the
+    // note in `applyMinimized`.
+    this.panel.style.display = "flex";
+    this.body.style.display  = "";
+    if (this.footer) this.footer.style.display = "";
+    if (this.tabs.size > 0) this.tabsEl.style.display = "";
+    this.minimizeBtn.textContent = "−";
+    this.bringToFront();
+    // Snapped panels re-derive their corner; free panels get pulled
+    // back into the safe area in case the saved rect is now off-screen
+    // (smaller viewport, taskbar reserve, dragged out while hidden).
+    if (this._snap !== "none") { this.applySnap(); this.applyAnchor(); }
+    this.clampToSafeArea();
+    // Re-run chrome so resize handles / buttons reflect the now-
+    // restored state, and persist the cleared minimize flag.
+    this.refreshChrome();
+    this.persistMinimized();
+    // Notify subscribers (PixiPanel visibility, taskbar entry styling,
+    // external observers) — but only on the edges that actually
+    // changed so we don't double-fire on an already-visible panel.
+    if (wasClosed)    for (const cb of this.openChangeListeners)     cb(true);
+    if (wasMinimized) for (const cb of this.minimizeChangeListeners) cb(false);
+    this.fireRectChange();
+  }
+
+  /** True only when the panel is *actually showing pixels*: open, not
+   *  minimized, mounted, not `display:none`, non-zero size, and
+   *  overlapping the viewport. The flag pair `isOpen && !isMinimized`
+   *  reports intent, which can drift from reality; this checks the
+   *  live DOM so callers (the taskbar) can tell "toggle away" from
+   *  "stuck — surface it". */
+  get isEffectivelyVisible(): boolean {
+    if (!this._open || this._minimized) return false;
+    if (!this.panel.isConnected) return false;
+    if (this.panel.style.display === "none") return false;
+    const r = this.panel.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const MARGIN = 8; // require a sliver actually on-screen
+    return r.right  > MARGIN
+        && r.bottom > MARGIN
+        && r.left   < window.innerWidth  - MARGIN
+        && r.top    < window.innerHeight - MARGIN;
+  }
+
   /** Update the panel's displayed title. Writes the chrome's
    *  live span, updates `titleText`, and fires `onTitleChange`
    *  so the taskbar entry / Pixi chrome / popup heading
