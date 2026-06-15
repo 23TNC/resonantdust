@@ -237,6 +237,34 @@ function drawScatter(canvas: HTMLCanvasElement, samples: readonly number[]): voi
   }
 }
 
+/** Plots capture arrivals over time: at each tick, a column of `samples[i]`
+ *  stacked dots (one per capture that landed since the prior tick), anchored at
+ *  the baseline. Empty ticks draw nothing, so the X axis lines up with the other
+ *  sync sparklines — letting capture arrivals be read against offset/RTT/delta.
+ *  `NaN` (unsynced) is a no-data tick. */
+function drawArrivalDots(canvas: HTMLCanvasElement, samples: readonly number[]): void {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.width / dpr;
+  const h = canvas.height / dpr;
+  ctx.clearRect(0, 0, w, h);
+  const n = samples.length;
+  if (n === 0) return;
+  ctx.fillStyle = "#ecd6aa";
+  for (let i = 0; i < n; i++) {
+    const count = samples[i];
+    if (!Number.isFinite(count) || count <= 0) continue;
+    const x = n === 1 ? w / 2 : (i / (n - 1)) * (w - 1);
+    // 2px pitch so stacked dots stay distinct; clamp the column to the canvas.
+    for (let j = 0; j < count; j++) {
+      const y = h - 1 - j * 2;
+      if (y < 0) break;
+      ctx.fillRect(x, y, 1, 1);
+    }
+  }
+}
+
 /** Snapshot of the client-server time-sync state. Optional input to
  *  `setStats`; whatever clock source the view wires in (a future
  *  `ReducerManager` equivalent) fills it. All ms unless noted. */
@@ -545,7 +573,7 @@ export class DebugPanel {
         drawSparkline(this.syncOffset.canvas,       this.reducers.getHistory("offsetMs"));
         drawSparkline(this.syncBestOffset.canvas,   this.reducers.getHistory("bestOffsetMs"));
         drawSparkline(this.syncWorstOffset.canvas,  this.reducers.getHistory("worstOffsetMs"));
-        drawSparkline(this.syncCaptures.canvas,     this.reducers.getHistory("captures"));
+        drawArrivalDots(this.syncCaptures.canvas,   this.reducers.getHistory("captureArrivals"));
         drawSparkline(this.syncRtt.canvas,          this.reducers.getHistory("rttMs"));
         drawSparkline(this.syncBestRtt.canvas,      this.reducers.getHistory("bestRttMs"));
         const capOffsetHist = this.reducers.getHistory("captureOffsetMs");

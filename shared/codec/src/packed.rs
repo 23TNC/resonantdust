@@ -523,7 +523,6 @@ pub fn unpack_zone_definition(v: u8) -> u8 {
 // ---- nibble-pair (u8 = [count: u4 | max: u4]) ------------------------
 //
 // Compact pair-of-counts encoding. Used by `PlayerProfile` for
-// `blueprint_info` (current placed blueprint count vs cap) and
 // `soul_info` (current soul-card count vs cap). Both nibbles are
 // in 0..=15; values above 15 saturate when packing.
 //

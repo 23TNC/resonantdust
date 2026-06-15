@@ -230,22 +230,6 @@ fn translate<S: CardStore>(
                     }
                 }
             }
-            VmEffect::Blueprint { def, target } => {
-                let (target_card, _) = resolve_target(frame, store, target, now_ms)?;
-                // The recipe may reference the blueprint by its registry key
-                // (`nd_furnace`) OR by its spawned card (`blueprint_nd_furnace`).
-                let key = def_key(def);
-                let blueprint_id = bundle
-                    .blueprint_def_id(&key)
-                    .or_else(|| bundle.blueprint_id_for_card(&key))
-                    .ok_or_else(|| {
-                        format!("recipe unlocks unknown blueprint {key:?} (no <blueprint> def)")
-                    })?;
-                ap.effects.push(Effect::UnlockBlueprint {
-                    blueprint_id,
-                    target_card_id: target_card,
-                });
-            }
         }
     }
 
@@ -387,14 +371,14 @@ fn style_code(style: &str) -> u8 {
     }
 }
 
-/// `card::corpus_dim` / `blueprint::nd_furnace` → the bare key (`corpus_dim`).
+/// `card::corpus_dim` → the bare key (`corpus_dim`).
 fn def_key(def: &str) -> String {
     def.rsplit("::").next().unwrap_or(def).to_string()
 }
 
 /// Resolve a slot-path target to a concrete card_id, walking `.owner` / `.parent`
 /// past the longest placed-card prefix via the store. Returns the resolved card
-/// and any trailing container word (`inventory` / `blueprint`).
+/// and any trailing container word (`inventory`).
 fn resolve_target<S: CardStore>(
     frame: &Frame,
     store: &S,
@@ -426,7 +410,7 @@ fn resolve_target<S: CardStore>(
                 }
                 cid = c.micro_location;
             }
-            "inventory" | "blueprint" => container = Some(seg.to_string()),
+            "inventory" => container = Some(seg.to_string()),
             other => return Err(format!("unsupported target step {other:?} in {path:?}")),
         }
     }

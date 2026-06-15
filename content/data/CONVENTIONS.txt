@@ -59,7 +59,7 @@ A path is dot-separated segments. Segments fall into distinct ROLES:
                  owner  walk to the card that owns the current one, then the
                         rest of the path is resolved in THAT card's space
                         (e.g. slot.1.0.owner.slot.1.0 — actor's own top stack)
-                 inventory / blueprint  container destinations for `create`
+                 inventory  container destination for `create`
 
   field        a named leaf that reads a property, not a child collection:
                  def_id  the card's definition key

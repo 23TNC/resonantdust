@@ -24,7 +24,10 @@ const SERIES = [
   "offsetMs",
   "bestOffsetMs",
   "worstOffsetMs",
-  "captures",
+  // Per-tick count of captures that landed since the previous sample — drives the
+  // "Captures" arrival-dots graph. Derived from `rttSamples` (one round-trip =
+  // one clock capture), not projected from a snapshot scalar; see `sampleSyncHistory`.
+  "captureArrivals",
   "rttMs",
   "bestRttMs",
   "captureOffsetMs",
@@ -36,6 +39,9 @@ export class SyncHistory implements SyncHistorySource {
    *  then renders "—" and the sparklines stay empty). */
   private latest: SyncStats | null = null;
   private readonly buffers = new Map<SeriesName, number[]>();
+  /** Total round-trips (≈ total captures) seen at the previous sample tick, so
+   *  we can record the per-tick arrival count. `null` until the first sample. */
+  private prevRttSamples: number | null = null;
 
   constructor() {
     for (const s of SERIES) this.buffers.set(s, []);
@@ -54,9 +60,20 @@ export class SyncHistory implements SyncHistorySource {
 
   sampleSyncHistory(): void {
     const s = this.latest;
+    // Captures since the last tick: the monotonic round-trip count's delta. A
+    // pen-up (NaN) while unsynced; resets the baseline so a re-sync doesn't read
+    // its whole backlog as one giant arrival spike.
+    let arrivals: number;
+    if (!s) {
+      arrivals = NaN;
+      this.prevRttSamples = null;
+    } else {
+      arrivals = this.prevRttSamples === null ? 0 : Math.max(0, s.rttSamples - this.prevRttSamples);
+      this.prevRttSamples = s.rttSamples;
+    }
     for (const name of SERIES) {
       const buf = this.buffers.get(name)!;
-      buf.push(s ? this.scalar(s, name) : NaN);
+      buf.push(name === "captureArrivals" ? arrivals : s ? this.scalar(s, name) : NaN);
       if (buf.length > WINDOW) buf.shift();
     }
   }
@@ -76,7 +93,9 @@ export class SyncHistory implements SyncHistorySource {
       case "offsetMs":       return s.offsetMs;
       case "bestOffsetMs":   return s.bestOffsetMs ?? NaN;
       case "worstOffsetMs":  return s.worstOffsetMs ?? NaN;
-      case "captures":       return s.captures;
+      // Derived in `sampleSyncHistory` from the round-trip delta, not from a
+      // snapshot scalar — this branch is never hit, but keeps the switch total.
+      case "captureArrivals": return NaN;
       case "rttMs":          return s.rttMs ?? NaN;
       case "bestRttMs":      return s.bestRttMs ?? NaN;
       // "Capture spread": the per-tick gap between the freshest and most-queued

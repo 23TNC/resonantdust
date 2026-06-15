@@ -9,7 +9,6 @@ export const cardFlagFieldShape: (a: number, b: number, c: number, d: number) =>
 export const cardFlagFieldValueAny: (a: number, b: number, c: number, d: number) => number;
 export const cardFlagFieldValueIn: (a: number, b: number, c: number, d: number, e: number) => number;
 export const cardTypeId: (a: number, b: number) => number;
-export const content_allBlueprints: (a: number) => [number, number, number, number];
 export const content_allTextures: (a: number) => [number, number, number, number];
 export const content_aspectInfo: (a: number, b: number, c: number) => [number, number, number, number];
 export const content_aspectNames: (a: number) => [number, number];

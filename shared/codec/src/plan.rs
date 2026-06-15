@@ -46,10 +46,6 @@ pub enum Effect {
   /// the upper 28 bits are card-only (transient unless the card persists), only
   /// the bottom u4 ever round-trips to a zone tile.
   SetCardStock { card_id: u32, stock: u32 },
-  /// Set a blueprint's discovery bit on the target soul (`unlock_blueprint`).
-  /// `blueprint_id` is the Bundle's blueprint id (the discovery-bit index),
-  /// resolved from the recipe's `$blueprint::<key>` ref at plan-translation time.
-  UnlockBlueprint { blueprint_id: u16, target_card_id: u32 },
 }
 
 /// Tile-stock arithmetic for [`Effect::ModifyTileStock`]. `code()` is the u8 the

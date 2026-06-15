@@ -10,10 +10,6 @@ export class Content {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * `allBlueprints()` → the blueprint catalog as JSON.
-     */
-    allBlueprints(): string;
-    /**
      * `allTextures()` → the texture registry as JSON.
      */
     allTextures(): string;
@@ -151,7 +147,6 @@ export interface InitOutput {
     readonly cardFlagFieldValueAny: (a: number, b: number, c: number, d: number) => number;
     readonly cardFlagFieldValueIn: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly cardTypeId: (a: number, b: number) => number;
-    readonly content_allBlueprints: (a: number) => [number, number, number, number];
     readonly content_allTextures: (a: number) => [number, number, number, number];
     readonly content_aspectInfo: (a: number, b: number, c: number) => [number, number, number, number];
     readonly content_aspectNames: (a: number) => [number, number];

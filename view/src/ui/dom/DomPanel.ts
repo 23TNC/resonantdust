@@ -1274,7 +1274,7 @@ export class DomPanel {
    *  re-sync. Subclasses (`PixiPanel`) override to also push
    *  the new string onto their Pixi-rendered title node.
    *
-   *  Direct callers (e.g. `BlueprintsPanel` pushing a live
+   *  Direct callers (e.g. a panel pushing a live
    *  capacity counter) win until the next `setTitleSuffix`
    *  call — at which point the title gets recomposed from
    *  `baseTitle + resolved suffix` and any external override

@@ -40,7 +40,7 @@ export function buildCardPrimList(
  * positioned card with no tick.
  *
  * Use for preview surfaces that render a *def*, not a *card*: the drag ghost
- * today; blueprint / wrench previews later. Re-call `draw()` on
+ * today; other def-preview surfaces later. Re-call `draw()` on
  * `lodTextures.onLoad` so lazily-loaded art upgrades in place.
  *
  * Origin matches `LayoutGenericCard`: (0,0) is the body's top-left corner; the

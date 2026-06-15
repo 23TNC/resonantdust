@@ -109,6 +109,45 @@ interface Geom {
   rightCol: { x: number; w: number };
 }
 
+/** Per-sprite CPU lighting pipeline. The editor lights EVERY sprite primitive on
+ *  the card (not just one) — each sprite owns its own lit canvas (at its master's
+ *  resolution, so the zoomable preview stays sharp), cached source channels, a
+ *  bloom pass, and the overlay {@link Sprite} that draws the lit result over the
+ *  flat `bigFace` render at the sprite's exact footprint. */
+interface SpriteLit {
+  /** The working-list sprite this lights. */
+  node: VisualNode;
+  /** Master stem (`/textures/master/<aspect>/<faction>/<variant>`). */
+  stem: string;
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  /** Canvas-backed texture the overlay sprite displays (updated on relight). */
+  texture: Texture;
+  out: ImageData;
+  bloom: Bloom;
+  /** Cached source pixels (re-read on paint/undo, reused while only lights move). */
+  albedoData: ImageData | null;
+  normalData: ImageData | null;
+  emissiveData: ImageData | null;
+  /** Overlay that draws the lit result over the card (child of `previewContent`). */
+  sprite: Sprite;
+  /** Footprint on the card preview (square-local, pre pan/zoom) — markers + the
+   *  card paint surface map against the primary sprite's. */
+  ox: number; oy: number; w: number; h: number; texW: number; texH: number;
+}
+
+/** A light in the shared CARD-PX space (the DSL/game unit) — position, height,
+ *  radius are card px, intensity unitless, colour `0xRRGGBB`. Each {@link SpriteLit}
+ *  converts these into its own texel space before compositing. */
+interface CardLight { x: number; y: number; height: number; radius: number; intensity: number; color: number }
+
+/** Per-emissive bloom tuning (the editor's CPU bloom pass). `radiusFrac` is the
+ *  blur radius as a fraction of the sprite's larger texel dimension (resolution-
+ *  independent); `threshold` is the 0–255 emissive luma that blooms; `intensity`
+ *  the add-back strength. Defaults are the module `BLOOM_*` constants; the
+ *  per-sprite controls under the emissive square override them per stem. */
+interface BloomParams { threshold: number; radiusFrac: number; intensity: number }
+
 const ROW_CSS: Partial<CSSStyleDeclaration> = {
   display: "flex",
   alignItems: "center",
@@ -191,8 +230,6 @@ export class CardEditorPanel extends PixiPanel {
   /** Stroke-based paint state: per-channel editable copies + undo/redo. Deep
    *  copies — never written back to master. Cleared on {@link show}. */
   private readonly paint = new PaintHistory(UNDO_LIMIT);
-  /** Edited-albedo overlay on the card preview, so it reflects paint. */
-  private readonly previewSprite = new Sprite();
 
   // ── preview viewport (pan / zoom / lighting) ────────────────────────
   /** Clips the card preview to its square. */
@@ -204,37 +241,37 @@ export class CardEditorPanel extends PixiPanel {
   private zoom = 1;
   private panning = false;
   private lastPan = { x: 0, y: 0 };
-  /** Selected sprite's footprint in square-local px (pre pan/zoom), for the card
+  /** Primary sprite's footprint in square-local px (pre pan/zoom), for the card
    *  paint surface; null when no sprite. */
   private cardSpaceSprite: { ox: number; oy: number; w: number; h: number; texW: number; texH: number } | null = null;
   /** The card preview as a paint surface (transform-baked); null when no sprite. */
   private cardSurface: Surface | null = null;
 
-  // ── preview lighting (CPU, texel space) ─────────────────────────────
-  /** Lit-result canvas the preview displays (albedo shaded by normal). */
-  private litCanvas: HTMLCanvasElement | null = null;
-  private litCtx: CanvasRenderingContext2D | null = null;
-  private litTexture: Texture | null = null;
-  private litOut: ImageData | null = null;
-  /** CPU bloom pass over the lit result; rebuilt with the lit canvas on resize. */
-  private bloom: Bloom | null = null;
-  /** Cached source pixels (re-read on paint/undo, reused while only lights move). */
-  private litAlbedoData: ImageData | null = null;
-  private litNormalData: ImageData | null = null;
-  private litEmissiveData: ImageData | null = null;
-  /** The stem the lit canvas was sized for (rebuild on change). */
-  private litStem: string | null = null;
-  /** The card's main sprite node — the preview is pinned to it, so it stays the
-   *  same regardless of which primitive is selected. Set on {@link show}. */
+  // ── preview lighting (CPU) ──────────────────────────────────────────
+  /** One lit pipeline per sprite primitive — EVERY sprite on the card is lit, not
+   *  just one. Rebuilt by {@link buildLitSprites} when the sprite set / a master
+   *  changes; lit by {@link relight}. */
+  private litSprites: SpriteLit[] = [];
+  /** Stem signature of the last {@link buildLitSprites}, so a field edit doesn't
+   *  needlessly churn every sprite's lit canvas. */
+  private litSig = "";
+  /** The card's main sprite node — the one that owns the card PAINT surface (and
+   *  the bucket's "lit" source), kept constant as other prims are selected. ALL
+   *  sprites are lit regardless; this only designates the paintable one. */
   private previewSpriteNode: VisualNode | null = null;
-  /** The pinned preview sprite's master stem (recomputed each preview render). */
-  private previewStem: string | null = null;
   /** Master stem the in-progress brush stroke is locked to. */
   private paintStem: string | null = null;
-  /** The single movable light, in texel space (Light tool's left-click moves it). */
+  /** The single movable light, in CARD-PX (the DSL unit, shared across sprites);
+   *  the Light tool's middle-click moves it. */
   private fixedLight = { x: 0, y: 0 };
-  /** Cursor-follow light texel while the Light tool is active + over the sprite. */
+  /** Cursor-follow light in CARD-PX while the Light tool is active + over the card. */
   private cursorLight: { x: number; y: number } | null = null;
+  /** False until the movable light has been seeded for the current card. */
+  private lightSeeded = false;
+  /** Per-emissive bloom overrides, keyed by master stem — the controls under the
+   *  emissive square edit the selected sprite's entry; {@link relight} reads it.
+   *  Absent → the module-constant defaults. */
+  private readonly bloomByStem = new Map<string, BloomParams>();
   /** Circle marking the fixed light, inside the preview viewport (pans/zooms). */
   private readonly lightGfx = new Graphics();
   /** The sprite views the brush operates over (one per displayed channel square
@@ -255,6 +292,9 @@ export class CardEditorPanel extends PixiPanel {
   private readonly select: HTMLSelectElement;
   /** DOM per-primitive edit controls, rebuilt per selection. */
   private readonly editControls: HTMLDivElement;
+  /** DOM bloom controls, floated under the emissive square for a sprite selection
+   *  — they tune {@link bloomByStem} for the selected sprite's emissive. */
+  private readonly bloomControls: HTMLDivElement;
   /** Always-visible tabbed section left of the card preview: the selected card's
    *  Aspects / Visual DSL / Data DSL / Locales. */
   private readonly leftSection: HTMLDivElement;
@@ -316,12 +356,11 @@ export class CardEditorPanel extends PixiPanel {
 
     const c = this.content.container;
     c.addChild(this.frame);
-    // Preview viewport: bigFace + edited-albedo overlay live inside a pan/zoom
-    // container, clipped to the card square by previewMask.
-    this.previewSprite.visible = false;
+    // Preview viewport: bigFace (flat albedo) + the per-sprite lit overlays (added
+    // dynamically by `buildLitSprites`) live inside a pan/zoom container, clipped
+    // to the card square by previewMask. The light markers stay topmost.
     this.previewContent.addChild(this.bigFace);
-    this.previewContent.addChild(this.previewSprite); // displays the lit canvas
-    this.previewContent.addChild(this.lightGfx);      // fixed-light marker
+    this.previewContent.addChild(this.lightGfx);      // light markers (kept on top)
     this.previewView.addChild(this.previewContent);
     c.addChild(this.previewView);
     c.addChild(this.previewMask);
@@ -364,6 +403,25 @@ export class CardEditorPanel extends PixiPanel {
     } satisfies Partial<CSSStyleDeclaration>);
     this.editControls.addEventListener("pointerdown", (e) => e.stopPropagation());
     this.panel.appendChild(this.editControls);
+
+    // Bloom controls — a compact column floated under the emissive square (a
+    // sprite-only concern). `zIndex` 31 keeps it above the full-width edit-controls
+    // strip it overlaps on the right.
+    this.bloomControls = document.createElement("div");
+    Object.assign(this.bloomControls.style, {
+      position: "fixed",
+      zIndex: "31",
+      pointerEvents: "auto",
+      display: "none",
+      flexDirection: "column",
+      boxSizing: "border-box",
+      background: "rgba(20, 22, 30, 0.92)",
+      border: "1px solid #3a3a4a",
+      borderRadius: "4px",
+      padding: "6px",
+    } satisfies Partial<CSSStyleDeclaration>);
+    this.bloomControls.addEventListener("pointerdown", (e) => e.stopPropagation());
+    this.panel.appendChild(this.bloomControls);
 
     const tabbed = buildTabbedSection(["Aspects", "Visual", "Data", "Locales"]);
     this.leftSection = tabbed.root;
@@ -440,13 +498,13 @@ export class CardEditorPanel extends PixiPanel {
     this.panning = false;
     this.pan = { x: 0, y: 0 };
     this.zoom = 1;
-    // Reset lighting so a new card re-centres its light + rebuilds the lit canvas.
-    this.litStem = null;
+    // Reset lighting so a new card re-seeds its movable light + rebuilds the lit
+    // canvases (the stem signature change forces `buildLitSprites` to rebuild).
+    this.litSig = "";
+    this.lightSeeded = false;
     this.cursorLight = null;
-    this.litAlbedoData = null;
-    this.litNormalData = null;
-    // Pin the preview to the card's main (first) sprite, so it stays constant as
-    // other primitives are selected.
+    // Designate the card's main (first) sprite as the paint-surface owner, so it
+    // stays constant as other primitives are selected. ALL sprites are lit.
     this.previewSpriteNode = this.workingList.find((n) => n.kind === "sprite" && !!n.texture?.name) ?? null;
     this.selectedIndex = this.workingList.length > 0 ? 0 : -1;
     this.populateSelect();
@@ -597,6 +655,7 @@ export class CardEditorPanel extends PixiPanel {
     this.renderSelection();
     this.positionSelect();
     this.positionControls();
+    this.positionBloomControls();
     this.positionSideSections();
     const body = this.bodyRect;
     place(this.paintOverlay, body.left, body.top, body.width, body.height);
@@ -692,7 +751,7 @@ export class CardEditorPanel extends PixiPanel {
     const ch = Math.min(oy + h, g.bigY + g.bigSide) - cy;
     this.cardSurface = cw <= 0 || ch <= 0
       ? null
-      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.previewStem ?? "", channel: "lit" };
+      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.cardLit()?.stem ?? "", channel: "lit" };
   }
 
   /** Cursor (content-local) is over the card preview square. */
@@ -771,36 +830,58 @@ export class CardEditorPanel extends PixiPanel {
     } else {
       this.hideSelectionRenders();
     }
-    // The PREVIEW is pinned to the card's main sprite — independent of selection.
+    // The PREVIEW lights EVERY sprite on the card — independent of selection.
     this.renderPreview();
     this.drawOutline();
     this.refreshHistoryButtons();
   }
 
-  /** Render the (selection-independent) lit card preview + its paint surface from
-   *  the pinned main sprite, so it stays the same as primitives are selected. */
+  /** (Re)build + light the card preview: one lit overlay per sprite primitive, so
+   *  the whole card is shaded (not just one sprite), independent of selection. The
+   *  primary sprite additionally drives the card paint surface. */
   private renderPreview(): void {
-    const g = this.geom;
-    const node = this.previewSpriteNode;
-    const stem = node?.texture?.name
-      ? masterVariantStem(node.texture.name, this.faction, this.seed, node.texture.index)
-      : null;
-    this.previewStem = stem;
-    if (!g || !node || !stem) {
-      this.previewSprite.visible = false;
+    this.buildLitSprites();
+    if (!this.geom || this.litSprites.length === 0) {
       this.cardSpaceSprite = null;
       this.cardSurface = null;
       this.lightGfx.clear();
       return;
     }
-    const albedoTex = this.channelTexture(stem, "albedo");
-    const normalTex = this.channelTexture(stem, "normal");
-    // Ensure the pinned sprite's emissive layer exists (blank when it ships none)
-    // so the lit composite can ADD its glow — independent of which prim is selected.
-    this.channelTexture(stem, "emissive");
-    const litTex = albedoTex ? this.prepareLighting(stem, albedoTex) : null;
-    this.recordCardSurface(node, albedoTex ?? normalTex ?? this.masterTex(stem, "diffuse"), litTex);
+    // Seed the movable light once per card — from the top-left of the primary
+    // sprite (card-px), reproducing the old single-sprite default.
+    if (!this.lightSeeded) {
+      const p = this.primaryLit();
+      if (p) {
+        const n = p.node;
+        const ax = (n.anchor?.x ?? 0) / 100;
+        const ay = (n.anchor?.y ?? 0) / 100;
+        this.fixedLight = { x: n.pos.x - ax * n.size.x + n.size.x * 0.15, y: n.pos.y - ay * n.size.y + n.size.y * 0.15 };
+        this.lightSeeded = true;
+      }
+    }
+    this.placeLitSprites();
+    this.refreshLightingSource();
+    this.relight();
     this.drawLightMarkers();
+  }
+
+  /** The primary sprite's lit pipeline — the card's main (first) sprite. */
+  private primaryLit(): SpriteLit | undefined {
+    return this.litSprites.find((s) => s.node === this.previewSpriteNode) ?? this.litSprites[0];
+  }
+
+  /** The selected sprite's lit pipeline, if the selection is a (built) sprite. */
+  private selectedLit(): SpriteLit | undefined {
+    return this.litSprites.find((s) => s.node === this.selected);
+  }
+
+  /** The sprite the card paint surface + light-tool cursor map against: the
+   *  SELECTED sprite when one is selected (so the brush lands on the sprite you're
+   *  editing, at ITS position on the card — sprites aren't at 0,0), else the
+   *  primary. The card paint surface + bucket "lit" source + light texel↔card
+   *  conversions all key off this so they stay mutually consistent. */
+  private cardLit(): SpriteLit | undefined {
+    return this.selectedLit() ?? this.primaryLit();
   }
 
   private hideSelectionRenders(): void {
@@ -849,171 +930,230 @@ export class CardEditorPanel extends PixiPanel {
   /** Record the sprite's footprint on the card preview (square-local, pre
    *  pan/zoom) for the card paint surface, and overlay the edited albedo
    *  (`preview`) there so the card reflects edits. */
-  private recordCardSurface(node: VisualNode, tex: Texture | null, preview: Texture | null): void {
-    if (!tex) { this.cardSpaceSprite = null; this.cardSurface = null; this.previewSprite.visible = false; return; }
-    const texW = tex.width || 1;
-    const texH = tex.height || 1;
-    const s = this.bigFace.scale.x;
-    const ax = (node.anchor?.x ?? 0) / 100;
-    const ay = (node.anchor?.y ?? 0) / 100;
-    const w = node.size.x * s;
-    const h = node.size.y * s;
-    // Square-local (bigFace.position is already square-local): pan/zoom is applied
-    // by previewContent; the card paint surface bakes it in `computeCardSurface`.
-    const ox = this.bigFace.position.x + (node.pos.x - ax * node.size.x) * s;
-    const oy = this.bigFace.position.y + (node.pos.y - ay * node.size.y) * s;
-    this.cardSpaceSprite = { ox, oy, w, h, texW, texH };
-    if (preview) {
-      this.previewSprite.texture = preview;
-      this.previewSprite.visible = true;
-      this.previewSprite.anchor.set(0);
-      this.previewSprite.setSize(w, h);
-      this.previewSprite.position.set(ox, oy);
-    } else {
-      this.previewSprite.visible = false;
-    }
-    this.computeCardSurface();
-  }
-
   // ── preview lighting ────────────────────────────────────────────────
-  /** Ensure the lit canvas matches the sprite, re-read the source channels, and
-   *  relight — returning the lit texture the preview displays. */
-  private prepareLighting(stem: string, albedoTex: Texture): Texture | null {
-    const w = albedoTex.width || 1;
-    const h = albedoTex.height || 1;
-    if (!this.litCanvas || this.litCanvas.width !== w || this.litCanvas.height !== h) {
-      this.litTexture?.destroy(true);
+  /** (Re)build the per-sprite lit pipeline — one lit canvas + overlay per sprite
+   *  primitive with a resolvable master, so the WHOLE card shows lighting rather
+   *  than just one sprite. Reuses the existing canvases when the sprite set +
+   *  stems are unchanged (a field edit must not churn every canvas); rebuilds
+   *  when the set changes or a sprite's master has just finished loading. Sprites
+   *  whose master albedo isn't loaded yet are skipped (a later `masterTex` load
+   *  re-runs this via relayout). */
+  private buildLitSprites(): void {
+    const desired = this.workingList
+      .filter((n) => n.kind === "sprite" && !!n.texture?.name)
+      .map((n) => ({ node: n, stem: masterVariantStem(n.texture!.name, this.faction, this.seed, n.texture!.index) }))
+      .filter((d): d is { node: VisualNode; stem: string } => d.stem !== null);
+    const sig = desired.map((d) => d.stem).join("|");
+    // A sprite that's wanted but not yet built, whose master is now available →
+    // a rebuild is due (covers async master loads without churning otherwise).
+    const stale = desired.some((d) => !this.litSprites.some((s) => s.node === d.node) && !!this.channelTexture(d.stem, "albedo"));
+    if (sig === this.litSig && !stale) return;
+    this.litSig = sig;
+
+    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); }
+    this.litSprites = [];
+    for (const d of desired) {
+      // Ensure the editable channel copies exist (blank emissive if absent), then
+      // size the lit canvas to the master albedo (skip until it loads).
+      const albedo = this.channelTexture(d.stem, "albedo");
+      this.channelTexture(d.stem, "normal");
+      this.channelTexture(d.stem, "emissive");
+      if (!albedo) continue;
+      const w = albedo.width || 1;
+      const h = albedo.height || 1;
       const canvas = document.createElement("canvas");
       canvas.width = w;
       canvas.height = h;
       const ctx = canvas.getContext("2d");
-      if (!ctx) return null;
-      this.litCanvas = canvas;
-      this.litCtx = ctx;
-      this.litTexture = Texture.from(canvas);
-      this.litOut = ctx.createImageData(w, h);
-      this.bloom = new Bloom(w, h);
+      if (!ctx) continue;
+      this.litSprites.push({
+        node: d.node, stem: d.stem, canvas, ctx,
+        texture: Texture.from(canvas),
+        out: ctx.createImageData(w, h),
+        bloom: new Bloom(w, h),
+        albedoData: null, normalData: null, emissiveData: null,
+        sprite: new Sprite(),
+        ox: 0, oy: 0, w: 0, h: 0, texW: w, texH: h,
+      });
     }
-    if (this.litStem !== stem) {
-      this.fixedLight = { x: w * 0.15, y: h * 0.15 }; // new sprite → light from the top-left
-      this.litStem = stem;
-    }
-    this.refreshLightingSource();
-    this.relight();
-    return this.litTexture;
+    // Overlays sit above the flat bigFace render (in working-list order, matching
+    // its self-mounted paint order) but below the light markers.
+    for (const s of this.litSprites) this.previewContent.addChild(s.sprite);
+    this.previewContent.setChildIndex(this.lightGfx, this.previewContent.children.length - 1);
   }
 
-  /** Re-read the albedo + normal channel pixels (after a paint / undo / redo). */
+  /** Position every lit overlay over its sprite's footprint on the card (square-
+   *  local, pre pan/zoom — `previewContent` applies pan/zoom). Matches `SpritePrim`'s
+   *  transform: anchor pivot at `pos`, displayed size `size·scale`, rotated by
+   *  `rot`. The primary sprite's footprint also drives the card paint surface. */
+  private placeLitSprites(): void {
+    const sc = this.bigFace.scale.x;
+    for (const s of this.litSprites) {
+      const n = s.node;
+      const ax = (n.anchor?.x ?? 0) / 100;
+      const ay = (n.anchor?.y ?? 0) / 100;
+      const ns = n.scale ?? 1;
+      const w = n.size.x * sc * ns;
+      const h = n.size.y * sc * ns;
+      // bigFace.position is square-local; the sprite's anchor point sits at `pos`.
+      const px = this.bigFace.position.x + n.pos.x * sc;
+      const py = this.bigFace.position.y + n.pos.y * sc;
+      s.sprite.texture = s.texture;
+      s.sprite.anchor.set(ax, ay);
+      s.sprite.rotation = n.rot ?? 0;
+      s.sprite.alpha = n.alpha ?? 1;
+      s.sprite.setSize(w, h);
+      s.sprite.position.set(px, py);
+      // Axis-aligned footprint (pre-rotation) for markers + the card paint surface.
+      s.ox = px - ax * w;
+      s.oy = py - ay * h;
+      s.w = w;
+      s.h = h;
+    }
+    // The card paint surface follows the SELECTED sprite (its footprint already
+    // bakes in `pos`, so the brush offsets correctly), falling back to the primary.
+    const target = this.cardLit();
+    if (target) {
+      this.cardSpaceSprite = { ox: target.ox, oy: target.oy, w: target.w, h: target.h, texW: target.texW, texH: target.texH };
+    } else {
+      this.cardSpaceSprite = null;
+      this.cardSurface = null;
+    }
+    this.computeCardSurface();
+  }
+
+  /** Re-read every lit sprite's albedo / normal / emissive channel pixels (after a
+   *  paint / undo / redo, or a rebuild). */
   private refreshLightingSource(): void {
-    const stem = this.litStem;
-    if (!stem) { this.litAlbedoData = null; this.litNormalData = null; return; }
-    this.litAlbedoData = canvasData(this.paint.channelCanvas(`${stem}|albedo`));
-    this.litNormalData = canvasData(this.paint.channelCanvas(`${stem}|normal`));
-    this.litEmissiveData = canvasData(this.paint.channelCanvas(`${stem}|emissive`));
+    for (const s of this.litSprites) {
+      s.albedoData = canvasData(this.paint.channelCanvas(`${s.stem}|albedo`));
+      s.normalData = canvasData(this.paint.channelCanvas(`${s.stem}|normal`));
+      s.emissiveData = canvasData(this.paint.channelCanvas(`${s.stem}|emissive`));
+    }
   }
 
-  /** Recompute the lit canvas from the cached source + current lights. */
+  /** Recompute EVERY lit sprite's canvas from its cached source + the current
+   *  lights (converted into that sprite's texel space). */
   private relight(): void {
-    if (!this.litCtx || !this.litOut || !this.litAlbedoData || !this.litTexture) return;
-    composite(this.litOut, this.litAlbedoData, this.litNormalData, this.litEmissiveData, this.buildLights(), LIGHT_AMBIENT, LIGHT_Y_SIGN);
-    const radius = Math.max(2, Math.round(Math.max(this.litOut.width, this.litOut.height) * BLOOM_RADIUS_FRAC));
-    this.bloom?.apply(this.litOut, this.litEmissiveData, BLOOM_THRESHOLD, radius, BLOOM_INTENSITY);
-    this.litCtx.putImageData(this.litOut, 0, 0);
-    this.litTexture.source.update();
+    const lights = this.cardLights();
+    for (const s of this.litSprites) {
+      if (!s.albedoData) continue;
+      composite(s.out, s.albedoData, s.normalData, s.emissiveData, this.lightsForSprite(s, lights), LIGHT_AMBIENT, LIGHT_Y_SIGN);
+      // Per-emissive bloom (tuned by the controls under the emissive square).
+      const bp = this.bloomFor(s.stem);
+      const radius = Math.max(2, Math.round(Math.max(s.out.width, s.out.height) * bp.radiusFrac));
+      s.bloom.apply(s.out, s.emissiveData, bp.threshold, radius, bp.intensity);
+      s.ctx.putImageData(s.out, 0, 0);
+      s.texture.source.update();
+    }
   }
 
-  /** Every light shading the preview: the fixed (white) light, the cursor light
-   *  (art tools' primary colour) while hovering, and each `light` PRIMITIVE in
-   *  the working list (its `pos` / `tint` / `light` variables). */
-  private buildLights(): Light[] {
-    if (!this.litCanvas) return [];
-    const dim = Math.max(this.litCanvas.width, this.litCanvas.height);
-    const def = { height: dim * LIGHT_HEIGHT, radius: dim * LIGHT_RADIUS, intensity: LIGHT_INTENSITY };
-    const mk = (x: number, y: number, color: number, v = def): Light => ({
-      x, y, height: v.height, radius: v.radius, intensity: v.intensity,
-      r: ((color >> 16) & 0xff) / 255, g: ((color >> 8) & 0xff) / 255, b: (color & 0xff) / 255,
-    });
-    // Fixed + cursor lights are editor-internal (texel space). Light PRIMITIVES
-    // store the GAME unit — card px — so they round-trip to the DSL unchanged;
-    // convert them into the preview sprite's texel space for the CPU composite.
-    // The fixed (default) light is skippable via the Art Tools toggle, to preview
-    // the card's own lights alone.
-    const lights: Light[] = [];
-    if (this.artTools.defaultLight) lights.push(mk(this.fixedLight.x, this.fixedLight.y, 0xffffff));
+  /** The bloom params for a master stem — its override, or the module defaults. */
+  private bloomFor(stem: string): BloomParams {
+    return this.bloomByStem.get(stem) ?? { threshold: BLOOM_THRESHOLD, radiusFrac: BLOOM_RADIUS_FRAC, intensity: BLOOM_INTENSITY };
+  }
+
+  /** Patch the selected sprite's emissive bloom + relight (its sprite re-blooms
+   *  with the new params; others are unaffected). */
+  private setBloom(stem: string, patch: Partial<BloomParams>): void {
+    this.bloomByStem.set(stem, { ...this.bloomFor(stem), ...patch });
+    this.relight();
+  }
+
+  /** The selected sprite's master stem (null when the selection isn't a sprite
+   *  or has no texture) — the key its bloom override is stored under. */
+  private selectedSpriteStem(): string | null {
+    const n = this.selected;
+    if (n?.kind !== "sprite" || !n.texture?.name) return null;
+    return masterVariantStem(n.texture.name, this.faction, this.seed, n.texture.index);
+  }
+
+  /** Every light shading the card, in the shared CARD-PX space: the fixed (white)
+   *  light, the cursor light (art tools' primary colour) while hovering, and each
+   *  `light` PRIMITIVE (already card-px). The fixed light's height/radius scale
+   *  with the primary sprite's card-px size (so its reach matches the old default);
+   *  the others carry their own. The fixed light is skippable via the Art Tools
+   *  toggle, to preview the card's own lights alone. */
+  private cardLights(): CardLight[] {
+    const primary = this.primaryLit();
+    const cardDim = primary
+      ? Math.max(primary.node.size.x, primary.node.size.y)
+      : Math.max(global("card_width"), global("body_height"));
+    const lights: CardLight[] = [];
+    if (this.artTools.defaultLight) {
+      lights.push({ x: this.fixedLight.x, y: this.fixedLight.y, height: cardDim * LIGHT_HEIGHT, radius: cardDim * LIGHT_RADIUS, intensity: LIGHT_INTENSITY, color: 0xffffff });
+    }
     if (this.cursorLight) {
-      // Preview the cursor light with the Light tool's OWN options (card px →
-      // texel), so the hover matches the light that left-click will place.
-      lights.push(mk(this.cursorLight.x, this.cursorLight.y, this.artTools.primary, {
-        height: this.cardLenToTexel(this.artTools.lightHeight),
-        radius: this.cardLenToTexel(this.artTools.lightRadius),
-        intensity: this.artTools.lightIntensity,
-      }));
+      lights.push({ x: this.cursorLight.x, y: this.cursorLight.y, height: this.artTools.lightHeight, radius: this.artTools.lightRadius, intensity: this.artTools.lightIntensity, color: this.artTools.primary });
     }
     for (const n of this.workingList) {
       if (n.kind !== "light" || !n.light) continue;
-      const t = this.cardToTexel(n.pos.x, n.pos.y);
-      lights.push(mk(t.tx, t.ty, n.tint ?? 0xffffff, {
-        height: this.cardLenToTexel(n.light.height),
-        radius: this.cardLenToTexel(n.light.radius),
-        intensity: n.light.intensity,
-      }));
+      lights.push({ x: n.pos.x, y: n.pos.y, height: n.light.height, radius: n.light.radius, intensity: n.light.intensity, color: n.tint ?? 0xffffff });
     }
     return lights;
   }
 
-  // Light PRIMITIVES live in card-px (the game/DSL unit); the preview composites
-  // in the preview sprite's texel space. These map between the two via the sprite's
-  // card-px box (`node.pos`/`size`) ↔ the texel grid.
-  private cardToTexel(cx: number, cy: number): { tx: number; ty: number } {
-    const n = this.previewSpriteNode;
-    if (!n || !this.litCanvas) return { tx: cx, ty: cy };
-    const ax = (n.anchor?.x ?? 0) / 100;
-    const ay = (n.anchor?.y ?? 0) / 100;
-    const left = n.pos.x - ax * n.size.x;
-    const top = n.pos.y - ay * n.size.y;
-    return {
-      tx: ((cx - left) / (n.size.x || 1)) * this.litCanvas.width,
-      ty: ((cy - top) / (n.size.y || 1)) * this.litCanvas.height,
-    };
+  /** Convert the shared card-px lights into one sprite's texel space for the CPU
+   *  composite. */
+  private lightsForSprite(s: SpriteLit, lights: CardLight[]): Light[] {
+    return lights.map((cl) => {
+      const t = this.cardToTexel(s, cl.x, cl.y);
+      return {
+        x: t.tx, y: t.ty,
+        height: this.cardLenToTexel(s, cl.height),
+        radius: this.cardLenToTexel(s, cl.radius),
+        intensity: cl.intensity,
+        r: ((cl.color >> 16) & 0xff) / 255, g: ((cl.color >> 8) & 0xff) / 255, b: (cl.color & 0xff) / 255,
+      };
+    });
   }
 
-  private texelToCard(tx: number, ty: number): { x: number; y: number } {
-    const n = this.previewSpriteNode;
-    if (!n || !this.litCanvas) return { x: tx, y: ty };
-    const ax = (n.anchor?.x ?? 0) / 100;
-    const ay = (n.anchor?.y ?? 0) / 100;
-    const left = n.pos.x - ax * n.size.x;
-    const top = n.pos.y - ay * n.size.y;
-    return {
-      x: left + (tx / this.litCanvas.width) * n.size.x,
-      y: top + (ty / this.litCanvas.height) * n.size.y,
-    };
+  // A sprite composites in its own texel space; lights live in shared card-px.
+  // These map between the two via the sprite's DISPLAYED card-px box
+  // (`pos`/`size·scale`, anchor-pivoted) ↔ its texel grid.
+  private cardToTexel(s: SpriteLit, cx: number, cy: number): { tx: number; ty: number } {
+    const n = s.node;
+    const ns = n.scale ?? 1;
+    const wpx = (n.size.x || 1) * ns;
+    const hpx = (n.size.y || 1) * ns;
+    const left = n.pos.x - ((n.anchor?.x ?? 0) / 100) * wpx;
+    const top = n.pos.y - ((n.anchor?.y ?? 0) / 100) * hpx;
+    return { tx: ((cx - left) / wpx) * s.canvas.width, ty: ((cy - top) / hpx) * s.canvas.height };
   }
 
-  /** Card-px length → texel length (uses the sprite's x-scale). */
-  private cardLenToTexel(len: number): number {
-    const n = this.previewSpriteNode;
-    if (!n || !this.litCanvas) return len;
-    return (len / (n.size.x || 1)) * this.litCanvas.width;
+  private texelToCard(s: SpriteLit, tx: number, ty: number): { x: number; y: number } {
+    const n = s.node;
+    const ns = n.scale ?? 1;
+    const wpx = (n.size.x || 1) * ns;
+    const hpx = (n.size.y || 1) * ns;
+    const left = n.pos.x - ((n.anchor?.x ?? 0) / 100) * wpx;
+    const top = n.pos.y - ((n.anchor?.y ?? 0) / 100) * hpx;
+    return { x: left + (tx / s.canvas.width) * wpx, y: top + (ty / s.canvas.height) * hpx };
+  }
+
+  /** Card-px length → a sprite's texel length. */
+  private cardLenToTexel(s: SpriteLit, len: number): number {
+    const n = s.node;
+    return (len / ((n.size.x || 1) * (n.scale ?? 1))) * s.canvas.width;
   }
 
   /** Draw a marker for every light — the fixed light + each light primitive — at
-   *  its texel position (sprite-local, so it pans/zooms with the preview). */
+   *  its CARD-PX position mapped to square-local (so it pans/zooms with the
+   *  preview, which `previewContent` applies). */
   private drawLightMarkers(): void {
     this.lightGfx.clear();
-    const sp = this.cardSpaceSprite;
-    if (!sp || !this.litCanvas) return;
-    const mark = (tx: number, ty: number, color: number): void => {
-      const lx = sp.ox + (tx / sp.texW) * sp.w;
-      const ly = sp.oy + (ty / sp.texH) * sp.h;
+    if (this.litSprites.length === 0) return;
+    const sc = this.bigFace.scale.x;
+    const mark = (cx: number, cy: number, color: number): void => {
+      const lx = this.bigFace.position.x + cx * sc;
+      const ly = this.bigFace.position.y + cy * sc;
       this.lightGfx.circle(lx, ly, LIGHT_MARKER_R).stroke({ color, width: 1.5 });
       this.lightGfx.circle(lx, ly, 1.5).fill(color);
     };
     if (this.artTools.defaultLight) mark(this.fixedLight.x, this.fixedLight.y, LIGHT_MARKER_COLOR);
     for (const n of this.workingList) {
       if (n.kind !== "light") continue;
-      const t = this.cardToTexel(n.pos.x, n.pos.y); // card-px → texel
-      mark(t.tx, t.ty, n.tint ?? 0xffffff);
+      mark(n.pos.x, n.pos.y, n.tint ?? 0xffffff);
     }
   }
 
@@ -1023,7 +1163,9 @@ export class CardEditorPanel extends PixiPanel {
    *  the primary swatch. Joins the working list, so it shows in the dropdown +
    *  drives the preview lighting (and is sandbox DSL). */
   private addLightPrim(tx: number, ty: number): void {
-    const c = this.texelToCard(tx, ty);
+    const ref = this.cardLit();
+    if (!ref) return;
+    const c = this.texelToCard(ref, tx, ty);
     const node: VisualNode = {
       kind: "light",
       pos: { x: c.x, y: c.y },
@@ -1123,8 +1265,8 @@ export class CardEditorPanel extends PixiPanel {
     return null;
   }
 
-  /** Texel under the cursor on the PREVIEW card surface (light positions live in
-   *  the pinned preview sprite's texel space). */
+  /** Texel under the cursor on the PREVIEW card surface (the primary sprite's
+   *  footprint); callers convert it to shared card-px for the movable lights. */
   private locateCard(e: PointerEvent): { tx: number; ty: number } | null {
     if (!this.cardSurface) return null;
     const body = this.bodyRect;
@@ -1142,9 +1284,11 @@ export class CardEditorPanel extends PixiPanel {
       return;
     }
     if (tool === "light") {
-      // The cursor is a second light (in preview-sprite texel space); relight live.
+      // The cursor is a second light. `locateCard` gives the primary sprite's
+      // texel; store it in shared CARD-PX (so it lights every sprite) and relight.
       const hit = this.locateCard(e);
-      this.cursorLight = hit ? { x: hit.tx, y: hit.ty } : null;
+      const ref = this.cardLit();
+      this.cursorLight = hit && ref ? this.texelToCard(ref, hit.tx, hit.ty) : null;
       this.relight();
       return;
     }
@@ -1164,11 +1308,12 @@ export class CardEditorPanel extends PixiPanel {
     const tool = this.artTools.tool;
     if (tool === "light") {
       const hit = this.locateCard(e);
-      if (!hit) return;
+      const ref = this.cardLit();
+      if (!hit || !ref) return;
       e.preventDefault();
       if (e.button === 1) {
-        // Middle-click moves the fixed light.
-        this.fixedLight = { x: hit.tx, y: hit.ty };
+        // Middle-click moves the fixed light (card-surface texel → shared card-px).
+        this.fixedLight = this.texelToCard(ref, hit.tx, hit.ty);
         this.drawLightMarkers();
         this.relight();
       } else if (e.button === 0) {
@@ -1236,7 +1381,7 @@ export class CardEditorPanel extends PixiPanel {
    *  card preview, the edited channel canvas (or its master) for a paint channel,
    *  the master for diffuse. */
   private surfacePixels(stem: string, channel: SurfaceChannel): ImageData | null {
-    if (channel === "lit") return canvasData(this.litCanvas);
+    if (channel === "lit") return canvasData(this.cardLit()?.canvas ?? null);
     if (channel === "diffuse") {
       const tex = this.masterTex(stem, "diffuse");
       return tex ? textureData(tex) : null;
@@ -1392,6 +1537,7 @@ export class CardEditorPanel extends PixiPanel {
    *  selection change (not on each edit) so an in-progress field keeps focus. */
   private buildControls(): void {
     this.editControls.replaceChildren();
+    this.buildBloomControls();
     const node = this.selected;
     if (!node) return;
     switch (node.kind) {
@@ -1441,6 +1587,34 @@ export class CardEditorPanel extends PixiPanel {
     }
   }
 
+  /** (Re)build the bloom controls for the selected sprite's emissive — Threshold
+   *  / Radius / Intensity, seeded from {@link bloomFor}. Empty for a non-sprite
+   *  selection (hidden by `syncDomVisibility`). Each edit patches the stem's
+   *  override + relights, so the change is scoped to THAT emissive texture. */
+  private buildBloomControls(): void {
+    this.bloomControls.replaceChildren();
+    const stem = this.selectedSpriteStem();
+    if (!stem) return;
+    const bp = this.bloomFor(stem);
+    const header = document.createElement("div");
+    Object.assign(header.style, { color: "#a0a0b0", fontFamily: "sans-serif", fontSize: "11px", marginBottom: "4px" });
+    header.textContent = "Emissive bloom";
+    this.bloomControls.appendChild(header);
+    // Threshold: 0–255 emissive luma that blooms. Radius: % of the larger texel
+    // dim (resolution-independent). Intensity: add-back strength.
+    const thr = this.numberInput(bp.threshold, (v) => this.setBloom(stem, { threshold: v }));
+    Object.assign(thr, { min: "0", max: "255", step: "1" });
+    const rad = this.numberInput(bp.radiusFrac * 100, (v) => this.setBloom(stem, { radiusFrac: v / 100 }));
+    Object.assign(rad, { min: "0", step: "0.5" });
+    const inten = this.numberInput(bp.intensity, (v) => this.setBloom(stem, { intensity: v }));
+    Object.assign(inten, { min: "0", step: "0.1" });
+    this.bloomControls.append(
+      makeRow("Threshold", thr, "62px"),
+      makeRow("Radius %", rad, "62px"),
+      makeRow("Intensity", inten, "62px"),
+    );
+  }
+
   /** A field changed — re-render the card copy + the selection views from the
    *  mutated working list. Does NOT rebuild controls (keeps input focus). */
   private onEdit(): void {
@@ -1473,14 +1647,7 @@ export class CardEditorPanel extends PixiPanel {
   }
 
   private addRow(label: string, input: HTMLElement): void {
-    const row = document.createElement("div");
-    Object.assign(row.style, ROW_CSS);
-    const lbl = document.createElement("span");
-    Object.assign(lbl.style, CTRL_LABEL_CSS);
-    lbl.textContent = label;
-    row.appendChild(lbl);
-    row.appendChild(input);
-    this.editControls.appendChild(row);
+    this.editControls.appendChild(makeRow(label, input));
   }
 
   /** `fill` (default) stretches the input to the row width — for free-form text
@@ -1539,6 +1706,21 @@ export class CardEditorPanel extends PixiPanel {
     this.editControls.style.height = `${Math.max(0, body.height - g.controlsY - PAD)}px`;
   }
 
+  /** Float the bloom controls under the emissive square (top of the controls
+   *  band, right-aligned beneath that column — clear of the left-aligned edit
+   *  rows). No-op when the selection has no emissive square. */
+  private positionBloomControls(): void {
+    const g = this.geom;
+    if (!g) return;
+    const sq = g.squares.find((s) => s.kind === "emissive");
+    if (!sq) return;
+    const body = this.bodyRect;
+    this.bloomControls.style.left = `${body.left + sq.x}px`;
+    this.bloomControls.style.top = `${body.top + g.controlsY}px`;
+    // Wide enough for the label column (62px) + the 84px number input + padding.
+    this.bloomControls.style.width = `${Math.max(g.side, 172)}px`;
+  }
+
   /** Place the side sections + save button. The 💾 sits at the top-right of the
    *  body (over the right column); the art tools shift down below it, leaving the
    *  top-right strip free for a few more tools later. */
@@ -1566,6 +1748,8 @@ export class CardEditorPanel extends PixiPanel {
     const hasList = open && this.workingList.length > 0;
     this.select.style.display = hasList ? "" : "none";
     this.editControls.style.display = hasList && this.editControls.childElementCount > 0 ? "" : "none";
+    // Bloom controls: only for a sprite selection (the emissive square's column).
+    this.bloomControls.style.display = open && this.bloomControls.childElementCount > 0 ? "flex" : "none";
     // Left section + save button are ALWAYS visible while the panel is open; art
     // tools only for a sprite selection.
     this.leftSection.style.display = open ? "flex" : "none";
@@ -1586,13 +1770,14 @@ export class CardEditorPanel extends PixiPanel {
     this.unsubVis2();
     this.select.remove();
     this.editControls.remove();
+    this.bloomControls.remove();
     this.leftSection.remove();
     this.undoBtn.remove();
     this.redoBtn.remove();
     this.saveBtn.remove();
     this.paintOverlay.remove();
     this.paint.clear();
-    this.litTexture?.destroy(true);
+    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); }
     this.artTools.destroy();
     this.bigFace.destroy();
     this.smallFace.destroy();
@@ -1657,6 +1842,19 @@ function textureData(tex: Texture): ImageData | null {
   return ctx.getImageData(0, 0, w, h);
 }
 
+/** A label + control row (the edit-controls / bloom-controls row shape).
+ *  `labelWidth` overrides the default label column (the bloom labels are wider). */
+function makeRow(label: string, input: HTMLElement, labelWidth?: string): HTMLDivElement {
+  const row = document.createElement("div");
+  Object.assign(row.style, ROW_CSS);
+  const lbl = document.createElement("span");
+  Object.assign(lbl.style, CTRL_LABEL_CSS);
+  if (labelWidth) lbl.style.width = labelWidth;
+  lbl.textContent = label;
+  row.append(lbl, input);
+  return row;
+}
+
 /** Set a fixed-positioned DOM element's viewport rect. */
 function place(el: HTMLElement, left: number, top: number, w: number, h: number): void {
   el.style.left = `${left}px`;
@@ -1714,7 +1912,7 @@ function buildTabbedSection(labels: string[]): { root: HTMLDivElement; panes: HT
 }
 
 /** Extract a card's `::<key>>` block from one `.rd` source — only within a
- *  `<card>` bucket (so a same-named `<recipe>`/`<blueprint>` def can't shadow
+ *  `<card>` bucket (so a same-named `<recipe>` def can't shadow
  *  it). The block runs from `::key>` to the next sibling `::` def or bucket. */
 function extractCardBlock(text: string, key: string): string | null {
   const lines = text.split("\n");

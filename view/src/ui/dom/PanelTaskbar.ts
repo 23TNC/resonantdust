@@ -324,7 +324,7 @@ export class PanelTaskbar {
       // mode CSS together so the entry can't desync.
       unsubTaskbarIcon: panel.onTaskbarIconChange(() => this.reskinEntryFromPanel(entry)),
       // Title changes (suffix flips, external `setTitle` calls
-      // like the blueprints capacity counter) re-write the
+      // like a live capacity counter) re-write the
       // wide-text button label and tooltip. Icon-mode entries
       // still get the tooltip refresh — the glyph itself doesn't
       // carry the title text, so the tooltip is the only place

@@ -105,12 +105,6 @@ pub struct Bundle {
   /// envelope contains the cell (cf. `crate::worldgen::select_biome`), so this
   /// is a `Vec`, not a map.
   pub biomes: Vec<(String, Node)>,
-  /// `<blueprint>` defs by name (the `::id` node — its `@define` sets `&card`
-  /// the blueprint card spawned on request, and `&output` the card it builds).
-  pub blueprints: HashMap<String, Node>,
-  /// Blueprint names ordered by id (1-based), same sorted scheme as cards /
-  /// recipes — the discovery-bit index and wire id. Retires `blueprints/id.json`.
-  pub blueprint_ids: Vec<String>,
   /// Per-card identity precomputed once at load (`card_type` / per-type
   /// `def_id` / packed def). The worldgen + decode paths hit these per tile /
   /// per row, so they must be O(1) lookups, not per-call AST walks.
@@ -172,38 +166,6 @@ impl Bundle {
     (id != 0).then(|| self.recipe_ids.get(id as usize - 1)).flatten().map(String::as_str)
   }
 
-  pub fn blueprint(&self, name: &str) -> Option<&Node> {
-    self.blueprints.get(name)
-  }
-  /// Blueprint id for a name (1-based; `None` if unknown). This id is both the
-  /// discovery-bit index (`1 << (id - 1)` on the soul's `blueprints_*` field)
-  /// and the wire id the gate/client route on.
-  pub fn blueprint_def_id(&self, name: &str) -> Option<u16> {
-    self.blueprint_ids.iter().position(|n| n == name).map(|i| i as u16 + 1)
-  }
-  /// Blueprint name for an id (`id == 0` is the none sentinel).
-  pub fn blueprint_name(&self, id: u16) -> Option<&str> {
-    (id != 0).then(|| self.blueprint_ids.get(id as usize - 1)).flatten().map(String::as_str)
-  }
-
-  /// The card-ref a blueprint's `@define` writes to `slot`, `card::` prefix
-  /// stripped — `"card"` for the blueprint card spawned on request, `"output"`
-  /// for the card it builds. `None` if the blueprint or slot is absent.
-  fn blueprint_ref(&self, name: &str, slot: &str) -> Option<String> {
-    let define = self.blueprint(name)?.hook("define")?;
-    let mut s = crate::vm::Store::default();
-    let _ = crate::vm::run(
-      &define.body,
-      &mut s,
-      &[],
-      &crate::vm::Catalog::default(),
-      &crate::vm::Functions::default(),
-    );
-    match s.read(slot)? {
-      crate::vm::Cell::Sym(sym) => Some(sym.strip_prefix("card::").unwrap_or(&sym).to_string()),
-      _ => None,
-    }
-  }
   /// The recipe id a magnetic-flagged card is locked to — read from its
   /// `:data @define` `$recipe::<x> &magnetic.recipe set`. A magnetic card may
   /// only be consumed by this recipe (`recipe_state::validate_bindings`). `None`
@@ -249,28 +211,6 @@ impl Bundle {
   /// deadline by which the success recipe must complete or failure fires.
   pub fn magnetic_duration_ms(&self, packed: u16) -> Option<u64> {
     Some(self.magnetic_store(packed)?.read("magnetic.duration")?.as_int() as u64)
-  }
-
-  /// The blueprint *card* a blueprint spawns into the wrench panel on request.
-  pub fn blueprint_card(&self, name: &str) -> Option<String> {
-    self.blueprint_ref(name, "card")
-  }
-  /// The card a blueprint builds in-world when used.
-  pub fn blueprint_output(&self, name: &str) -> Option<String> {
-    self.blueprint_ref(name, "output")
-  }
-
-  /// The blueprint id whose **`card`** (the spawned-on-request card) is
-  /// `card_name`. Recipes unlock a blueprint by referencing its card
-  /// (`$card::blueprint_nd_furnace`), which is distinct from the `<blueprint>`
-  /// registry key (`nd_furnace`); this resolves that reference. `None` if no
-  /// blueprint declares that card.
-  pub fn blueprint_id_for_card(&self, card_name: &str) -> Option<u16> {
-    self
-      .blueprint_ids
-      .iter()
-      .position(|n| self.blueprint_card(n).as_deref() == Some(card_name))
-      .map(|i| i as u16 + 1)
   }
 
   /// The card's `type` aspect — the literal set by `<type> &aspect.type set` in
@@ -374,8 +314,6 @@ pub fn load(sources: &[(String, String)]) -> Result<Bundle, Vec<LoadError>> {
       &mut b.recipes,
       &mut b.recipe_ids,
       &mut b.biomes,
-      &mut b.blueprints,
-      &mut b.blueprint_ids,
     );
   }
 
@@ -499,9 +437,8 @@ fn parse_card_def_id(node: &Node) -> Option<u16> {
   None
 }
 
-/// Index `<card>` / `<recipe>` / `<blueprint>` defs by id (inline facet stripped:
+/// Index `<card>` / `<recipe>` defs by id (inline facet stripped:
 /// `::a:visuals` → `a`), and collect `<biome>` defs in declaration order.
-#[allow(clippy::too_many_arguments)]
 fn index_defs(
   node: &Node,
   cards: &mut HashMap<String, Node>,
@@ -509,8 +446,6 @@ fn index_defs(
   recipes: &mut HashMap<String, Node>,
   recipe_ids: &mut Vec<String>,
   biomes: &mut Vec<(String, Node)>,
-  blueprints: &mut HashMap<String, Node>,
-  blueprint_ids: &mut Vec<String>,
 ) {
   for bucket in &node.children {
     match &bucket.header {
@@ -528,7 +463,6 @@ fn index_defs(
         let (target, order) = match &bucket.header {
           Header::Bucket(n) if n == "card" => (&mut *cards, &mut *card_ids),
           Header::Bucket(n) if n == "recipe" => (&mut *recipes, &mut *recipe_ids),
-          Header::Bucket(n) if n == "blueprint" => (&mut *blueprints, &mut *blueprint_ids),
           _ => continue,
         };
         for d in &bucket.children {
@@ -720,35 +654,6 @@ mod tests {
     // lifecycle detection: only `status` writes a magnetic.* slot
     assert!(b.is_magnetic("status"));
     assert!(!b.is_magnetic("forest"));
-  }
-
-  #[test]
-  fn indexes_blueprints_with_card_and_output_refs() {
-    let srcs = vec![
-      src("aspects.rd", "<aspect>\n  ::type>\n    @define>\n      traits &section set\n"),
-      src(
-        "cards.rd",
-        "<card>\n\
-         \x20 ::blueprint_furnace>\n    :data>\n      @define>\n        blueprint &aspect.type set\n\
-         \x20 ::building_furnace>\n    :data>\n      @define>\n        tile &aspect.type set\n",
-      ),
-      src(
-        "blueprints.rd",
-        "<blueprint>\n  ::furnace>\n    @define>\n      $card::blueprint_furnace &card set\n      $card::building_furnace &output set\n",
-      ),
-    ];
-    let b = load(&srcs).expect("clean load");
-    assert!(b.blueprint("furnace").is_some());
-    // 1-based id (single blueprint) + round-trip
-    assert_eq!(b.blueprint_def_id("furnace"), Some(1));
-    assert_eq!(b.blueprint_name(1), Some("furnace"));
-    assert_eq!(b.blueprint_name(0), None);
-    // card / output refs resolve to bare card names
-    assert_eq!(b.blueprint_card("furnace").as_deref(), Some("blueprint_furnace"));
-    assert_eq!(b.blueprint_output("furnace").as_deref(), Some("building_furnace"));
-    // and those names pack to real defs
-    assert!(b.packed_def("blueprint_furnace").is_some());
-    assert!(b.packed_def("building_furnace").is_some());
   }
 
   #[test]

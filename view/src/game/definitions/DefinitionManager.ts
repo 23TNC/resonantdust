@@ -9,8 +9,8 @@
 //!
 //! Scope: what the viewport's card/tile draw needs — `decode` (style + art +
 //! aspects), `cardFactionOverride` (faction art folder), and `label` /
-//! `description` (locale strings, for the details panel). Recipe matching /
-//! blueprints are not ported yet.
+//! `description` (locale strings, for the details panel). Recipe matching is
+//! not ported yet.
 
 import { onContentReloaded, sharedContent, sharedLocales } from "./contentBoot";
 

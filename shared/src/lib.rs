@@ -122,11 +122,6 @@ impl Content {
         defs::aspect_value(&self.bundle, packed, name)
     }
 
-    /// The blueprint catalog (wrench panel).
-    pub fn all_blueprints(&self) -> Vec<defs::BlueprintInfo> {
-        defs::all_blueprints(&self.bundle)
-    }
-
     /// The texture registry — every `<asset>` pack's render metadata.
     pub fn all_textures(&self) -> Vec<defs::TextureDef> {
         defs::all_textures(&self.bundle)
@@ -341,12 +336,6 @@ impl Content {
     #[wasm_bindgen(js_name = aspectValue)]
     pub fn aspect_value_js(&self, packed: u16, name: &str) -> Option<i64> {
         self.aspect_value(packed, name)
-    }
-
-    /// `allBlueprints()` → the blueprint catalog as JSON.
-    #[wasm_bindgen(js_name = allBlueprints)]
-    pub fn all_blueprints_js(&self) -> Result<String, JsValue> {
-        serde_json::to_string(&self.all_blueprints()).map_err(jserr)
     }
 
     /// `allTextures()` → the texture registry as JSON.

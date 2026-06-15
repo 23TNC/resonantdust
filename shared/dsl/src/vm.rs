@@ -651,10 +651,6 @@ pub enum Effect {
   /// `&slot.aspect.x dec`/`inc`/`set` — per-row tile-stock mutation. `delta` is
   /// the signed change for inc/dec; `set` carries the absolute value with abs=true.
   Stock { slot: String, aspect: String, delta: i64, abs: bool },
-  /// `$blueprint::x &…owner.blueprint set` — FLAGGED: blueprint unlock has no
-  /// dedicated op yet (content guesses a slot `set`); recorded for the gate to
-  /// resolve once the unlock semantics land. cf. project_definition_language.
-  Blueprint { def: String, target: String },
 }
 
 /// What `exec` is running, so the recipe verbs know how to behave. `Data` is the
@@ -779,7 +775,7 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             // In `@output`, `set` is path-dispatched the way the old engine's
             // `resolve_target` keyed on the path tail: a `.style` write is a
             // progress style, `sys.duration` is the action window, `.aspect.`
-            // is a tile-stock op, `.blueprint` is a (flagged) unlock.
+            // is a tile-stock op.
             if mode == Mode::Output {
               // Expand any `as`-handle root in the target so the emitted effect
               // names the created card (`created.N`), not the alias.
@@ -796,9 +792,6 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
                   delta: val.int(),
                   abs: true,
                 });
-              } else if let Some(slot) = taddr.strip_suffix(".blueprint") {
-                let def = match &val { Item::Sym(s) => s.clone(), _ => String::new() };
-                plan.effects.push(Effect::Blueprint { def, target: slot.to_string() });
               }
             }
             let cell = match val {
@@ -1120,19 +1113,13 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               Item::Sym(s) => s,
               _ => String::new(),
             };
-            // a blueprint def created into `.blueprint` is an unlock (flagged);
-            // everything else lands as a card in the target container.
-            if let Some(slot) = target.strip_suffix(".blueprint") {
-              plan.effects.push(Effect::Blueprint { def, target: slot.to_string() });
-            } else {
-              // Remember this card as `created.N` (Nth `Create` in the plan) so a
-              // following `as` can name it. `create` stays stack-neutral — the
-              // handle lives in `last_created`, not on the operand stack — so
-              // existing bare-`create` lines still validate.
-              let idx = plan.effects.iter().filter(|e| matches!(e, Effect::Create { .. })).count();
-              plan.effects.push(Effect::Create { def, target });
-              last_created = Some(format!("created.{idx}"));
-            }
+            // Remember this card as `created.N` (Nth `Create` in the plan) so a
+            // following `as` can name it. `create` stays stack-neutral — the
+            // handle lives in `last_created`, not on the operand stack — so
+            // existing bare-`create` lines still validate.
+            let idx = plan.effects.iter().filter(|e| matches!(e, Effect::Create { .. })).count();
+            plan.effects.push(Effect::Create { def, target });
+            last_created = Some(format!("created.{idx}"));
           }
           // `create … &name as` — bind a name to the card the preceding `create`
           // made, so later lines address it as a path root (`&name…`/`*name…`).
@@ -1666,7 +1653,6 @@ mod tests {
       &slot.1.0 destroy
       &slot.0.0.aspect.wood dec
       $card::corpus_dim &slot.1.0.owner.inventory create
-      $card::blueprint_nd_furnace &slot.1.0.owner.blueprint set
 ";
 
   #[test]
@@ -1691,7 +1677,6 @@ mod tests {
       Effect::Destroy { slot: "slot.1.0".into() },
       Effect::Stock { slot: "slot.0.0".into(), aspect: "wood".into(), delta: -1, abs: false },
       Effect::Create { def: "card::corpus_dim".into(), target: "slot.1.0.owner.inventory".into() },
-      Effect::Blueprint { def: "card::blueprint_nd_furnace".into(), target: "slot.1.0.owner".into() },
     ]);
   }
 

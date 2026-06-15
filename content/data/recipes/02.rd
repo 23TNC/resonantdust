@@ -12,7 +12,6 @@
       &slot.1.0.aspect.wood dec
       $card::corpus_dim &slot.2.0.owner.inventory create
       $card::log &slot.2.0.owner.inventory create
-      $card::blueprint_nd_furnace &slot.2.0.owner.blueprint set   ; FLAG blueprint.unlock has no op yet — guessed as a slot set
 
   ::stick>
     @input>

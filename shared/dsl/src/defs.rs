@@ -272,41 +272,6 @@ pub fn recipe_meta(bundle: &Bundle, name: &str) -> Option<RecipeMeta> {
   Some(meta)
 }
 
-/// A blueprint catalog entry, resolved from the `<blueprint>` bucket.
-#[derive(Serialize, Clone, Debug, Default, PartialEq)]
-pub struct BlueprintInfo {
-  /// Bundle blueprint id (the discovery-bit index + wire id).
-  pub id: u16,
-  /// Blueprint registry key (e.g. `"nd_furnace"`).
-  pub key: String,
-  /// The blueprint *card* spawned on request, + its packed def.
-  pub blueprint_card: String,
-  pub blueprint_packed: u16,
-  /// The card it builds in-world, + its packed def.
-  pub output_card: String,
-  pub output_packed: u16,
-}
-
-/// Resolve a blueprint by Bundle id. `None` if unknown.
-pub fn blueprint_info(bundle: &Bundle, id: u16) -> Option<BlueprintInfo> {
-  let key = bundle.blueprint_name(id)?.to_string();
-  let blueprint_card = bundle.blueprint_card(&key)?;
-  let output_card = bundle.blueprint_output(&key)?;
-  Some(BlueprintInfo {
-    id,
-    blueprint_packed: bundle.packed_def(&blueprint_card).unwrap_or(0),
-    output_packed: bundle.packed_def(&output_card).unwrap_or(0),
-    blueprint_card,
-    output_card,
-    key,
-  })
-}
-
-/// Every blueprint in id order — the wrench-panel catalog.
-pub fn all_blueprints(bundle: &Bundle) -> Vec<BlueprintInfo> {
-  (1..=bundle.blueprint_ids.len() as u16).filter_map(|id| blueprint_info(bundle, id)).collect()
-}
-
 fn sym(c: Option<&Cell>) -> Option<String> {
   match c {
     Some(Cell::Sym(s)) => Some(s.clone()),

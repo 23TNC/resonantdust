@@ -1,7 +1,7 @@
 # content/
 
 Game content as a **stack-VM DSL**. The authored content is `*.rd` programs —
-cards, recipes, aspects, blueprints, biomes, plus their visuals — interpreted by
+cards, recipes, aspects, biomes, plus their visuals — interpreted by
 the **shared VM** in [`../shared/`](../shared/AGENTS.md) and **loaded at runtime**
 (changing content needs no recompile). The old JSON catalogs, the
 `resonantdust-content` crate, and `gen-ids.py` / `id.json` are **gone** — this is
@@ -15,7 +15,7 @@ model). Validate the whole corpus with `bin/shared corpus`.
 
 | Path | What |
 | --- | --- |
-| `data/` | The `:data` facets — server-authoritative definitions. `cards/` (souls, tiles, faculties, requisites, status, blueprints…), `recipes/`, `aspect/`, `blueprints/`, `biomes/`. |
+| `data/` | The `:data` facets — server-authoritative definitions. `cards/` (souls, tiles, faculties, requisites, status…), `recipes/`, `aspect/`, `biomes/`. |
 | `visuals/` | The `:visuals` facets — client-only rendering. `cards/` (per-card primitives / lights / portraits), `manifest/` (per-asset texture manifests), `asset/`, `functions/`. |
 | `locales/` | Locale strings, by domain: `cards/`, `aspects/`, `recipes/`, `panels/`. **Embedded into the content wasm** at build (`bin/content wasm`) — the client reads strings via wasm exports, not these JSON at runtime. |
 | `manifest.json` | Top-level asset manifest. |
