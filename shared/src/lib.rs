@@ -476,6 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn real_corpus_loads_with_r2_wiring() {
+        // Load every content/**/*.rd from disk and build a Content — exercises the
+        // real asset/functions/manifest `.rd` (the `^r2` + `"` sigil + category
+        // wiring), catching parse/resolution errors `bin/shared check` can't.
+        use std::fs;
+        use std::path::Path;
+        fn collect(dir: &Path, out: &mut Vec<(String, String)>) {
+            for e in fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    collect(&p, out);
+                } else if p.extension().and_then(|x| x.to_str()) == Some("rd") {
+                    out.push((p.to_string_lossy().into_owned(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../content");
+        let mut srcs = Vec::new();
+        collect(Path::new(root), &mut srcs);
+        assert!(srcs.len() > 5, "found {} .rd files under {root}", srcs.len());
+        Content::load(srcs).expect("real corpus loads (asset/functions/manifest + ^r2)");
+    }
+
+    #[test]
     fn bad_content_reports_problems() {
         let err = Content::load(vec![("b.rd".into(), "<functions:f>\n  2 &aspect.ghost set\n".into())]).unwrap_err();
         assert!(err.contains("ghost"), "{err}");

@@ -12,31 +12,12 @@ import type { LodTextureManager } from "./textures/LodTextureManager";
  * bucket actually backs the Texture.
  */
 export interface ObjectSpriteRequest {
-  /** Catalog grouping (e.g. `forest`). Resolves to `master/<category>/`. */
-  category: string;
-  /** Object within the category (e.g. `flora`). Resolves to the
-   *  `<category>/<object>/` pack-folder. */
-  name: string;
-  /** Target draw size in screen px at `scale: 1.0`. Drives the
-   *  LOD picker: `LodTextureManager` resolves the smallest LOD
-   *  bucket ≥ this. Sprite scale is then
-   *  `(desiredSize / tex.width) × scale`. */
+  /** Resolved texture STEM (`<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>`)
+   *  from the wasm `^r2` resolver — the manager just LOD-picks + fetches it. */
+  texture: string;
+  /** Target draw size in screen px at `scale: 1.0`. Drives the LOD picker;
+   *  sprite scale is then `(desiredSize / tex.width) × scale`. */
   desiredSize: number;
-  /** Seed used to pick a specific variant from the object's pack.
-   *  Stable seeds (e.g. hashed tile coordinates) give stable picks
-   *  across syncs. Ignored when `index` is set. */
-  seed: number;
-  /** Optional variant pinner — the i-th variation (1-based). Used by
-   *  card-declared centre objects that want a specific variant;
-   *  tile-decoration ring instances leave this unset and pick via
-   *  `seed`. */
-  index?: number;
-  /** Object-axis art modifier — `<object.faction>` dirs resolve first.
-   *  Used so tile centre objects on faction-owned territory render in
-   *  the owner's faction palette. */
-  faction?: string;
-  /** Category-axis art modifier — `<category.biome>` dirs resolve first. */
-  biome?: string;
   /** Sprite position in the outer Container's coordinate space. */
   x: number;
   y: number;
@@ -143,15 +124,7 @@ export class ObjectManager {
     out.length = 0;
 
     for (const req of reqs) {
-      const tex = this.lodTextures.get({
-        category: req.category,
-        object: req.name,
-        desiredSize: req.desiredSize,
-        seed: req.seed,
-        index: req.index,
-        faction: req.faction,
-        biome: req.biome,
-      });
+      const tex = this.lodTextures.get(req.texture, req.desiredSize);
       const sp = this.acquire(s);
       sp.texture = tex;
       // Apply anchor here (not at acquire) so a pooled sprite reused

@@ -74,6 +74,19 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
   Some(e)
 }
 
+/// Stack effect of a `^system` token (paired with `call`). Most system calls are
+/// arity-uniform host-getters / prim constructors — `^x` pushes the target and
+/// the following `call` is (1,1), so `(0,1)` here nets the value. `^r2` is the
+/// exception: it consumes 5 stack args (`category object part index seed`) and
+/// (with its `call`) leaves the resolved stem, so model it `(5,1)` to keep the
+/// `<args> ^r2 call` idiom stack-neutral.
+fn sys_effect(s: &str) -> (u32, u32) {
+  match s {
+    "r2" => (5, 1),
+    _ => (0, 1),
+  }
+}
+
 /// Validate one file's tree. Empty result means clean.
 pub fn validate(root: &Node) -> Vec<Diagnostic> {
   let mut diags = Vec::new();
@@ -128,6 +141,7 @@ fn check_body(node: &Node, path: &str, diags: &mut Vec<Diagnostic>) {
       // enum/type token like `faculty`/`rtl`) that pushes one value.
       let (pops, pushes) = match tok {
         Token::Word(w) => op_effect(w).unwrap_or((0, 1)),
+        Token::System(s) => sys_effect(s),
         _ => (0, 1),
       };
       if depth < pops as i64 {
@@ -187,6 +201,7 @@ pub(crate) fn render(toks: &[Token]) -> String {
       Token::Number(n) => n.to_string(),
       Token::Float(f) => f.to_string(),
       Token::Word(s) => s.clone(),
+      Token::Str(s) => format!("\"{s}"),
     })
     .collect::<Vec<_>>()
     .join(" ")

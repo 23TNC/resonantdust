@@ -17,8 +17,9 @@ services:
 
   test:
     image: clockworklabs/spacetime:latest
+    # repo root (not just shared/) so tests can load the real content/ corpus.
     volumes:
-      - .:/workspace/shared
+      - ..:/workspace
     working_dir: /workspace/shared
     entrypoint: ["cargo"]
     command: ["test", "--workspace"]

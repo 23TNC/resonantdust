@@ -49,6 +49,11 @@ pub enum Token {
   Float(f64),
   /// bare word: an op (`set`, `if`, `goto`, …) or a content constant (`rtl`).
   Word(String),
+  /// `"text` — a STRING literal: pushes the literal string as a symbol, verbatim.
+  /// A prefix sigil (no closing quote; whitespace-delimited like every token), so
+  /// it never collides with a keyword AND escapes float parsing (`"1.5` is the
+  /// string `1.5`, not a float). Used for literal paths/names (`"tile`).
+  Str(String),
 }
 
 /// The header / role of a node.
@@ -144,6 +149,7 @@ fn classify_token(t: &str) -> Token {
     '*' => Token::Value(t[1..].to_string()),
     ':' => Token::Label(t[1..].to_string()),
     '^' => Token::System(t[1..].to_string()),
+    '"' => Token::Str(t[1..].to_string()),
     '#' => Token::Color(t.to_string()),
     _ => {
       if let Ok(n) = t.parse::<i64>() {
@@ -344,7 +350,7 @@ mod tests {
 
   #[test]
   fn classifies_token_sigils() {
-    let src = "<functions:f>\n  $card::corpus *slot.1.0.def_id &aspect.cost -1 #395C39 set :loop ^biome\n";
+    let src = "<functions:f>\n  $card::corpus *slot.1.0.def_id &aspect.cost -1 #395C39 set :loop ^biome \"tile \"1.5\n";
     let root = parse(src).unwrap();
     let toks = instr(&root.children[0], 0);
     assert_eq!(toks[0], Token::Const("card::corpus".into()));
@@ -355,6 +361,9 @@ mod tests {
     assert_eq!(toks[5], Token::Word("set".into()));
     assert_eq!(toks[6], Token::Label("loop".into()));
     assert_eq!(toks[7], Token::System("biome".into()));
+    // `"text` → a string literal, verbatim — even when it looks like a float.
+    assert_eq!(toks[8], Token::Str("tile".into()));
+    assert_eq!(toks[9], Token::Str("1.5".into()));
   }
 
   #[test]

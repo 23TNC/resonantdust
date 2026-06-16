@@ -26,18 +26,12 @@ export interface Vec2 {
   y: number;
 }
 
-/** Reference to a LOD-pyramid asset (sprite art, or a textured fill) in the
- *  unified `<category>/<object>/<variation>` layout. `category` + `name` (the
- *  object) identify the art; `index` pins the variation (1-based fixed), else the
- *  renderer picks pseudo-randomly per seed (random variation). The biome/faction
- *  modifier axes are NOT here — they're resolved from game state at draw time. */
-export interface AssetRef {
-  /** Top-level catalog grouping (e.g. `forest`, `requisite`, `soul`). */
-  category: string;
-  /** Object within the category (e.g. `flora`, `axe`, `portrait`). */
-  name: string;
-  index?: number;
-}
+/** A fully-resolved texture STEM produced by the wasm `^r2` resolver:
+ *  `<category>.<biome>/<object>.<faction>/<id>.<count>.<part>`. The client appends
+ *  the LOD `<size>/` + per-channel `.<map>.png` and fetches from R2 — all
+ *  variation/biome/faction/part resolution already happened in the VM. Empty/absent
+ *  → no art (the sprite hides / a fill stays solid). */
+export type AssetRef = string;
 
 /** The numeric fields the engine eases `current → target`. A primitive's
  *  discrete fields (`kind`, `texture`, `text`) are applied immediately on

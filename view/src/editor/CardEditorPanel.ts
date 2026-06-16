@@ -5,7 +5,7 @@ import type { PanelTaskbar } from "../ui/dom/PanelTaskbar";
 import type { UiEditMode } from "../ui/dom/UiEditMode";
 import { PixiPanel } from "../ui/dom/PixiPanel";
 import { ArtToolsPanel } from "./ArtToolsPanel";
-import { masterVariantStem, masterChannelUrl, loadMasterTexture, type MasterChannel } from "./masterTextures";
+import { masterChannelUrl, loadMasterTexture, type MasterChannel } from "./masterTextures";
 import { type Surface, type SurfaceChannel, type Brush, surfaceTexel, outlineRect, cssColor, floodFill } from "./brush";
 import { PaintHistory } from "./paintHistory";
 import { type Light, composite, Bloom } from "./lighting";
@@ -505,7 +505,7 @@ export class CardEditorPanel extends PixiPanel {
     this.cursorLight = null;
     // Designate the card's main (first) sprite as the paint-surface owner, so it
     // stays constant as other primitives are selected. ALL sprites are lit.
-    this.previewSpriteNode = this.workingList.find((n) => n.kind === "sprite" && !!n.texture?.name) ?? null;
+    this.previewSpriteNode = this.workingList.find((n) => n.kind === "sprite" && !!n.texture) ?? null;
     this.selectedIndex = this.workingList.length > 0 ? 0 : -1;
     this.populateSelect();
     this.select.selectedIndex = this.selectedIndex;
@@ -594,7 +594,7 @@ export class CardEditorPanel extends PixiPanel {
     this.select.replaceChildren();
     this.workingList.forEach((n, i) => {
       const opt = document.createElement("option");
-      const tex = n.texture?.name ? ` · ${n.texture.name}` : "";
+      const tex = n.texture ? ` · ${n.texture}` : "";
       opt.value = String(i);
       opt.textContent = `${i}: ${n.kind}${tex}`;
       this.select.appendChild(opt);
@@ -789,9 +789,7 @@ export class CardEditorPanel extends PixiPanel {
     const node = this.selected;
     this.surfaces = [];
     // Selection drives the prim square + channel squares + their paint surfaces.
-    const stem = node?.kind === "sprite" && node.texture?.name
-      ? masterVariantStem(node.texture.name, this.faction, this.seed, node.texture.index)
-      : null;
+    const stem = node?.kind === "sprite" && node.texture ? node.texture : null;
     this.activeStem = stem;
     if (g && node && stem) {
       const primX = g.squares.find((s) => s.kind === "prim")?.x ?? 0;
@@ -940,8 +938,8 @@ export class CardEditorPanel extends PixiPanel {
    *  re-runs this via relayout). */
   private buildLitSprites(): void {
     const desired = this.workingList
-      .filter((n) => n.kind === "sprite" && !!n.texture?.name)
-      .map((n) => ({ node: n, stem: masterVariantStem(n.texture!.name, this.faction, this.seed, n.texture!.index) }))
+      .filter((n) => n.kind === "sprite" && !!n.texture)
+      .map((n) => ({ node: n, stem: n.texture! }))
       .filter((d): d is { node: VisualNode; stem: string } => d.stem !== null);
     const sig = desired.map((d) => d.stem).join("|");
     // A sprite that's wanted but not yet built, whose master is now available →
@@ -1064,8 +1062,8 @@ export class CardEditorPanel extends PixiPanel {
    *  or has no texture) — the key its bloom override is stored under. */
   private selectedSpriteStem(): string | null {
     const n = this.selected;
-    if (n?.kind !== "sprite" || !n.texture?.name) return null;
-    return masterVariantStem(n.texture.name, this.faction, this.seed, n.texture.index);
+    if (n?.kind !== "sprite" || !n.texture) return null;
+    return n.texture;
   }
 
   /** Every light shading the card, in the shared CARD-PX space: the fixed (white)
@@ -1555,30 +1553,14 @@ export class CardEditorPanel extends PixiPanel {
       case "progress":
         this.addRow("Style", this.numberInput(node.style ?? 1, (v) => { node.style = v; this.onEdit(); }));
         break;
-      case "sprite": {
-        // The Texture field edits the combined `<category>/<object>` path (the
-        // unified layout); a value with no slash is treated as category===object.
-        const texPath = (t?: { category: string; name: string } | null) => (t ? `${t.category}/${t.name}` : "");
-        const parseTex = (v: string) => {
-          const slash = v.indexOf("/");
-          return slash > 0
-            ? { category: v.slice(0, slash), name: v.slice(slash + 1) }
-            : { category: v, name: v };
-        };
-        this.addRow("Texture", this.textInput(texPath(node.texture), (v) => {
-          node.texture = { ...parseTex(v), index: node.texture?.index };
+      case "sprite":
+        // `texture` is the resolved stem (<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>)
+        // the wasm `^r2` emits; editing it overrides the PREVIEW (the card's real
+        // art comes from its DSL pack+variant, resolved at draw time).
+        this.addRow("Texture", this.textInput(node.texture ?? "", (v) => {
+          node.texture = v ? v : null;
           this.onEdit();
         }, false));
-        // Variant index: 1-based pin; 0/empty → unset, so the card seed picks it.
-        this.addRow("Index", this.numberInput(node.texture?.index ?? 0, (v) => {
-          node.texture = {
-            category: node.texture?.category ?? "",
-            name: node.texture?.name ?? "",
-            index: v > 0 ? v : undefined,
-          };
-          this.onEdit();
-        }));
-      }
         this.addRow("Pos X", this.numberInput(node.pos.x, (v) => { node.pos.x = v; this.onEdit(); }));
         this.addRow("Pos Y", this.numberInput(node.pos.y, (v) => { node.pos.y = v; this.onEdit(); }));
         this.addRow("Width", this.numberInput(node.size.x, (v) => { node.size.x = v; this.onEdit(); }));

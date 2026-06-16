@@ -86,7 +86,10 @@ async function main(): Promise<void> {
   const textures = new TextureManager(app.renderer);
   const lodTextures = new LodTextureManager(textures, app.renderer);
   const objects = new ObjectManager(lodTextures);
-  const assetsReady = lodTextures.prewarm();
+  // No build-time texture index to pre-warm anymore — textures resolve per-stem
+  // from the wasm VM and stream from R2 on first reference (white fallback until
+  // they land). Assets are "ready" immediately.
+  const assetsReady = Promise.resolve();
 
   const scenes = new SceneManager(app);
 

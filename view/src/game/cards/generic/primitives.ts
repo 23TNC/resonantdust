@@ -174,9 +174,7 @@ export class FillPrim extends BasePrim {
     // (white / hex) have no normal map, so the lit shader uses the flat-up
     // fallback and they get distance falloff + ambient only.
     if (n.texture) {
-      const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
-        dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction, biome: this.deps.biome,
-      });
+      const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
       this.node.setTextures(r.texture, r.normal, r.emissive);
     } else if (this.kind === "hex" && this.deps.hexTexture) {
       this.node.setTextures(this.deps.hexTexture, null);
@@ -213,9 +211,7 @@ export class SpritePrim extends BasePrim {
       return;
     }
     this.node.visible = true;
-    const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), {
-      dpr: box.dpr, seed: this.deps.seed, faction: this.deps.faction, biome: this.deps.biome,
-    });
+    const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
     this.node.setTextures(r.texture, r.normal, r.emissive);
     this.baseScale = r.scale;
     setAnchor(this.node, n);

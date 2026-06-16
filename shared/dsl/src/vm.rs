@@ -164,26 +164,53 @@ impl Catalog {
       }
     }
   }
-  /// Load all `<manifest>` objects: each `::id` becomes `{faction → facet data}`.
+  /// Load all `<manifest>` categories: each `::category` becomes a `Cell::Map`
+  /// `{ "@" → category @define (e.g. &biomes), <object> → object facet @define
+  /// (&var_id/&var_count/&parts/&factions) }`. The `"@"` key holds category-axis
+  /// data (it can't collide with an object name); object facets carry the
+  /// existence index the `^r2` resolver reads.
   pub fn add_manifest(&mut self, root: &Node) {
     for b in &root.children {
       if b.header == Header::Bucket("manifest".into()) {
         for d in &b.children {
           if let Header::Def(id) = &d.header {
-            let mut factions = Vec::new();
+            let mut entries = Vec::new();
+            // category-level @define (biomes) under the reserved "@" key.
+            if let Some(h) = d.hook("define") {
+              let mut s = Store::default();
+              let _ = run(&h.body, &mut s, &[], &Catalog::default(), &Functions::default());
+              entries.push(("@".to_string(), s.root));
+            }
             for f in &d.children {
               if let Header::Facet(fname) = &f.header {
                 if let Some(h) = f.hook("define") {
                   let mut s = Store::default();
                   let _ = run(&h.body, &mut s, &[], &Catalog::default(), &Functions::default());
-                  factions.push((fname.clone(), s.root));
+                  entries.push((fname.clone(), s.root));
                 }
               }
             }
-            self.manifests.insert(id.clone(), Cell::Map(factions));
+            self.manifests.insert(id.clone(), Cell::Map(entries));
           }
         }
       }
+    }
+  }
+
+  /// The object facet cell (`&var_id`/`&var_count`/`&parts`/`&factions`) for a
+  /// `(category, object)`. Lineage-aware on the category. `None` if absent.
+  pub fn manifest_obj(&self, category: &str, object: &str) -> Option<&Cell> {
+    match catalog_head(&self.manifests, category) {
+      Some(Cell::Map(m)) => m.iter().find(|(k, _)| k == object).map(|(_, c)| c),
+      _ => None,
+    }
+  }
+
+  /// The category-level cell (the `"@"` entry — `&biomes`) for a category.
+  pub fn manifest_cat(&self, category: &str) -> Option<&Cell> {
+    match catalog_head(&self.manifests, category) {
+      Some(Cell::Map(m)) => m.iter().find(|(k, _)| k == "@").map(|(_, c)| c),
+      _ => None,
     }
   }
   /// Load all `<aspect>` records: run each `::id @define` into a record cell.
@@ -543,6 +570,74 @@ impl Item {
   }
 }
 
+fn host_int(host: &[(String, Cell)], k: &str) -> i64 {
+  host.iter().find(|(kk, _)| kk == k).map(|(_, c)| c.as_int()).unwrap_or(0)
+}
+
+/// True if CELL is an `Arr` containing the int V — used to test override
+/// existence (is faction F / biome B present for this object/category?).
+fn arr_contains(cell: Option<&Cell>, v: i64) -> bool {
+  matches!(cell, Some(Cell::Arr(a)) if a.iter().any(|x| x.as_int() == v))
+}
+
+/// Read a named `Arr` field out of a manifest facet cell as a Vec<i64>.
+fn facet_ints(cell: &Cell, key: &str) -> Vec<i64> {
+  match cell {
+    Cell::Map(m) => match m.iter().find(|(k, _)| k == key).map(|(_, c)| c) {
+      Some(Cell::Arr(a)) => a.iter().map(Cell::as_int).collect(),
+      _ => Vec::new(),
+    },
+    _ => Vec::new(),
+  }
+}
+
+/// Resolve a texture STEM `<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>` from
+/// the manifest — the `^r2` intrinsic's core. Picks a variation (fixed 1-based
+/// `index`, else `seed % len` — `seed` is EXPLICIT so a tile ring can vary per
+/// slot), then resolves the biome/faction dirs against the manifest's override-
+/// existence (falling to `.0` when absent; biome/faction come from `host`). The
+/// client appends `lod/<size>/` + the per-channel `.<map>.png` suffix. Empty
+/// string when the object is unknown / has no variations (→ client white-fallback).
+fn resolve_r2(
+  cat: &Catalog,
+  host: &[(String, Cell)],
+  category: &str,
+  object: &str,
+  part: i64,
+  index: i64,
+  seed: i64,
+) -> String {
+  let Some(facet) = cat.manifest_obj(category, object) else { return String::new() };
+  let ids = facet_ints(facet, "var_id");
+  let counts = facet_ints(facet, "var_count");
+  let len = ids.len().min(counts.len());
+  if len == 0 {
+    return String::new();
+  }
+  let i = if index >= 1 {
+    ((index - 1) as usize) % len
+  } else {
+    (seed.rem_euclid(len as i64)) as usize
+  };
+  let (id, count) = (ids[i], counts[i]);
+
+  let faction = host_int(host, "faction");
+  let fac_present = match facet {
+    Cell::Map(m) => arr_contains(m.iter().find(|(k, _)| k == "factions").map(|(_, c)| c), faction),
+    _ => false,
+  };
+  let fdir = if fac_present { faction } else { 0 };
+
+  let biome = host_int(host, "biome");
+  let bio_present = cat
+    .manifest_cat(category)
+    .map(|c| arr_contains(match c { Cell::Map(m) => m.iter().find(|(k, _)| k == "biomes").map(|(_, c)| c), _ => None }, biome))
+    .unwrap_or(false);
+  let bdir = if bio_present { biome } else { 0 };
+
+  format!("{category}.{bdir}/{object}.{fdir}/{id}.{count}.{part}")
+}
+
 fn hash(x: i64) -> i64 {
   let mut z = (x as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
   z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -755,6 +850,8 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
           None => st.push(Item::Sym(s.clone())),
         },
         Token::System(s) => st.push(Item::Sys(s.clone())),
+        // `"text` — a literal string symbol, verbatim (no keyword/float ambiguity).
+        Token::Str(s) => st.push(Item::Sym(s.clone())),
         Token::Slot(s) => st.push(Item::Addr(s.clone())),
         Token::Value(s) => match resolve(store, cat, s) {
           Some(Cell::Sym(sym)) => st.push(Item::Sym(sym)),
@@ -931,6 +1028,21 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
                 None => Item::Val(0),
               };
               st.push(r);
+            }
+            // `^r2`: resolve a texture STEM from the manifest. The DSL pushes
+            // `<category> <object> <part> <index> <seed>` (via `*pack.*`/`*part`/
+            // a per-instance seed); the resolver picks the variation + biome/
+            // faction dirs (faction/biome from host) and returns
+            // `<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>` for `&h.texture
+            // set`. The client appends `lod/<size>/` + `.<map>.png`. Generic
+            // R2-resolution boundary — extend with more keys later.
+            Some(Item::Sys(name)) if name == "r2" => {
+              let seed = st.pop().map(|i| i.int()).unwrap_or(0);
+              let index = st.pop().map(|i| i.int()).unwrap_or(0);
+              let part = st.pop().map(|i| i.int()).unwrap_or(0);
+              let object = match st.pop() { Some(Item::Sym(s)) => s, _ => String::new() };
+              let category = match st.pop() { Some(Item::Sym(s)) => s, _ => String::new() };
+              st.push(Item::Sym(resolve_r2(cat, host, &category, &object, part, index, seed)));
             }
             // Engine intrinsics: the visual-primitive constructors are engine
             // vocabulary at the `^` FFI boundary (not host data), so `^hex call`
@@ -1188,6 +1300,44 @@ mod tests {
   #[test]
   fn set_and_arithmetic() {
     assert_eq!(run_hook("<functions:f>\n  @define>\n    2 3 add &x set\n", "define", vec![]).read("x"), Some(&Cell::Int(5)));
+  }
+
+  #[test]
+  fn r2_resolves_stem_from_manifest() {
+    // tile/fog: biomes=[5], factions=[2], variations=(1,3),(1,7), 2 parts.
+    let man = parse(concat!(
+      "<manifest>\n  ::tile>\n    @define>\n      1 &biomes array\n      5 &biomes.0 set\n",
+      "    :fog>\n      @define>\n        2 &parts set\n",
+      "        2 &var_id array\n        1 &var_id.0 set\n        1 &var_id.1 set\n",
+      "        2 &var_count array\n        3 &var_count.0 set\n        7 &var_count.1 set\n",
+      "        1 &factions array\n        2 &factions.0 set\n",
+    )).unwrap();
+    let mut cat = Catalog::default();
+    cat.add_manifest(&man);
+    // `<cat> <obj> <part> <index> <seed> ^r2 call` — `"` strings push as Syms.
+    let src = "<functions:f>\n  @define>\n    \"tile \"fog 0 0 0 ^r2 call &a set\n    \"tile \"fog 0 2 0 ^r2 call &b set\n    \"tile \"fog 0 0 1 ^r2 call &c set\n";
+    let body = find(&parse(src).unwrap(), "define").unwrap().to_vec();
+    let host = |fac: i64, bio: i64| vec![
+      ("faction".into(), Cell::Int(fac)), ("biome".into(), Cell::Int(bio)),
+    ];
+
+    // base: faction 0 / biome 0 → fall to .0. seed 0 → variation 0 (1,3);
+    // index 2 → variation 1 (1,7); seed 1 → variation 1 (per-instance variety).
+    let mut s = Store::default();
+    run(&body, &mut s, &host(0, 0), &cat, &Functions::default()).unwrap();
+    assert_eq!(s.read("a"), Some(&Cell::Sym("tile.0/fog.0/1.3.0".into())));
+    assert_eq!(s.read("b"), Some(&Cell::Sym("tile.0/fog.0/1.7.0".into())));
+    assert_eq!(s.read("c"), Some(&Cell::Sym("tile.0/fog.0/1.7.0".into())));
+
+    // faction 2 (present) + biome 5 (present) → both dirs resolve.
+    let mut s2 = Store::default();
+    run(&body, &mut s2, &host(2, 5), &cat, &Functions::default()).unwrap();
+    assert_eq!(s2.read("a"), Some(&Cell::Sym("tile.5/fog.2/1.3.0".into())));
+
+    // faction 9 (absent) → falls back to .0 even when requested.
+    let mut s3 = Store::default();
+    run(&body, &mut s3, &host(9, 0), &cat, &Functions::default()).unwrap();
+    assert_eq!(s3.read("a"), Some(&Cell::Sym("tile.0/fog.0/1.3.0".into())));
   }
   #[test]
   fn vec2_sets_xy_pair() {

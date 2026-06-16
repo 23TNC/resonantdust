@@ -592,6 +592,9 @@ pub fn draw_visuals(bundle: &Bundle, packed: u16, host: &[(String, Cell)], hook:
   s.write("sys.key", Cell::Sym(name.clone()));
   s.write("sys.type", Cell::Sym(type_name.clone()));
   s.write("sys.label", Cell::Sym(format!("cards.{type_name}.{name}.label")));
+  // the card's packed def id — the seed `^r2` uses to pick a variation for a
+  // seed-picked pack (e.g. souls: each card its own portrait).
+  s.write("sys.packed", Cell::Int(packed as i64));
   run_into(bundle, &name, "visuals", "define", &[], &mut s);
   run_into(bundle, &name, "visuals", hook, host, &mut s);
   match s.read("prims") {

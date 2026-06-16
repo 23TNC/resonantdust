@@ -142,7 +142,10 @@
         *var.1 *aspect.*var.2 ge if :next goto
         *var.0 7 ge if 0 ret
         ^sprite call &h set
-        *rec.art.object &h.texture set
+        ; resolve the stem via ^r2 from the aspect art's category+object; per-slot
+        ; seed (`*seed *var.0 add`) varies the variation across slots; part 0,
+        ; index 0 (seed-picked), biome/faction from host.
+        *rec.art.category *rec.art.object 0 0 *seed *var.0 add ^r2 call &h.texture set
         ; pivot from the ASSET (not a hardcoded centre) so each object controls
         ; where the slot sits on it — e.g. a tree uses bottom-centre (50 100) so
         ; its BASE plants on the slot and the canopy spills UP into the cell above,
@@ -298,15 +301,19 @@
     *color.bg &h.tint set
 
     ^sprite call &h set                                      ; card art, centred in the body
-    ; the card set &pack (the asset ref) and, for a variant pack, &variant (the
-    ; LUT key). Resolve here: object folder from *pack.object, variant index from
-    ; *pack.texture.*variant. A card with no &pack → no texture → the sprite hides
-    ; itself (body only).
-    *pack.object &h.texture set
-    ; pin the variant index ONLY for a variant pack (one with a texture LUT);
-    ; a single-sprite pack (souls, soul_offline) leaves index unset → the client
-    ; picks by seed (the card id), so e.g. each soul gets its own portrait.
-    *pack.texture count 0 gt if *pack.texture.*variant &h.index set
+    ; Resolve the texture STEM via ^r2 from the pack's category+object plus the
+    ; host (seed/faction/biome): it picks the variation (`*pack.index` pins a fixed
+    ; one, 0 → random by the card seed) and the biome/faction dirs, returning
+    ; `<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>`. `*part` is the current
+    ; layer (0 unless the card set &part for a multi-part draw). A card with no
+    ; &pack → empty category/object → empty stem → the sprite hides itself.
+    ; object = the card's &variant (a specific object in a multi-object category,
+    ; e.g. requisite/log) when set, else the pack's default &object.
+    *pack.object &obj set
+    *variant 0 ne if *variant &obj set
+    ; seed = the card id (`*sys.packed`) so a seed-picked pack (souls) gives each
+    ; card its own variation.
+    *pack.category *obj *part *pack.index *sys.packed ^r2 call &h.texture set
     *card_ox $globals::card_width 2 div add   *stack_dy $globals::body_height 2 div add   &h.pos vec2
     $globals::card_width 85 mul 100 div &var.0 set          ; square art ≈85% of card width
     *var.0 *var.0 &h.size vec2
@@ -340,8 +347,9 @@
     $functions::hex_body call drop
 
     ^sprite call &h set
-    *pack.object &h.texture set
-    *pack.texture count 0 gt if *pack.texture.*variant &h.index set   ; variant packs only
+    *pack.object &obj set
+    *variant 0 ne if *variant &obj set
+    *pack.category *obj *part *pack.index ^seed call ^r2 call &h.texture set
     $globals::hex_width 2 div $globals::hex_height 2 div &h.pos vec2
     *pack.size *pack.size &h.size vec2
     50.0 50.0 &h.anchor vec2
