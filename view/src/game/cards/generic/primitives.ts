@@ -206,12 +206,13 @@ export class SpritePrim extends BasePrim {
   }
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
-    if (!n.texture) {
-      this.node.visible = false;
-      return;
-    }
+    // An unresolved/absent stem (the `^r2` resolver returns "" for objects not yet
+    // migrated to the new texture tree) resolves to the WHITE fallback rather than
+    // hiding the sprite — so missing/unmigrated art renders as a visible white
+    // rectangle instead of vanishing. (Conditional hiding is via `alpha`, not a
+    // null texture, so this doesn't swallow intentionally-hidden prims.)
     this.node.visible = true;
-    const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
+    const r = resolveAsset(this.deps.lod, n.texture ?? "", footprintPx(box, n.size), { dpr: box.dpr });
     this.node.setTextures(r.texture, r.normal, r.emissive);
     this.baseScale = r.scale;
     setAnchor(this.node, n);
