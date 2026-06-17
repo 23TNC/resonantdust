@@ -24,6 +24,7 @@ export const content_matchRecipe: (a: number, b: number, c: number, d: number, e
 export const content_new: (a: number, b: number) => [number, number, number];
 export const content_packedDef: (a: number, b: number, c: number) => number;
 export const content_planRecipe: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const content_previewStems: (a: number) => [number, number];
 export const content_recipeId: (a: number, b: number, c: number) => number;
 export const content_recipeMeta: (a: number, b: number, c: number) => [number, number, number, number];
 export const content_recipeName: (a: number, b: number) => [number, number];

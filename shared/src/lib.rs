@@ -127,6 +127,12 @@ impl Content {
         defs::all_textures(&self.bundle)
     }
 
+    /// Every base-variant texture stem (`<cat>.0/<obj>.0/<id>.<count>.<part>`) the
+    /// manifests can produce — the client prewarms a low-res preview of each.
+    pub fn preview_stems(&self) -> Vec<String> {
+        defs::preview_stems(&self.bundle)
+    }
+
     /// Recipe names in Bundle-id order (`id = index + 1`) — the candidate list the
     /// client iterates for client-side matching.
     pub fn recipe_names(&self) -> Vec<String> {
@@ -344,6 +350,12 @@ impl Content {
         serde_json::to_string(&self.all_textures()).map_err(jserr)
     }
 
+    /// `previewStems()` → every base texture stem to prewarm a preview for.
+    #[wasm_bindgen(js_name = previewStems)]
+    pub fn preview_stems_js(&self) -> Vec<String> {
+        self.preview_stems()
+    }
+
     /// `globals()` → the `<globals>` constants as a JSON `{ id: number }` map
     /// (card_width, card_height, title_height, hex_*). The client reads card/cell
     /// dimensions from here instead of hardcoding `RECT_CARD_*` / hex radius.
@@ -497,6 +509,94 @@ mod tests {
         collect(Path::new(root), &mut srcs);
         assert!(srcs.len() > 5, "found {} .rd files under {root}", srcs.len());
         Content::load(srcs).expect("real corpus loads (asset/functions/manifest + ^r2)");
+    }
+
+    #[test]
+    fn r2_emits_stem_for_real_card() {
+        // Draw a real sprite-bearing card against the real corpus and assert the
+        // sprite prim carries a resolved `^r2` stem (not empty/None). White-screen
+        // bug check: an empty stem → client nulls texture → SpritePrim hides.
+        use std::fs;
+        use std::path::Path;
+        fn collect(dir: &Path, out: &mut Vec<(String, String)>) {
+            for e in fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() { collect(&p, out); }
+                else if p.extension().and_then(|x| x.to_str()) == Some("rd") {
+                    out.push((p.to_string_lossy().into_owned(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut srcs = Vec::new();
+        collect(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../content")), &mut srcs);
+        let c = Content::load(srcs).expect("corpus");
+        let packed = c.packed_def("log").expect("log card packed id");
+        let prims = c.draw_visuals(packed, vec![], "init");
+        let sprite = prims.iter().find(|p| p.kind == "sprite");
+        let tex = sprite.and_then(|p| p.texture.clone());
+        assert!(
+            matches!(&tex, Some(s) if !s.is_empty()),
+            "log sprite texture should be a resolved stem, got {tex:?}; prims: {:?}",
+            prims.iter().map(|p| (&p.kind, &p.texture)).collect::<Vec<_>>()
+        );
+        assert_eq!(tex.as_deref(), Some("requisite.0/log.0/1.1.0"), "stem mismatch");
+    }
+
+    #[test]
+    fn r2_emits_stems_for_real_tile() {
+        use std::fs;
+        use std::path::Path;
+        fn collect(dir: &Path, out: &mut Vec<(String, String)>) {
+            for e in fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() { collect(&p, out); }
+                else if p.extension().and_then(|x| x.to_str()) == Some("rd") {
+                    out.push((p.to_string_lossy().into_owned(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut srcs = Vec::new();
+        collect(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../content")), &mut srcs);
+        let c = Content::load(srcs).expect("corpus");
+        let packed = c.packed_def("forest").expect("forest tile packed id");
+        // pine (stock0) + flora (stock1) — both have art; ring_prims should scatter sprites.
+        let prims = c.tile_prims(packed, vec![3, 3], 1);
+        let sprites: Vec<_> = prims.iter().filter(|p| p.kind == "sprite").collect();
+        let stems: Vec<_> = sprites.iter().filter_map(|p| p.texture.clone()).filter(|s| !s.is_empty()).collect();
+        assert!(
+            !stems.is_empty(),
+            "forest tile should emit sprite prims with ^r2 stems; got {} sprite prim(s), prims: {:?}",
+            sprites.len(),
+            prims.iter().map(|p| (&p.kind, &p.texture)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn preview_stems_enumerates_real_corpus() {
+        use std::fs;
+        use std::path::Path;
+        fn collect(dir: &Path, out: &mut Vec<(String, String)>) {
+            for e in fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() { collect(&p, out); }
+                else if p.extension().and_then(|x| x.to_str()) == Some("rd") {
+                    out.push((p.to_string_lossy().into_owned(), fs::read_to_string(&p).unwrap()));
+                }
+            }
+        }
+        let mut srcs = Vec::new();
+        collect(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../content")), &mut srcs);
+        let c = Content::load(srcs).expect("corpus");
+        let stems = c.preview_stems();
+        assert!(!stems.is_empty(), "preview_stems should enumerate the manifests");
+        // every stem is a base variant (.0/.0) in resolve_r2's format.
+        for s in &stems {
+            assert!(s.contains(".0/") && s.matches('.').count() >= 4,
+                "malformed preview stem: {s}");
+        }
+        // conifer is a known migrated object → its base stem must be present.
+        assert!(stems.iter().any(|s| s.starts_with("objects.0/conifer.0/")),
+            "expected a conifer preview stem; got e.g. {:?}", &stems[..stems.len().min(5)]);
     }
 
     #[test]

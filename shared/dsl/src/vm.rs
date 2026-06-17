@@ -213,6 +213,43 @@ impl Catalog {
       _ => None,
     }
   }
+
+  /// Every BASE-variant texture stem the manifests can produce —
+  /// `<category>.0/<object>.0/<id>.<count>.<part>` for each object's variations
+  /// (`var_id`/`var_count`) × layers (`parts`), at the base biome/faction (`.0`).
+  /// Mirrors [`resolve_r2`]'s format with `bdir`/`fdir` = 0. The client prewarms a
+  /// low-res preview of each at login, so a streaming full-res texture shows
+  /// colour/shape instead of the white fallback. (Biome/faction OVERRIDES aren't
+  /// enumerated — a preview is a placeholder, and overrides fall back to `.0`.)
+  pub fn preview_stems(&self) -> Vec<String> {
+    let mut out = Vec::new();
+    for (category, entry) in &self.manifests {
+      let Cell::Map(objmap) = entry else { continue };
+      for (object, facet) in objmap {
+        if object == "@" {
+          continue; // category-axis data, not an object
+        }
+        let ids = facet_ints(facet, "var_id");
+        let counts = facet_ints(facet, "var_count");
+        let len = ids.len().min(counts.len());
+        let parts = match facet {
+          Cell::Map(m) => m
+            .iter()
+            .find(|(k, _)| k == "parts")
+            .map(|(_, c)| c.as_int())
+            .unwrap_or(1),
+          _ => 1,
+        }
+        .max(1);
+        for i in 0..len {
+          for part in 0..parts {
+            out.push(format!("{category}.0/{object}.0/{}.{}.{}", ids[i], counts[i], part));
+          }
+        }
+      }
+    }
+    out
+  }
   /// Load all `<aspect>` records: run each `::id @define` into a record cell.
   pub fn add_aspects(&mut self, root: &Node) {
     for b in &root.children {

@@ -80,9 +80,11 @@ async function main(): Promise<void> {
   await loadFonts();
 
   // Texture management — the LOD atlas system, retained from the pixijs client.
-  // The 64px prewarm floor (every aspect's smallest LOD) is kicked off now and
-  // joined via `ctx.assetsReady` before a world scene builds against the white
-  // fallback. Card-face baking (CardTextureManager) is deferred to the card port.
+  // `LodTextureManager` owns two atlases: the master atlas (full-res, fetched
+  // per-stem at the footprint's LOD) and an internal low-res PREVIEW atlas it
+  // falls back to before the white fallback — so a streaming texture shows a
+  // placeholder, not a white square. Card-face baking (CardTextureManager) is
+  // deferred to the card port.
   const textures = new TextureManager(app.renderer);
   const lodTextures = new LodTextureManager(textures, app.renderer);
   const objects = new ObjectManager(lodTextures);

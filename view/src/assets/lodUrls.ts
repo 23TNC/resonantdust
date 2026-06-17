@@ -13,10 +13,16 @@
 /** Ascending LOD bucket sizes. `art lod` emits each map at every bucket ≤ its
  *  master's smaller dimension, so a given stem may only exist at coarse buckets;
  *  the loader descends until a bucket's albedo actually fetches. */
-export const LOD_SIZES = [64, 128, 256, 512, 1024] as const;
+export const LOD_SIZES = [16, 32, 64, 128, 256, 512, 1024] as const;
 export type LodSize = (typeof LOD_SIZES)[number];
 export const MAX_LOD: LodSize = LOD_SIZES[LOD_SIZES.length - 1];
 export const MIN_LOD: LodSize = LOD_SIZES[0];
+
+/** Bucket the PREVIEW atlas loads — a cheap, low-res placeholder shown while the
+ *  full-res master texture streams in (see `LodTextureManager`). The preview
+ *  load descends from here, so a stem with no 32px bucket falls to 16px. Tune to
+ *  trade placeholder sharpness vs. preview load cost (32 ≈ a clear thumbnail). */
+export const PREVIEW_LOD: LodSize = 32;
 
 /** A renderable map channel. `albedo` is the de-lit display colour; `normal`
  *  feeds the lighting pass; `emissive` the additive pass. */

@@ -105,7 +105,7 @@ export class ObjectManager {
    *  current sprites back to the pool, then acquires one per request,
    *  sets its texture/anchor/position/scale/zIndex, and attaches it.
    *  `LodTextureManager.get` never returns null — it falls through to
-   *  a cached LOD substitute or the white 64×64 fallback while the
+   *  a cached LOD substitute or the white MIN_LOD-square fallback while the
    *  ideal LOD loads, then fires `onLoad` so the caller can re-sync to
    *  pick up the upgrade. Scale math compensates for the substitute's
    *  native size so the rendered px stays `desiredSize × scale`

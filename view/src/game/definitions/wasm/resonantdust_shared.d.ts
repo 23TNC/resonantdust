@@ -71,6 +71,10 @@ export class Content {
      */
     packedDef(name: string): number | undefined;
     planRecipe(placed_json: string, recipe: string): string;
+    /**
+     * `previewStems()` → every base texture stem to prewarm a preview for.
+     */
+    previewStems(): string[];
     recipeId(name: string): number | undefined;
     /**
      * `recipeMeta(name)` → the recipe's iterators + anchors as JSON (`null` if
@@ -162,6 +166,7 @@ export interface InitOutput {
     readonly content_new: (a: number, b: number) => [number, number, number];
     readonly content_packedDef: (a: number, b: number, c: number) => number;
     readonly content_planRecipe: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly content_previewStems: (a: number) => [number, number];
     readonly content_recipeId: (a: number, b: number, c: number) => number;
     readonly content_recipeMeta: (a: number, b: number, c: number) => [number, number, number, number];
     readonly content_recipeName: (a: number, b: number) => [number, number];

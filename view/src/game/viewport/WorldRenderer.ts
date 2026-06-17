@@ -11,7 +11,7 @@ import { atlasWhite, atlasHex } from "../cards/generic/atlasFills";
 import { cardBox } from "../cards/generic/cardBox";
 import { drawVisuals, tilePrims, type HostValue } from "../cards/generic/drawVisuals";
 import { global } from "../definitions/globals";
-import { onContentReloaded } from "../definitions/contentBoot";
+import { onContentReloaded, sharedContent } from "../definitions/contentBoot";
 import { microIsCard, stackBranch, stackIndex, STACK_DIR_UP, STACK_DIR_DOWN } from "../../server/data/packing";
 import type { RenderRegion, RenderBatch, Renderable, ViewportFeed } from "../../client/render";
 
@@ -253,6 +253,19 @@ export class WorldRenderer extends LayoutNode {
 
     // Gate content hot-swap: drop + rebuild retained nodes against the new defs.
     this.unsubContent = onContentReloaded(() => this.reload());
+
+    // Eagerly warm the low-res preview atlas for every stem the content can
+    // produce (content is loaded by the time we're in the world). Fire-and-forget
+    // — the full-res buckets still stream lazily per-tile, but their placeholders
+    // are ready so streaming art shows colour/shape, not white.
+    this.prewarmPreviews();
+  }
+
+  /** Kick the preview prewarm for the whole content stem set (see
+   *  {@link LodTextureManager.prewarmPreviews}). Re-run on reload — the swapped
+   *  content may add objects/variations. */
+  private prewarmPreviews(): void {
+    void this.gctx.lodTextures.prewarmPreviews(sharedContent().previewStems());
   }
 
   /** Rebuild every retained tile/card against freshly-reloaded content. A def's
@@ -280,6 +293,8 @@ export class WorldRenderer extends LayoutNode {
     // cleared maps make every reported item rebuild from scratch.
     this.lastRegion = null;
     this.syncRegion();
+    // Swapped content may have added objects/variations — warm their previews.
+    this.prewarmPreviews();
   }
 
   /** The current anchor cell (fractional). */

@@ -97,6 +97,13 @@ pub struct TextureDef {
   pub anchor: Vec2f,
 }
 
+/// Every base-variant texture stem the manifests can produce — the client
+/// prewarms a low-res preview of each at login. See
+/// [`crate::vm::Catalog::preview_stems`].
+pub fn preview_stems(bundle: &Bundle) -> Vec<String> {
+  bundle.catalog.preview_stems()
+}
+
 /// Every `<asset>` pack as a [`TextureDef`] (id = sorted index + 1). `scale` /
 /// `anchor` are converted from the DSL's hundredths to `0..1`; defaults are
 /// scale `1.0` and anchor `(0.5, 0.5)`.

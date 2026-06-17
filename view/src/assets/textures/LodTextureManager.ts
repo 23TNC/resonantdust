@@ -5,8 +5,9 @@ import {
   lodsDescendingFrom,
   LOD_SIZES,
   MIN_LOD,
+  PREVIEW_LOD,
 } from "../lodUrls";
-import type { PackedPair, TextureManager } from "./TextureManager";
+import { TextureManager, type PackedPair } from "./TextureManager";
 import { debug } from "../../debug";
 
 /** Pixels trimmed off each side of a packed frame, so bilinear sampling can't
@@ -28,17 +29,28 @@ const DEFAULT_QUALITY_CAP = 1024;
  * stem's max available size (so repeat requests don't re-probe absent buckets).
  *
  * **Always returns a PackedPair.** While a stem loads, `get` returns the best
- * already-cached smaller bucket for the same stem, else the 64×64 white fallback;
- * `onLoad` fires when the ideal lands so consumers re-resolve to the upgrade.
+ * already-cached smaller bucket for the same stem; failing that, the low-res
+ * PREVIEW atlas (a separate atlas of `PREVIEW_LOD` placeholders, kicked on
+ * demand); only if even the preview is absent does it fall to the MIN_LOD-square
+ * white fallback. `onLoad` fires when any of those land so consumers re-resolve
+ * to the upgrade (white → preview → full-res).
  */
 export class LodTextureManager {
   private readonly textures: TextureManager;
+  /** Independent atlas holding only low-res `PREVIEW_LOD` placeholders. Kept
+   *  separate from the master atlas so previews never compete for slots with
+   *  full-res art and persist as a fallback once loaded. */
+  private readonly preview: TextureManager;
   private readonly renderer: Renderer;
   private readonly qualityCap: number;
-  /** Atlas-packed triple keyed by `${stem}@${size}`. */
+  /** Master atlas-packed triple keyed by `${stem}@${size}`. */
   private readonly byKey = new Map<string, PackedPair>();
-  /** Keys whose load is in flight (dedupe). */
+  /** Keys whose master load is in flight (dedupe). */
   private readonly loading = new Set<string>();
+  /** Preview atlas-packed triple keyed by stem (one preview size per stem). */
+  private readonly previewByKey = new Map<string, PackedPair>();
+  /** Stems whose preview load is in flight (dedupe). */
+  private readonly previewLoading = new Set<string>();
   /** Per-stem largest bucket known to exist (set on first successful descend),
    *  so the picker clamps the ideal and avoids re-probing absent buckets. */
   private readonly maxSize = new Map<string, number>();
@@ -47,6 +59,7 @@ export class LodTextureManager {
 
   constructor(textures: TextureManager, renderer: Renderer, options?: { qualityCap?: number }) {
     this.textures = textures;
+    this.preview = new TextureManager(renderer);
     this.renderer = renderer;
     this.qualityCap = options?.qualityCap ?? DEFAULT_QUALITY_CAP;
   }
@@ -79,7 +92,38 @@ export class LodTextureManager {
       this.loading.add(key);
       void this.load(stem, ideal, key);
     }
-    return this.findCachedSubstitute(stem) ?? this.whitePair();
+    // Best already-loaded full-res bucket for this stem (Pixi downscales cleanly).
+    const substitute = this.findCachedSubstitute(stem);
+    if (substitute) return substitute;
+    // No full-res yet → fall back to the low-res PREVIEW atlas (kicking its load
+    // on first miss); white only if even the preview hasn't landed.
+    return this.getPreview(stem) ?? this.whitePair();
+  }
+
+  /** Cached preview for the stem, or null if its prewarm hasn't landed yet (or it
+   *  has no small bucket). Previews are loaded EAGERLY by {@link prewarmPreviews}
+   *  at login — NOT lazily here — so by the time an object renders its placeholder
+   *  is already packed and a streaming full-res texture upgrades from colour/shape
+   *  rather than flashing white. */
+  private getPreview(stem: string): PackedPair | null {
+    return this.previewByKey.get(stem) ?? null;
+  }
+
+  /** Eagerly load the `PREVIEW_LOD` placeholder for every stem into the preview
+   *  atlas, a few at a time. Call once at login (fire-and-forget): the full-res
+   *  buckets still stream lazily per-object, but their previews are ready up front.
+   *  Idempotent — stems already cached or in flight are skipped, so a content
+   *  reload re-call only fetches genuinely new stems. `onLoad` fires per landed
+   *  preview (coalesced to one re-resolve per frame) so placeholders pop in. */
+  async prewarmPreviews(stems: readonly string[]): Promise<void> {
+    const queue = stems.filter(s => s && !this.previewByKey.has(s) && !this.previewLoading.has(s));
+    for (const s of queue) this.previewLoading.add(s);
+    const CONCURRENCY = 8;
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < queue.length) await this.loadPreview(queue[next++]);
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()));
   }
 
   private whitePair(): PackedPair {
@@ -112,6 +156,9 @@ export class LodTextureManager {
   destroy(): void {
     this.byKey.clear();
     this.loading.clear();
+    this.previewByKey.clear();
+    this.previewLoading.clear();
+    this.preview.destroy();
     this.maxSize.clear();
     this.whiteFallback = null;
   }
@@ -152,6 +199,42 @@ export class LodTextureManager {
       this.loading.delete(idealKey);
     }
     if (landedKey) for (const cb of this.listeners) cb();
+  }
+
+  /** Fetch + pack the stem's `PREVIEW_LOD` placeholder into the dedicated preview
+   *  atlas, descending (32 → 16) until one bucket's albedo loads. Cached under the
+   *  bare stem (one preview per stem); fires `onLoad` so consumers swap the white
+   *  fallback for the preview in place. Best-effort: a stem with no small bucket
+   *  simply stays on white until its master bucket arrives. */
+  private async loadPreview(stem: string): Promise<void> {
+    let landed = false;
+    try {
+      for (const size of lodsDescendingFrom(PREVIEW_LOD)) {
+        const albedoUrl = channelUrl(stem, size, "albedo");
+        try {
+          await Assets.load(albedoUrl);
+        } catch {
+          continue; // preview bucket absent for this stem — try smaller
+        }
+        const albedoSrc = Assets.get<Texture>(albedoUrl);
+        if (!albedoSrc) continue;
+        const normalSrc = await loadOptional(channelUrl(stem, size, "normal"));
+        const emissiveSrc = await loadOptional(channelUrl(stem, size, "emissive"));
+        const packed = this.preview.pack(albedoSrc, normalSrc, emissiveSrc);
+        this.previewByKey.set(stem, {
+          albedo: insetFrame(packed.albedo, FRAME_INSET),
+          normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
+          emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
+        });
+        landed = true;
+        break;
+      }
+    } catch (err) {
+      debug.warn(["lod"], `[lod] preview load failed ${stem}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.previewLoading.delete(stem);
+    }
+    if (landed) for (const cb of this.listeners) cb();
   }
 }
 

@@ -304,6 +304,16 @@ export class Content {
         }
     }
     /**
+     * `previewStems()` → every base texture stem to prewarm a preview for.
+     * @returns {string[]}
+     */
+    previewStems() {
+        const ret = wasm.content_previewStems(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @param {string} name
      * @returns {number | undefined}
      */
