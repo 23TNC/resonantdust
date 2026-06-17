@@ -2,10 +2,10 @@ import { Assets, Graphics, Rectangle, RenderTexture, Texture, type Renderer } fr
 import {
   channelUrl,
   pickLodForSize,
-  lodsDescendingFrom,
   LOD_SIZES,
   MIN_LOD,
   PREVIEW_LOD,
+  type Channel,
 } from "../lodUrls";
 import { TextureManager, type PackedPair } from "./TextureManager";
 import { debug } from "../../debug";
@@ -23,10 +23,12 @@ const DEFAULT_QUALITY_CAP = 1024;
  * wasm `^r2` resolver — the manager owns only "which LOD size, fetch from R2,
  * pack." No glob, no cascade, no variation pick (all upstream now).
  *
- * **LOD by request-and-descend.** The view no longer knows which buckets exist
- * for a stem, so the loader tries the ideal bucket's albedo and, on fetch
- * failure, descends to the next smaller — caching the first success and the
- * stem's max available size (so repeat requests don't re-probe absent buckets).
+ * **LOD by R2-direct, gate on miss.** Each channel is fetched R2-direct first
+ * (the CDN serves every cache hit, keeping the gate out of the texture-bandwidth
+ * budget). On a 404 — the LOD hasn't been generated yet — the loader retries the
+ * same path against the **gate**, which generates the LOD from the master on
+ * demand, caches it in R2, and returns the bytes (see the gateway `lod` module).
+ * So only LODs that are actually requested ever get generated and stored.
  *
  * **Always returns a PackedPair.** While a stem loads, `get` returns the best
  * already-cached smaller bucket for the same stem; failing that, the low-res
@@ -56,12 +58,24 @@ export class LodTextureManager {
   private readonly maxSize = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
   private whiteFallback: Texture | null = null;
+  /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
+   *  target when an R2-direct LOD fetch 404s: `<gateBase>/textures/lod/...`
+   *  generates the LOD from the master on demand. `null` until a gate is selected
+   *  (pre-login) — fetches then stay R2-direct-only. */
+  private gateBase: string | null = null;
 
   constructor(textures: TextureManager, renderer: Renderer, options?: { qualityCap?: number }) {
     this.textures = textures;
     this.preview = new TextureManager(renderer);
     this.renderer = renderer;
     this.qualityCap = options?.qualityCap ?? DEFAULT_QUALITY_CAP;
+  }
+
+  /** Point the on-miss fallback at the selected environment's gate (its HTTP
+   *  origin, e.g. `http://localhost:8474`). Called at login alongside the wasm
+   *  client's gate URL so generated LODs come from the same gate as the data. */
+  setGateBase(httpBase: string): void {
+    this.gateBase = httpBase.replace(/\/$/, "");
   }
 
   /** Subscribe to load-completion (fires once per stem@size as it lands). */
@@ -163,35 +177,28 @@ export class LodTextureManager {
     this.whiteFallback = null;
   }
 
-  /** Fetch + pack the stem, descending LOD buckets from `ideal` until one's
-   *  albedo loads (the rest of the pyramid for this stem doesn't exist). Caches
-   *  the hit under `${stem}@${size}` and records the stem's max size. `idealKey`
-   *  is released from `loading` regardless so a later reference can retry. */
+  /** Fetch + pack the stem at `ideal` (albedo + optional normal/emissive),
+   *  R2-direct with a gate fallback per channel. Caches the result under
+   *  `${stem}@${ideal}`. The gate clamps a request above the master's native
+   *  resolution, so a too-large `ideal` returns a smaller image — harmless, the
+   *  draw-scale math keys off the texture's own width. `idealKey` is released
+   *  from `loading` regardless so a later reference can retry. */
   private async load(stem: string, ideal: number, idealKey: string): Promise<void> {
     let landedKey: string | null = null;
     try {
-      for (const size of lodsDescendingFrom(ideal)) {
-        const albedoUrl = channelUrl(stem, size, "albedo");
-        try {
-          await Assets.load(albedoUrl);
-        } catch {
-          continue; // bucket absent for this stem — try smaller
-        }
-        const albedoSrc = Assets.get<Texture>(albedoUrl);
-        if (!albedoSrc) continue;
-        // optional channels — null if they 404.
-        const normalSrc = await loadOptional(channelUrl(stem, size, "normal"));
-        const emissiveSrc = await loadOptional(channelUrl(stem, size, "emissive"));
+      const albedoSrc = await this.fetchChannel(stem, ideal, "albedo");
+      if (albedoSrc) {
+        const normalSrc = await this.fetchChannel(stem, ideal, "normal");
+        const emissiveSrc = await this.fetchChannel(stem, ideal, "emissive");
         const packed = this.textures.pack(albedoSrc, normalSrc, emissiveSrc);
-        const key = `${stem}@${size}`;
+        const key = `${stem}@${ideal}`;
         this.byKey.set(key, {
           albedo: insetFrame(packed.albedo, FRAME_INSET),
           normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
           emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
         });
-        if (size > (this.maxSize.get(stem) ?? 0)) this.maxSize.set(stem, size);
+        if (ideal > (this.maxSize.get(stem) ?? 0)) this.maxSize.set(stem, ideal);
         landedKey = key;
-        break;
       }
     } catch (err) {
       debug.warn(["lod"], `[lod] failed to load ${stem}: ${err instanceof Error ? err.message : String(err)}`);
@@ -201,25 +208,36 @@ export class LodTextureManager {
     if (landedKey) for (const cb of this.listeners) cb();
   }
 
+  /** Fetch one channel for `stem` at `size`: R2-direct first (the CDN serves
+   *  every cache hit, off the gate's bandwidth budget), then — on a 404 — the
+   *  gate, which generates the LOD from the master, caches it in R2, and returns
+   *  the bytes. Returns null if neither has it (the channel has no master, the
+   *  common case for `emissive`). Both URLs cache independently in PIXI Assets;
+   *  within a session the packed result is held in `byKey`, so we never re-probe. */
+  private async fetchChannel(stem: string, size: number, channel: Channel): Promise<Texture | null> {
+    const direct = channelUrl(stem, size, channel); // R2-direct via Assets basePath
+    const fromCache = await loadOrNull(direct);
+    if (fromCache) return fromCache;
+    if (this.gateBase) {
+      const viaGate = `${this.gateBase}/textures/lod/${size}/${stem}.${channel}.png`;
+      const generated = await loadOrNull(viaGate);
+      if (generated) return generated;
+    }
+    return null;
+  }
+
   /** Fetch + pack the stem's `PREVIEW_LOD` placeholder into the dedicated preview
-   *  atlas, descending (32 → 16) until one bucket's albedo loads. Cached under the
+   *  atlas (R2-direct, gate on miss — same path as {@link load}). Cached under the
    *  bare stem (one preview per stem); fires `onLoad` so consumers swap the white
-   *  fallback for the preview in place. Best-effort: a stem with no small bucket
-   *  simply stays on white until its master bucket arrives. */
+   *  fallback for the preview in place. Best-effort: a stem with no master simply
+   *  stays on white until... it has no master, so it stays white. */
   private async loadPreview(stem: string): Promise<void> {
     let landed = false;
     try {
-      for (const size of lodsDescendingFrom(PREVIEW_LOD)) {
-        const albedoUrl = channelUrl(stem, size, "albedo");
-        try {
-          await Assets.load(albedoUrl);
-        } catch {
-          continue; // preview bucket absent for this stem — try smaller
-        }
-        const albedoSrc = Assets.get<Texture>(albedoUrl);
-        if (!albedoSrc) continue;
-        const normalSrc = await loadOptional(channelUrl(stem, size, "normal"));
-        const emissiveSrc = await loadOptional(channelUrl(stem, size, "emissive"));
+      const albedoSrc = await this.fetchChannel(stem, PREVIEW_LOD, "albedo");
+      if (albedoSrc) {
+        const normalSrc = await this.fetchChannel(stem, PREVIEW_LOD, "normal");
+        const emissiveSrc = await this.fetchChannel(stem, PREVIEW_LOD, "emissive");
         const packed = this.preview.pack(albedoSrc, normalSrc, emissiveSrc);
         this.previewByKey.set(stem, {
           albedo: insetFrame(packed.albedo, FRAME_INSET),
@@ -227,7 +245,6 @@ export class LodTextureManager {
           emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
         });
         landed = true;
-        break;
       }
     } catch (err) {
       debug.warn(["lod"], `[lod] preview load failed ${stem}: ${err instanceof Error ? err.message : String(err)}`);
@@ -238,8 +255,10 @@ export class LodTextureManager {
   }
 }
 
-/** Load an optional channel; null if it 404s (most art has no emissive). */
-async function loadOptional(url: string): Promise<Texture | null> {
+/** Load `url` via PIXI Assets; null if it 404s / fails. A failed load leaves a
+ *  rejected entry in the Assets cache, but the packed result is held in `byKey`
+ *  for the session, so the same URL is never re-requested anyway. */
+async function loadOrNull(url: string): Promise<Texture | null> {
   try {
     await Assets.load(url);
     return Assets.get<Texture>(url) ?? null;

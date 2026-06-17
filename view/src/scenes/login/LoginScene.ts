@@ -150,6 +150,8 @@ export class LoginScene extends Scene {
       // the client owns the connection.
       setCurrentEnvironment(server);
       ctx.client.setGateUrl(gateUrlFor(server));
+      // Generated-LOD fallback fetches from the same gate as the data.
+      ctx.lodTextures.setGateBase(httpBaseFor(server));
       const { playerId } = await ctx.client.login(username);
       // Load the DSL content runtime (the render VM) from the SAME gate before
       // entering the world, then seed the `<globals>` cache it provides.

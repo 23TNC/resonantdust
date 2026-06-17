@@ -25,7 +25,7 @@ import type { ClockStats, CallStat, SubStat } from "./client/WasmClient";
 // export pastes into; there is no repo-root copy to drift against.
 import panelDefaults from "./content/panels/defaults.json";
 import { WasmClient } from "./client/WasmClient";
-import { gateUrlFor } from "./client/environments";
+import { gateUrlFor, httpBaseFor } from "./client/environments";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
@@ -87,6 +87,9 @@ async function main(): Promise<void> {
   // deferred to the card port.
   const textures = new TextureManager(app.renderer);
   const lodTextures = new LodTextureManager(textures, app.renderer);
+  // On-miss LOD generation falls back to the gate; default to the dev gate until
+  // login re-points it at the selected environment (mirrors the wasm client URL).
+  lodTextures.setGateBase(httpBaseFor("dev"));
   const objects = new ObjectManager(lodTextures);
   // No build-time texture index to pre-warm anymore — textures resolve per-stem
   // from the wasm VM and stream from R2 on first reference (white fallback until
