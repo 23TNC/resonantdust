@@ -17,6 +17,11 @@ const FRAME_INSET = 2;
 /** Ceiling on the LOD bucket the picker selects — a texture-quality knob. */
 const DEFAULT_QUALITY_CAP = 1024;
 
+/** Concurrent in-flight channel loads across both priority lanes. Caps the gate
+ *  generation pressure (and browser socket pool) so the HIGH lane drains quickly;
+ *  ~the browser's per-origin socket budget, doubled for the R2+gate origins. */
+const MAX_CONCURRENT_FETCHES = 8;
+
 /**
  * LOD-aware lazy loader + atlas cache. Input is a RESOLVED STEM
  * (`<category>.<biome>/<object>.<faction>/<id>.<count>.<part>`) produced by the
@@ -63,6 +68,13 @@ export class LodTextureManager {
    *  generates the LOD from the master on demand. `null` until a gate is selected
    *  (pre-login) — fetches then stay R2-direct-only. */
   private gateBase: string | null = null;
+  /** Fetch scheduler lanes. Real (on-screen) loads enqueue HIGH, preview prewarm
+   *  enqueues LOW; {@link pump} always starts HIGH before LOW, so a visible tile's
+   *  texture never queues behind hundreds of off-screen previews (which, on a cold
+   *  corpus, each pay gate generation latency). */
+  private readonly highQueue: Array<() => Promise<unknown>> = [];
+  private readonly lowQueue: Array<() => Promise<unknown>> = [];
+  private activeFetches = 0;
 
   constructor(textures: TextureManager, renderer: Renderer, options?: { qualityCap?: number }) {
     this.textures = textures;
@@ -104,7 +116,7 @@ export class LodTextureManager {
 
     if (!this.loading.has(key)) {
       this.loading.add(key);
-      void this.load(stem, ideal, key);
+      this.schedule(() => this.load(stem, ideal, key), "high");
     }
     // Best already-loaded full-res bucket for this stem (Pixi downscales cleanly).
     const substitute = this.findCachedSubstitute(stem);
@@ -123,21 +135,39 @@ export class LodTextureManager {
     return this.previewByKey.get(stem) ?? null;
   }
 
-  /** Eagerly load the `PREVIEW_LOD` placeholder for every stem into the preview
-   *  atlas, a few at a time. Call once at login (fire-and-forget): the full-res
-   *  buckets still stream lazily per-object, but their previews are ready up front.
-   *  Idempotent — stems already cached or in flight are skipped, so a content
-   *  reload re-call only fetches genuinely new stems. `onLoad` fires per landed
-   *  preview (coalesced to one re-resolve per frame) so placeholders pop in. */
-  async prewarmPreviews(stems: readonly string[]): Promise<void> {
-    const queue = stems.filter(s => s && !this.previewByKey.has(s) && !this.previewLoading.has(s));
-    for (const s of queue) this.previewLoading.add(s);
-    const CONCURRENCY = 8;
-    let next = 0;
-    const worker = async (): Promise<void> => {
-      while (next < queue.length) await this.loadPreview(queue[next++]);
-    };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () => worker()));
+  /** Enqueue a `PREVIEW_LOD` placeholder load for every stem into the preview
+   *  atlas, on the LOW scheduler lane. Call at login (fire-and-forget): the
+   *  full-res buckets still stream lazily per-object on the HIGH lane, which
+   *  always preempts these — so prewarm fills idle fetch capacity without delaying
+   *  the textures actually on screen. Idempotent — stems already cached or in
+   *  flight are skipped, so a content reload re-call only fetches genuinely new
+   *  stems. `onLoad` fires per landed preview so placeholders pop in. */
+  prewarmPreviews(stems: readonly string[]): void {
+    for (const s of stems) {
+      if (!s || this.previewByKey.has(s) || this.previewLoading.has(s)) continue;
+      this.previewLoading.add(s);
+      this.schedule(() => this.loadPreview(s), "low");
+    }
+  }
+
+  /** Enqueue a fetch task in the given lane and pump the pool. */
+  private schedule(task: () => Promise<unknown>, lane: "high" | "low"): void {
+    (lane === "high" ? this.highQueue : this.lowQueue).push(task);
+    this.pump();
+  }
+
+  /** Start queued tasks up to the concurrency budget, HIGH lane first — so a
+   *  newly-visible tile's load runs ahead of any pending preview prewarm. */
+  private pump(): void {
+    while (this.activeFetches < MAX_CONCURRENT_FETCHES) {
+      const task = this.highQueue.shift() ?? this.lowQueue.shift();
+      if (!task) return;
+      this.activeFetches++;
+      void task().finally(() => {
+        this.activeFetches--;
+        this.pump();
+      });
+    }
   }
 
   private whitePair(): PackedPair {
@@ -175,6 +205,9 @@ export class LodTextureManager {
     this.preview.destroy();
     this.maxSize.clear();
     this.whiteFallback = null;
+    // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
+    this.highQueue.length = 0;
+    this.lowQueue.length = 0;
   }
 
   /** Fetch + pack the stem at `ideal` (albedo + optional normal/emissive),
