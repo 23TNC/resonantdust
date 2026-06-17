@@ -156,7 +156,7 @@ export class LoginScene extends Scene {
       // Load the DSL content runtime (the render VM) from the SAME gate before
       // entering the world, then seed the `<globals>` cache it provides.
       this.overlay.setStatus(`Loading content for ${server}…`);
-      await initContent(httpBaseFor(server));
+      await initContent(httpBaseFor(server), server);
       initGlobals();
       this.overlay.setStatus(`Logged in as ${username} on ${server} (player ${playerId}).`, "success");
       // Into the world. `onExit` unmounts the form.

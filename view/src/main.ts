@@ -25,12 +25,13 @@ import type { ClockStats, CallStat, SubStat } from "./client/WasmClient";
 // export pastes into; there is no repo-root copy to drift against.
 import panelDefaults from "./content/panels/defaults.json";
 import { WasmClient } from "./client/WasmClient";
-import { gateUrlFor, httpBaseFor } from "./client/environments";
+import { gateUrlFor, httpBaseFor, type Environment } from "./client/environments";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { LodTextureManager } from "./assets/textures/LodTextureManager";
 import { ObjectManager } from "./assets/ObjectManager";
 import { DefinitionManager } from "./game/definitions/DefinitionManager";
-import { reloadContent } from "./game/definitions/contentBoot";
+import { reloadContent, initContentFromCache, sharedContent } from "./game/definitions/contentBoot";
+import { lastEnv } from "./game/definitions/contentCache";
 import type { GameContext } from "./GameContext";
 
 
@@ -91,9 +92,14 @@ async function main(): Promise<void> {
   // login re-points it at the selected environment (mirrors the wasm client URL).
   lodTextures.setGateBase(httpBaseFor("dev"));
   const objects = new ObjectManager(lodTextures);
-  // No build-time texture index to pre-warm anymore — textures resolve per-stem
-  // from the wasm VM and stream from R2 on first reference (white fallback until
-  // they land). Assets are "ready" immediately.
+  // Optimistic pre-login warm: if a previous session cached a corpus, seed the
+  // content runtime from it and kick the LOW-lane preview prewarm now (during the
+  // login screen). A returning player's placeholders fetch from HTTP disk cache
+  // and are ready before login completes, so the world doesn't flash white. No-op
+  // on a first-ever visit; reconciled against the gate's corpus at login.
+  void prewarmFromCache(lodTextures);
+  // Textures otherwise resolve per-stem from the wasm VM and stream from R2 (white
+  // fallback until they land), so there's nothing to block boot on.
   const assetsReady = Promise.resolve();
 
   const scenes = new SceneManager(app);
@@ -234,6 +240,23 @@ function toSyncStats(s: ClockStats): SyncStats {
     runningDeltaMs: s.runningDeltaMs,
     runningDelayMs: s.runningDelayMs,
   };
+}
+
+/** Optimistic pre-login preview warm. Seeds the content runtime from the last
+ *  session's cached corpus (IndexedDB) and kicks the LOW-lane preview prewarm, so
+ *  a returning player's placeholders are ready (served from HTTP disk cache)
+ *  before login. Best-effort — no cache, or any failure, falls back to the normal
+ *  post-login prewarm in WorldRenderer. */
+async function prewarmFromCache(lod: LodTextureManager): Promise<void> {
+  try {
+    const env = await lastEnv();
+    if (!env) return;
+    if (!(await initContentFromCache(env))) return;
+    lod.setGateBase(httpBaseFor(env as Environment));
+    lod.prewarmPreviews(sharedContent().previewStems());
+  } catch {
+    /* best-effort warm — the normal cold path still runs at login */
+  }
 }
 
 main().catch((e) => console.error("view: boot failed", e));
