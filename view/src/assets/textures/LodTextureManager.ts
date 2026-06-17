@@ -39,8 +39,8 @@ const MAX_CONCURRENT_FETCHES = 8;
  * already-cached smaller bucket for the same stem; failing that, the low-res
  * PREVIEW atlas (a separate atlas of `PREVIEW_LOD` placeholders, kicked on
  * demand); only if even the preview is absent does it fall to the MIN_LOD-square
- * white fallback. `onLoad` fires when any of those land so consumers re-resolve
- * to the upgrade (white → preview → full-res).
+ * transparent fallback. `onLoad` fires when any of those land so consumers
+ * re-resolve to the upgrade (transparent → preview → full-res).
  */
 export class LodTextureManager {
   private readonly textures: TextureManager;
@@ -62,7 +62,7 @@ export class LodTextureManager {
    *  so the picker clamps the ideal and avoids re-probing absent buckets. */
   private readonly maxSize = new Map<string, number>();
   private readonly listeners = new Set<() => void>();
-  private whiteFallback: Texture | null = null;
+  private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
    *  target when an R2-direct LOD fetch 404s: `<gateBase>/textures/lod/...`
    *  generates the LOD from the master on demand. `null` until a gate is selected
@@ -102,10 +102,10 @@ export class LodTextureManager {
   }
 
   /** Resolve a stem to its atlas-packed albedo+normal+emissive triple, with the
-   *  substitute + white-fallback cascade. Never returns null. Empty stem (the VM
-   *  couldn't resolve it) → white. */
+   *  substitute + transparent-fallback cascade. Never returns null. Empty stem
+   *  (the VM couldn't resolve it) → transparent. */
   getPair(stem: string, desiredSize: number): PackedPair {
-    if (!stem) return this.whitePair();
+    if (!stem) return this.transparentPair();
     let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
     const known = this.maxSize.get(stem);
     if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
@@ -122,15 +122,15 @@ export class LodTextureManager {
     const substitute = this.findCachedSubstitute(stem);
     if (substitute) return substitute;
     // No full-res yet → fall back to the low-res PREVIEW atlas (kicking its load
-    // on first miss); white only if even the preview hasn't landed.
-    return this.getPreview(stem) ?? this.whitePair();
+    // on first miss); transparent only if even the preview hasn't landed.
+    return this.getPreview(stem) ?? this.transparentPair();
   }
 
   /** Cached preview for the stem, or null if its prewarm hasn't landed yet (or it
    *  has no small bucket). Previews are loaded EAGERLY by {@link prewarmPreviews}
    *  at login — NOT lazily here — so by the time an object renders its placeholder
    *  is already packed and a streaming full-res texture upgrades from colour/shape
-   *  rather than flashing white. */
+   *  rather than popping in from nothing. */
   private getPreview(stem: string): PackedPair | null {
     return this.previewByKey.get(stem) ?? null;
   }
@@ -170,8 +170,8 @@ export class LodTextureManager {
     }
   }
 
-  private whitePair(): PackedPair {
-    return { albedo: this.ensureWhiteFallback(), normal: null, emissive: null };
+  private transparentPair(): PackedPair {
+    return { albedo: this.ensureTransparentFallback(), normal: null, emissive: null };
   }
 
   /** Highest-resolution already-cached bucket for this stem (Pixi downscales
@@ -184,16 +184,20 @@ export class LodTextureManager {
     return null;
   }
 
-  private ensureWhiteFallback(): Texture {
-    if (this.whiteFallback) return this.whiteFallback;
+  /** A fully transparent MIN_LOD square, packed once into the atlas. Players
+   *  prefer an invisible placeholder over a white square, so an unresolved /
+   *  not-yet-loaded sprite renders as nothing rather than a flash of white.
+   *  (An empty Graphics rendered with `clear: true` leaves the RT cleared to
+   *  transparent black `(0,0,0,0)`.) */
+  private ensureTransparentFallback(): Texture {
+    if (this.transparentFallback) return this.transparentFallback;
     const g = new Graphics();
-    g.rect(0, 0, MIN_LOD, MIN_LOD).fill({ color: 0xffffff });
     const rt = RenderTexture.create({ width: MIN_LOD, height: MIN_LOD });
     this.renderer.render({ container: g, target: rt, clear: true });
     g.destroy();
     const atlas = this.textures.pack(rt).albedo;
     rt.destroy(true);
-    this.whiteFallback = atlas;
+    this.transparentFallback = atlas;
     return atlas;
   }
 
@@ -204,7 +208,7 @@ export class LodTextureManager {
     this.previewLoading.clear();
     this.preview.destroy();
     this.maxSize.clear();
-    this.whiteFallback = null;
+    this.transparentFallback = null;
     // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
     this.highQueue.length = 0;
     this.lowQueue.length = 0;
@@ -261,9 +265,9 @@ export class LodTextureManager {
 
   /** Fetch + pack the stem's `PREVIEW_LOD` placeholder into the dedicated preview
    *  atlas (R2-direct, gate on miss — same path as {@link load}). Cached under the
-   *  bare stem (one preview per stem); fires `onLoad` so consumers swap the white
-   *  fallback for the preview in place. Best-effort: a stem with no master simply
-   *  stays on white until... it has no master, so it stays white. */
+   *  bare stem (one preview per stem); fires `onLoad` so consumers swap the
+   *  transparent fallback for the preview in place. Best-effort: a stem with no
+   *  master has nothing to show, so it stays transparent. */
   private async loadPreview(stem: string): Promise<void> {
     let landed = false;
     try {
