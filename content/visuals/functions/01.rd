@@ -86,11 +86,18 @@
     $globals::hex_width $globals::hex_height &h.size vec2   ; body fills the cell (px)
     *color.bg &h.tint set
     ; Ground texture: when the tile set a `&ground` pack (grassy tiles), resolve its
-    ; `tiles`-category stem via `^r2` — variant picked by the tile's `^seed`, so
+    ; `tiles`-category stem via `^r2` — variant picked by the tile's `^seed call`, so
     ; neighbours vary — and hand it to the view, which clips it to the hex cell and
     ; multiplies the tint. No `&ground` → empty category/object → empty stem → the
     ; view keeps the solid-colour (tinted white hex) body, exactly as before.
-    *ground.category *ground.object 0 0 ^seed ^r2 call &h.texture set
+    *ground.category *ground.object 0 0 ^seed call ^r2 call &h.texture set
+    ; The ground pack's `&fill` is the texture's cover overscale (how much to
+    ; over-cover the cell so its inset hex fills it cleanly); the view consumes it
+    ; as the bake scale. Only set when there IS a ground pack — `&h.scale` defaults
+    ; to 1.0 for solid-colour tiles (where it scales the node, not a texture).
+    *ground.category 0 eq if :hb_done goto
+    *ground.fill &h.scale set
+    :hb_done>
 
   ; ring_prims — a tile's stock scatter: prims.0 = the hex tile body (fills the
   ; cell, tint color.bg), then one sprite prim per stock object dropped into one

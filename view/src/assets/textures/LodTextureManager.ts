@@ -134,14 +134,14 @@ export class LodTextureManager {
    *  when the LOD upgrades (preview→full), so every tile sharing a texture reuses
    *  one clipped frame. While the source is still the transparent placeholder it's
    *  returned unclipped, so the solid-colour tile bg shows through until grass lands. */
-  getHexClipped(stem: string, desiredSize: number, hexMask: Texture): PackedPair {
+  getHexClipped(stem: string, desiredSize: number, hexMask: Texture, fillScale: number): PackedPair {
     if (!stem) return this.transparentPair();
     const source = this.getPair(stem, desiredSize);
     if (source.albedo === this.ensureTransparentFallback()) return source; // not loaded yet
     const prev = this.hexClipped.get(stem);
     if (prev && prev.src === source.albedo) return prev.pair;
     if (prev) prev.handle.release();
-    const baked = this.bakeHexClip(source, hexMask);
+    const baked = this.bakeHexClip(source, hexMask, fillScale);
     this.hexClipped.set(stem, { src: source.albedo, pair: baked.pair, handle: baked.handle });
     return baked.pair;
   }
@@ -150,12 +150,16 @@ export class LodTextureManager {
    *  alpha, and pack the result as one atlas slot. The hex mask already carries a
    *  transparent pad, so no frame inset is needed (the seams between tiles stay
    *  tight). */
-  private bakeHexClip(source: PackedPair, hexMask: Texture): { pair: PackedPair; handle: SlotHandle } {
+  private bakeHexClip(
+    source: PackedPair,
+    hexMask: Texture,
+    fillScale: number,
+  ): { pair: PackedPair; handle: SlotHandle } {
     const w = Math.round(hexMask.frame.width);
     const h = Math.round(hexMask.frame.height);
-    const albedoRT = this.renderMasked(source.albedo, hexMask, w, h);
-    const normalRT = source.normal ? this.renderMasked(source.normal, hexMask, w, h) : null;
-    const emissiveRT = source.emissive ? this.renderMasked(source.emissive, hexMask, w, h) : null;
+    const albedoRT = this.renderMasked(source.albedo, hexMask, w, h, fillScale);
+    const normalRT = source.normal ? this.renderMasked(source.normal, hexMask, w, h, fillScale) : null;
+    const emissiveRT = source.emissive ? this.renderMasked(source.emissive, hexMask, w, h, fillScale) : null;
     const { pair, handle } = this.textures.packTracked(albedoRT, normalRT, emissiveRT);
     albedoRT.destroy(true);
     normalRT?.destroy(true);
@@ -163,14 +167,27 @@ export class LodTextureManager {
     return { pair, handle };
   }
 
-  /** Render `src` cover-stretched to `w×h` and masked by `hexMask`'s alpha into a
-   *  fresh RenderTexture. */
-  private renderMasked(src: Texture, hexMask: Texture, w: number, h: number): RenderTexture {
+  /** Render `src` cover-fitted over the hex cell and masked by `hexMask`'s alpha
+   *  into a fresh RenderTexture. The fit is UNIFORM (preserving aspect — a
+   *  non-uniform stretch would squish the hexagon) and scaled to cover the cell
+   *  bbox with a small overscale, so the master's hex (slightly inset in its
+   *  square) fully fills the cell hex; the mask clips the overflow. */
+  private renderMasked(
+    src: Texture,
+    hexMask: Texture,
+    w: number,
+    h: number,
+    fillScale: number,
+  ): RenderTexture {
     const rt = RenderTexture.create({ width: w, height: h });
     const cont = new Container();
     const tex = new Sprite(src);
-    tex.width = w;
-    tex.height = h;
+    // Cover-fit the cell (universal), then the DSL-supplied `fillScale` overscale
+    // (per tile texture, set by its ground pack) closes the master's hex inset.
+    const scale = Math.max(w / src.width, h / src.height) * fillScale;
+    tex.anchor.set(0.5);
+    tex.scale.set(scale);
+    tex.position.set(w / 2, h / 2);
     const mask = new Sprite(hexMask);
     mask.width = w;
     mask.height = h;

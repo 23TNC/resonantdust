@@ -159,6 +159,10 @@ abstract class BasePrim implements Primitive {
  *  texture × tint gives any colour without a Graphics batch break. */
 export class FillPrim extends BasePrim {
   readonly node: LitSprite;
+  /** True when this hex holds a clipped tile texture: then the prim's `scale` is
+   *  consumed by the bake's fill (see {@link applyDiscrete}), so the NODE renders
+   *  at the cell size only — applying scale again would overflow the cell. */
+  private texturedHex = false;
   constructor(readonly kind: "rect" | "hex", private readonly deps: PrimDeps) {
     super();
     this.node = new LitSprite(deps.deferred, deps.whiteTexture);
@@ -175,16 +179,27 @@ export class FillPrim extends BasePrim {
     // fallback and they get distance falloff + ambient only.
     if (n.texture && this.kind === "hex" && this.deps.hexTexture) {
       // A textured hex (a tile ground): resolve the LOD and clip it to the hex
-      // cell so it doesn't overflow into neighbours. Tint still multiplies it.
-      const p = this.deps.lod.getHexClipped(n.texture, footprintPx(box, n.size), this.deps.hexTexture);
+      // cell so it doesn't overflow into neighbours. `n.scale` is the ground
+      // pack's fill overscale (over-cover so the master's inset hex fills the
+      // cell) — consumed by the bake, not the node. Tint multiplies.
+      this.texturedHex = true;
+      const p = this.deps.lod.getHexClipped(
+        n.texture,
+        footprintPx(box, n.size),
+        this.deps.hexTexture,
+        n.scale ?? 1,
+      );
       this.node.setTextures(p.albedo, p.normal, p.emissive);
-    } else if (n.texture) {
-      const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
-      this.node.setTextures(r.texture, r.normal, r.emissive);
-    } else if (this.kind === "hex" && this.deps.hexTexture) {
-      this.node.setTextures(this.deps.hexTexture, null);
     } else {
-      this.node.setTextures(this.deps.whiteTexture, null);
+      this.texturedHex = false;
+      if (n.texture) {
+        const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
+        this.node.setTextures(r.texture, r.normal, r.emissive);
+      } else if (this.kind === "hex" && this.deps.hexTexture) {
+        this.node.setTextures(this.deps.hexTexture, null);
+      } else {
+        this.node.setTextures(this.deps.whiteTexture, null);
+      }
     }
     setAnchor(this.node, n);
   }
@@ -195,7 +210,8 @@ export class FillPrim extends BasePrim {
     this.node.rotation = c.rot;
     this.node.alpha = c.alpha;
     this.node.tint = c.tint;
-    this.node.setSize(c.w * c.scale, c.h * c.scale);
+    const s = this.texturedHex ? 1 : c.scale;
+    this.node.setSize(c.w * s, c.h * s);
   }
 }
 

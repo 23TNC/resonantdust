@@ -136,6 +136,7 @@
       "tiles &category set
       "grass_hex &object set
       256 &size set
+      1.08 &fill set                 ; cover overscale: fill the hex cell, clip the inset
 
   ::symbols>
     @define>
