@@ -12,6 +12,7 @@
     :aether>
       @define>
         1 &parts set
+        2083695013310814 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -20,6 +21,7 @@
     :aether.black>
       @define>
         1 &parts set
+        4042549814354720 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -28,6 +30,7 @@
     :anima>
       @define>
         1 &parts set
+        224867786839212 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -36,6 +39,7 @@
     :anima.black>
       @define>
         1 &parts set
+        3869173684676435 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -44,6 +48,7 @@
     :corpus>
       @define>
         1 &parts set
+        4477002767745559 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -52,6 +57,7 @@
     :corpus.black>
       @define>
         1 &parts set
+        2522481364746628 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -60,6 +66,7 @@
     :sollertia>
       @define>
         1 &parts set
+        2106190322077384 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -68,6 +75,7 @@
     :sollertia.black>
       @define>
         1 &parts set
+        1645449267412013 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array

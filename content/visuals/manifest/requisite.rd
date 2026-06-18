@@ -12,6 +12,7 @@
     :axe>
       @define>
         1 &parts set
+        95627546694172 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -20,6 +21,7 @@
     :brick>
       @define>
         1 &parts set
+        3778163958834951 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -28,6 +30,7 @@
     :coal>
       @define>
         1 &parts set
+        128958713086773 &hash set
         1 &var_id array
         2 &var_id.0 set
         1 &var_count array
@@ -36,6 +39,7 @@
     :dirt>
       @define>
         1 &parts set
+        1438223516447581 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -44,6 +48,7 @@
     :dust>
       @define>
         1 &parts set
+        159011947634735 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -82,6 +87,7 @@
     :food>
       @define>
         1 &parts set
+        1738255012333821 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -90,6 +96,7 @@
     :gravel>
       @define>
         1 &parts set
+        3207551142990921 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -98,6 +105,7 @@
     :herb>
       @define>
         1 &parts set
+        3297740997992374 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -106,6 +114,7 @@
     :ingot>
       @define>
         1 &parts set
+        2873188407090682 &hash set
         1 &var_id array
         2 &var_id.0 set
         1 &var_count array
@@ -114,6 +123,7 @@
     :log>
       @define>
         1 &parts set
+        1503824728346111 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -122,6 +132,7 @@
     :lumber>
       @define>
         1 &parts set
+        1796925896056366 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -130,6 +141,7 @@
     :ore>
       @define>
         1 &parts set
+        2305670533886955 &hash set
         1 &var_id array
         2 &var_id.0 set
         1 &var_count array
@@ -138,6 +150,7 @@
     :phial.glass>
       @define>
         2 &parts set
+        2352900720063846 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -176,6 +189,7 @@
     :pickaxe>
       @define>
         1 &parts set
+        4184281218205658 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -184,6 +198,7 @@
     :reliquary>
       @define>
         1 &parts set
+        1139253120111913 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -192,6 +207,7 @@
     :rock>
       @define>
         1 &parts set
+        3148101295217022 &hash set
         1 &var_id array
         2 &var_id.0 set
         1 &var_count array
@@ -200,6 +216,7 @@
     :sand>
       @define>
         1 &parts set
+        847166483882260 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -208,6 +225,7 @@
     :stick>
       @define>
         1 &parts set
+        3676113626633526 &hash set
         1 &var_id array
         2 &var_id.0 set
         1 &var_count array
@@ -216,6 +234,7 @@
     :stone>
       @define>
         1 &parts set
+        3642801689069171 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array

@@ -12,6 +12,7 @@
     :concrete>
       @define>
         1 &parts set
+        459275509047491 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -23,6 +24,7 @@
     :fog>
       @define>
         1 &parts set
+        2993107061185276 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -61,6 +63,7 @@
     :grass>
       @define>
         1 &parts set
+        3335818640918006 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set

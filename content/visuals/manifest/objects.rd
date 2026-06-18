@@ -12,6 +12,7 @@
     :berry>
       @define>
         1 &parts set
+        2147236630429354 &hash set
         12 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -42,6 +43,7 @@
     :conifer>
       @define>
         1 &parts set
+        4305857856723643 &hash set
         9 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -66,6 +68,7 @@
     :deciduous>
       @define>
         1 &parts set
+        2643968660234298 &hash set
         7 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -86,6 +89,7 @@
     :flora>
       @define>
         1 &parts set
+        1062068941503210 &hash set
         30 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -152,6 +156,7 @@
     :flower>
       @define>
         1 &parts set
+        621957101566393 &hash set
         28 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -214,6 +219,7 @@
     :mushroom>
       @define>
         1 &parts set
+        1416324630598016 &hash set
         23 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -266,6 +272,7 @@
     :stone>
       @define>
         1 &parts set
+        2001321806978718 &hash set
         18 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set

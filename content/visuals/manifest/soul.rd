@@ -12,7 +12,8 @@
     :golem>
       @define>
         1 &parts set
-        9 &var_id array
+        3742803984957216 &hash set
+        16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
         1 &var_id.2 set
@@ -22,7 +23,14 @@
         1 &var_id.6 set
         1 &var_id.7 set
         1 &var_id.8 set
-        9 &var_count array
+        1 &var_id.9 set
+        1 &var_id.10 set
+        1 &var_id.11 set
+        1 &var_id.12 set
+        1 &var_id.13 set
+        1 &var_id.14 set
+        1 &var_id.15 set
+        16 &var_count array
         1 &var_count.0 set
         2 &var_count.1 set
         3 &var_count.2 set
@@ -32,10 +40,18 @@
         7 &var_count.6 set
         8 &var_count.7 set
         9 &var_count.8 set
+        10 &var_count.9 set
+        11 &var_count.10 set
+        12 &var_count.11 set
+        13 &var_count.12 set
+        14 &var_count.13 set
+        15 &var_count.14 set
+        16 &var_count.15 set
         0 &factions array
     :golem.blueprint>
       @define>
         1 &parts set
+        1411540567448445 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -74,6 +90,7 @@
     :human>
       @define>
         1 &parts set
+        3890586545505164 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -112,6 +129,7 @@
     :human.blueprint>
       @define>
         1 &parts set
+        1115164802892159 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -150,6 +168,7 @@
     :undead>
       @define>
         1 &parts set
+        1350961357673570 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -188,6 +207,7 @@
     :undead.blueprint>
       @define>
         1 &parts set
+        2575609829837275 &hash set
         16 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set

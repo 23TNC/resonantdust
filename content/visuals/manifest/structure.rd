@@ -12,6 +12,7 @@
     :alter>
       @define>
         1 &parts set
+        3265449610362214 &hash set
         6 &var_id array
         1 &var_id.0 set
         2 &var_id.1 set
@@ -33,6 +34,7 @@
     :fountain>
       @define>
         1 &parts set
+        871829494032915 &hash set
         10 &var_id array
         1 &var_id.0 set
         2 &var_id.1 set
@@ -62,6 +64,7 @@
     :mirror>
       @define>
         1 &parts set
+        3958464236750921 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -73,6 +76,7 @@
     :rack.weapon>
       @define>
         1 &parts set
+        1330952995114910 &hash set
         1 &var_id array
         4 &var_id.0 set
         1 &var_count array
@@ -84,6 +88,7 @@
     :soul.store>
       @define>
         1 &parts set
+        3761399826279065 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
@@ -92,6 +97,7 @@
     :table.slab>
       @define>
         1 &parts set
+        3887817433095097 &hash set
         1 &var_id array
         1 &var_id.0 set
         1 &var_count array
