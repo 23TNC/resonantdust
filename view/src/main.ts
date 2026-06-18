@@ -32,6 +32,7 @@ import { ObjectManager } from "./assets/ObjectManager";
 import { DefinitionManager } from "./game/definitions/DefinitionManager";
 import { reloadContent, initContentFromCache, sharedContent } from "./game/definitions/contentBoot";
 import { lastEnv } from "./game/definitions/contentCache";
+import { persistStorage } from "./assets/textures/previewCache";
 import type { GameContext } from "./GameContext";
 
 
@@ -91,6 +92,11 @@ async function main(): Promise<void> {
   // On-miss LOD generation falls back to the gate; default to the dev gate until
   // login re-points it at the selected environment (mirrors the wasm client URL).
   lodTextures.setGateBase(httpBaseFor("dev"));
+  // The R2/CDN origin Assets fetches from — the persisted-preview path needs it
+  // for absolute `fetch()` byte reads. Ask for durable storage so the pinned
+  // preview floor (IndexedDB) survives between sessions (best-effort).
+  lodTextures.setTextureBase(TEXTURE_BASE);
+  void persistStorage();
   const objects = new ObjectManager(lodTextures);
   // Optimistic pre-login warm: if a previous session cached a corpus, seed the
   // content runtime from it and kick the LOW-lane preview prewarm now (during the

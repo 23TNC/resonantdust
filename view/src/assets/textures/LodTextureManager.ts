@@ -8,6 +8,7 @@ import {
   type Channel,
 } from "../lodUrls";
 import { TextureManager, type PackedPair, type SlotHandle } from "./TextureManager";
+import { getPreview, putPreview } from "./previewCache";
 import { debug } from "../../debug";
 
 /** A cached LOD: the framed triple plus the atlas slot handle, so a superseded
@@ -81,6 +82,10 @@ export class LodTextureManager {
    *  generates the LOD from the master on demand. `null` until a gate is selected
    *  (pre-login) — fetches then stay R2-direct-only. */
   private gateBase: string | null = null;
+  /** The R2/CDN texture origin (PIXI's `Assets` basePath), for the byte fetches
+   *  the persisted-preview path uses (`fetch().arrayBuffer()` needs an absolute
+   *  URL, unlike `Assets.load` which rewrites a relative one). Empty = same-origin. */
+  private textureBase = "";
   /** Fetch scheduler lanes. Real (on-screen) loads enqueue HIGH, preview prewarm
    *  enqueues LOW; {@link pump} always starts HIGH before LOW, so a visible tile's
    *  texture never queues behind hundreds of off-screen previews (which, on a cold
@@ -101,6 +106,12 @@ export class LodTextureManager {
    *  client's gate URL so generated LODs come from the same gate as the data. */
   setGateBase(httpBase: string): void {
     this.gateBase = httpBase.replace(/\/$/, "");
+  }
+
+  /** The R2/CDN origin PIXI's `Assets` was inited with — so the persisted-preview
+   *  path can build absolute URLs for its `fetch()` byte reads. Set once at boot. */
+  setTextureBase(base: string): void {
+    this.textureBase = base.replace(/\/$/, "");
   }
 
   /** Subscribe to load-completion (fires once per stem@size as it lands). */
@@ -305,14 +316,36 @@ export class LodTextureManager {
    *  transparent fallback for the preview in place. Best-effort: a stem with no
    *  master has nothing to show, so it stays transparent. */
   private async loadPreview(stem: string): Promise<void> {
+    const { base, version } = splitVersion(stem);
     let landed = false;
     try {
-      const albedoSrc = await this.fetchChannel(stem, PREVIEW_LOD, "albedo");
-      if (albedoSrc) {
-        const normalSrc = await this.fetchChannel(stem, PREVIEW_LOD, "normal");
-        const emissiveSrc = await this.fetchChannel(stem, PREVIEW_LOD, "emissive");
-        const { pair, handle } = this.preview.packTracked(albedoSrc, normalSrc, emissiveSrc);
+      // 1. Persisted bytes (version-matched) — zero network, can't be HTTP-evicted.
+      let bytes = await getPreview(base);
+      if (!bytes || bytes.v !== version) {
+        // 2. Miss / stale → fetch the channel bytes from R2 (gate on miss) and
+        //    write them through to IndexedDB for next session.
+        const albedo = await this.fetchBytes(stem, PREVIEW_LOD, "albedo");
+        bytes = albedo
+          ? {
+              v: version,
+              albedo,
+              normal: await this.fetchBytes(stem, PREVIEW_LOD, "normal"),
+              emissive: await this.fetchBytes(stem, PREVIEW_LOD, "emissive"),
+            }
+          : null;
+        if (bytes) void putPreview(base, bytes);
+      }
+      if (bytes) {
+        const albedoTex = await bytesToTexture(bytes.albedo);
+        const normalTex = bytes.normal ? await bytesToTexture(bytes.normal) : null;
+        const emissiveTex = bytes.emissive ? await bytesToTexture(bytes.emissive) : null;
+        const { pair, handle } = this.preview.packTracked(albedoTex, normalTex, emissiveTex);
         this.previewByKey.set(stem, { pair: insetPair(pair), handle });
+        // The sources are baked into the atlas page now — free the transient
+        // decoded bitmaps (the byte path owns them, unlike Assets-cached textures).
+        albedoTex.destroy(true);
+        normalTex?.destroy(true);
+        emissiveTex?.destroy(true);
         landed = true;
       }
     } catch (err) {
@@ -322,6 +355,47 @@ export class LodTextureManager {
     }
     if (landed) for (const cb of this.listeners) cb();
   }
+
+  /** Fetch one channel's raw PNG bytes for the persisted-preview path: R2-direct
+   *  (absolute, via the texture base) first, then the gate on a miss. Null if
+   *  neither has it. Distinct from {@link fetchChannel} (which decodes via PIXI
+   *  `Assets`) because persistence needs the bytes, not a GPU texture. */
+  private async fetchBytes(stem: string, size: number, channel: Channel): Promise<ArrayBuffer | null> {
+    const path = channelUrl(stem, size, channel); // version-aware (?v in query)
+    const direct = await fetchOrNull(this.textureBase + path);
+    if (direct) return direct;
+    if (this.gateBase) return fetchOrNull(this.gateBase + path);
+    return null;
+  }
+}
+
+/** Split a resolved stem into its base path and `?v=` version hash (empty for an
+ *  un-versioned stem). The base is the persisted-preview store key; the version
+ *  is its staleness tag. */
+function splitVersion(stem: string): { base: string; version: string } {
+  const i = stem.indexOf("?");
+  if (i < 0) return { base: stem, version: "" };
+  const m = /(?:^|&)v=([^&]*)/.exec(stem.slice(i + 1));
+  return { base: stem.slice(0, i), version: m ? m[1] : "" };
+}
+
+/** `fetch` `url` to an ArrayBuffer; null on 404 / failure. Used by the persisted-
+ *  preview path, which needs the raw bytes (to store) — not a decoded texture. */
+async function fetchOrNull(url: string): Promise<ArrayBuffer | null> {
+  try {
+    const r = await fetch(url);
+    return r.ok ? await r.arrayBuffer() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Decode PNG bytes into a transient PIXI texture (via `createImageBitmap`). The
+ *  caller packs it into the atlas then destroys it — the bytes themselves live in
+ *  IndexedDB, not the PIXI Assets cache. */
+async function bytesToTexture(buf: ArrayBuffer): Promise<Texture> {
+  const bitmap = await createImageBitmap(new Blob([buf], { type: "image/png" }));
+  return Texture.from(bitmap);
 }
 
 /** Load `url` via PIXI Assets; null if it 404s / fails. A failed load leaves a
