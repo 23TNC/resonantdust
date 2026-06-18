@@ -45,7 +45,9 @@
   ::forest>
     :visuals>
       @define>
-        #395C39 &color.bg set       ; tints the grass ground (multiply)
+        #5C6651 &color.bg set       ; desaturated dark green: the multiply darkens the
+                                    ; grass UNIFORMLY (hue intact) so brown stays brown,
+                                    ; not black — a saturated tint would crush it
         #2A2A2A &color.title set
         #0B1426 &color.text set
         $asset::grass &ground set    ; grass ground texture, hex-clipped by the view
@@ -59,7 +61,8 @@
   ::plains>
     :visuals>
       @define>
-        #C9D75F &color.bg set       ; brighter tint than forest → plains reads lighter
+        #C7CAB0 &color.bg set       ; desaturated light: brighter than forest, same
+                                    ; hue-preserving multiply → plains reads lighter
         #0b1426 &color.title set
         #0b1426 &color.text set
         $asset::grass &ground set    ; same grass ground, lighter tint
