@@ -82,6 +82,23 @@ class Atlas {
     }
     return parent;
   }
+
+  /** Return a previously-allocated slot to the free list so a later `alloc` of the
+   *  same size reuses it. Non-coalescing — a freed slot never merges back into a
+   *  larger parent, which is fine for our churn (a preview/LOD slot is replaced by
+   *  another of the *same* size on a version bump, not promoted to a bigger one). */
+  release(slot: { x: number; y: number }, slotSize: number): void {
+    const list = this.free.get(slotSize);
+    if (list) list.push({ x: slot.x, y: slot.y });
+    else this.free.set(slotSize, [{ x: slot.x, y: slot.y }]);
+  }
+}
+
+/** Opaque handle to one packed slot. Call {@link SlotHandle.release} to return
+ *  the slot to its atlas (and decrement the occupancy tally) so the space is
+ *  reusable — used to evict a superseded texture version. */
+export interface SlotHandle {
+  release(): void;
 }
 
 interface PhysicalPage {
@@ -142,8 +159,9 @@ export interface PackedPair {
  * wasted but harmless. Albedo and normal sources must share dimensions (the
  * slot is sized from the albedo).
  *
- * No deduplication and no eviction — every pack call consumes a fresh
- * slot for the lifetime of the manager.
+ * No deduplication. Plain `pack` slots persist for the lifetime of the manager;
+ * `packTracked` returns a {@link SlotHandle} whose `release()` frees the slot for
+ * reuse, so the LOD cache can evict a texture when a newer version supersedes it.
  */
 export class TextureManager {
   private readonly renderer: Renderer;
@@ -185,6 +203,18 @@ export class TextureManager {
     normal: Texture | null = null,
     emissive: Texture | null = null,
   ): PackedPair {
+    return this.packTracked(albedo, normal, emissive).pair;
+  }
+
+  /** Like {@link pack}, but also returns a {@link SlotHandle} whose `release()`
+   *  frees the slot — for callers (the LOD cache) that evict a texture when a
+   *  newer version supersedes it. Plain `pack` discards the handle for
+   *  lifetime-of-manager fills (the transparent fallback, UI bakes). */
+  packTracked(
+    albedo: Texture,
+    normal: Texture | null = null,
+    emissive: Texture | null = null,
+  ): { pair: PackedPair; handle: SlotHandle } {
     const w = albedo.width;
     const h = albedo.height;
     const slotSize = nextPow2(Math.max(w, h));
@@ -195,17 +225,31 @@ export class TextureManager {
     }
 
     this.slotCounts.set(slotSize, (this.slotCounts.get(slotSize) ?? 0) + 1);
+    const { atlas, slot, page } = this.allocate(slotSize);
+    const pair = this.bake(albedo, normal, emissive, w, h, slot, page);
+    const handle: SlotHandle = {
+      release: () => {
+        atlas.release(slot, slotSize);
+        this.slotCounts.set(slotSize, Math.max(0, (this.slotCounts.get(slotSize) ?? 0) - 1));
+      },
+    };
+    return { pair, handle };
+  }
 
+  /** Find an existing atlas slot of `slotSize`, or create a new atlas/page for it;
+   *  returns the slot plus the owning atlas (for `release`) and page (for `bake`). */
+  private allocate(
+    slotSize: number,
+  ): { atlas: Atlas; slot: { x: number; y: number }; page: PhysicalPage } {
     for (const page of this.pages) {
       for (const atlas of page.atlases) {
         const slot = atlas.alloc(slotSize);
-        if (slot) return this.bake(albedo, normal, emissive, w, h, slot, page);
+        if (slot) return { atlas, slot, page };
       }
     }
-
     const created = this.createAtlas();
     const slot = created.atlas.alloc(slotSize)!;
-    return this.bake(albedo, normal, emissive, w, h, slot, created.page);
+    return { atlas: created.atlas, slot, page: created.page };
   }
 
   destroy(): void {
