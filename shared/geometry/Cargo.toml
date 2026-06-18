@@ -1,0 +1,25 @@
+[package]
+name = "resonantdust-geometry"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Silhouette geometry sidecars (contours + triangulation) derived from master-sprite alpha. Types are always available (the wasm client deserializes them to feed view); the generation pipeline (marching squares + Visvalingam-Whyatt + earcut) is feature-gated so the wasm build pulls only the types."
+
+[lib]
+name = "resonantdust_geometry"
+path = "src/lib.rs"
+
+[dependencies]
+# Types cross the gate→wasm→view boundary as JSON, so they're always (de)serializable.
+serde = { version = "1", features = ["derive"] }
+
+# Generation runs server-side only (the gate). Pure-Rust, builds in rust:slim:
+#   image  — PNG decode (no C codecs), default-features off → `png` only
+#   earcutr — pure-Rust earcut port (verified in rust:slim; holes excluded)
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+earcutr = { version = "0.4", optional = true }
+
+[features]
+default = []
+# Enable the alpha→sidecar pipeline (server/gate). Off for the wasm client.
+generate = ["dep:image", "dep:earcutr"]
