@@ -2,10 +2,12 @@ import { BitmapText, Container, Graphics, Sprite, Texture } from "pixi.js";
 import { TEXT_BAKE_PX, TEXT_FONT } from "../../../assets/fonts";
 import type { LodTextureManager } from "../../../assets/textures/LodTextureManager";
 import type { DeferredLighting, Light } from "../../lighting/DeferredLighting";
+import { LightPriority } from "../../lighting/DeferredLighting";
 import { LitSprite } from "../../lighting/LitSprite";
+import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
 import { resolveAsset } from "./resolveAsset";
-import type { AnimatableFields, PrimKind, VisualNode } from "./visualSpec";
+import { TEX_TRANSPARENT, TEX_WHITE, type AnimatableFields, type PrimKind, type VisualNode } from "./visualSpec";
 
 /** Per-step ease factor. Matches `CardLayout.TWEEN_LERP` so a primitive's ease
  *  feels identical to the card-position tween — both advance one step per
@@ -19,6 +21,10 @@ const TINT_EPS = 1.5;
 /** Shared deps a primitive needs to resolve itself. */
 export interface PrimDeps {
   lod: LodTextureManager;
+  /** Per-stem silhouette geometry — drives the first-frame placeholder shown
+   *  before the real art (LOD/preview) lands. Optional: preview/editor contexts
+   *  may omit it (no placeholder, same as before). */
+  geometry?: GeometryStore;
   /** Viewport deferred lighting. Textured prims (`rect`/`hex`/`sprite`) are
    *  `LitSprite`s registered here so the deferred normal pass can reach them;
    *  the system scopes lights to this viewport. */
@@ -155,16 +161,38 @@ abstract class BasePrim implements Primitive {
   protected abstract writeNode(): void;
 }
 
-/** `rect` / `hex` — a solid (or textured) fill via a tinted Sprite. A white
- *  texture × tint gives any colour without a Graphics batch break. */
-export class FillPrim extends BasePrim {
+/** How a {@link TexPrim} sizes + shows itself, resolved once per `applyDiscrete`
+ *  from the node's texture + kind. An exhaustive union (not a pile of booleans) so
+ *  the three sizing rules can never be conflated, and `writeNode` — which runs
+ *  every settle step with no access to the node — reads a single settled value. */
+type TexMode =
+  /** `^transparent` — render nothing (a placeholder slot). */
+  | { kind: "hidden" }
+  /** A resolved LOD stem (non-hex): the resolver's `baseScale` draws the chosen
+   *  bucket at the requested CSS px, then the eased `scale` composes on top. */
+  | { kind: "art"; baseScale: number }
+  /** A resolved stem on a `hex`: the texture is pre-clipped to the cell by
+   *  `getHexClipped`, whose `fillScale` already consumed the node's `scale`, so
+   *  the node renders at the cell size only (applying `scale` would overflow). */
+  | { kind: "clippedHex" }
+  /** A solid fill — `^white` / empty (hex → hex-mask, rect/sprite → white). The
+   *  eased `scale` multiplies the box like any sized prim. */
+  | { kind: "fill" };
+
+/** `rect` / `hex` / `sprite` — every textured primitive. All three are a single
+ *  tinted {@link LitSprite}; they differ only in where the texture comes from and
+ *  how it's sized, both captured by the {@link TexMode} resolved in
+ *  {@link applyDiscrete}. A white texture × tint gives any solid colour without a
+ *  Graphics batch break; a resolved stem gives LOD art (hex-clipped on a `hex`).
+ *  `^transparent` hides the prim; `^white` forces the solid fill. */
+export class TexPrim extends BasePrim {
   readonly node: LitSprite;
-  /** True when this hex holds a clipped tile texture: then the prim's `scale` is
-   *  consumed by the bake's fill (see {@link applyDiscrete}), so the NODE renders
-   *  at the cell size only — applying scale again would overflow the cell. */
-  private texturedHex = false;
-  constructor(readonly kind: "rect" | "hex", private readonly deps: PrimDeps) {
+  /** Set unconditionally by every `applyDiscrete`; read by `writeNode`. */
+  private mode: TexMode = { kind: "fill" };
+  constructor(readonly kind: "rect" | "hex" | "sprite", private readonly deps: PrimDeps) {
     super();
+    // Seed a real base texture so a write before the first `applyDiscrete` can't
+    // hit Pixi 8's empty-1×1 `orig` setSize trap. `hex` defaults to its mask.
     this.node = new LitSprite(deps.deferred, deps.whiteTexture);
     if (kind === "hex") {
       if (deps.hexTexture) this.node.setTextures(deps.hexTexture, null);
@@ -174,78 +202,72 @@ export class FillPrim extends BasePrim {
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
     // Texture BEFORE setSize (Pixi 8: a 1×1 `orig` pins scale to literal px
-    // otherwise). A textured fill swaps the base texture here; the atlas fills
-    // (white / hex) have no normal map, so the lit shader uses the flat-up
-    // fallback and they get distance falloff + ambient only.
-    if (n.texture && this.kind === "hex" && this.deps.hexTexture) {
-      // A textured hex (a tile ground): resolve the LOD and clip it to the hex
-      // cell so it doesn't overflow into neighbours. `n.scale` is the ground
-      // pack's fill overscale (over-cover so the master's inset hex fills the
-      // cell) — consumed by the bake, not the node. Tint multiplies.
-      this.texturedHex = true;
-      const p = this.deps.lod.getHexClipped(
-        n.texture,
-        footprintPx(box, n.size),
-        this.deps.hexTexture,
-        n.scale ?? 1,
-      );
+    // otherwise) — every non-hidden branch assigns one. The atlas fills (white /
+    // hex) have no normal map, so the lit shader uses the flat-up fallback and
+    // they get distance falloff + ambient only.
+    const tex = n.texture ?? "";
+    if (tex === TEX_TRANSPARENT) {
+      this.mode = { kind: "hidden" };
+      return; // leave the prior texture in place; `writeNode` hides the node
+    }
+    // A resolver stem always carries a `/`; the `^white` sentinel + the empty
+    // unmigrated-object stem ("") do not → they take the solid-fill path.
+    const stem = tex !== "" && tex !== TEX_WHITE ? tex : "";
+    if (stem && this.kind === "hex" && this.deps.hexTexture) {
+      // Textured hex (a tile ground): clip the LOD to the cell so it doesn't
+      // overflow into neighbours. `n.scale` is the ground pack's fill overscale,
+      // consumed by the bake — not the node. Tint multiplies.
+      const p = this.deps.lod.getHexClipped(stem, footprintPx(box, n.size), this.deps.hexTexture, n.scale ?? 1);
       this.node.setTextures(p.albedo, p.normal, p.emissive);
-    } else {
-      this.texturedHex = false;
-      if (n.texture) {
-        const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
-        this.node.setTextures(r.texture, r.normal, r.emissive);
-      } else if (this.kind === "hex" && this.deps.hexTexture) {
-        this.node.setTextures(this.deps.hexTexture, null);
+      this.mode = { kind: "clippedHex" };
+    } else if (stem) {
+      const fp = footprintPx(box, n.size);
+      // First-frame placeholder: until the real art (LOD/preview) lands, draw the
+      // silhouette geometry (a flat-colour triangulation baked NO-NORMAL) instead
+      // of nothing. `applyDiscrete` re-runs on every `refreshTextures`, so it swaps
+      // to real art the frame it lands (which also releases the placeholder).
+      const sidecar =
+        this.deps.geometry && !this.deps.lod.hasContent(stem) ? this.deps.geometry.get(stem) : null;
+      if (sidecar) {
+        const p = this.deps.lod.getPlaceholder(stem, fp, sidecar);
+        this.node.setTextures(p.albedo, null);
+        this.mode = { kind: "art", baseScale: fp / p.albedo.width };
       } else {
-        this.node.setTextures(this.deps.whiteTexture, null);
+        const r = resolveAsset(this.deps.lod, stem, fp, { dpr: box.dpr });
+        this.node.setTextures(r.texture, r.normal, r.emissive);
+        this.mode = { kind: "art", baseScale: r.scale };
       }
+    } else {
+      // `^white` / empty → solid tinted fill. A `hex` uses its MASK (stays hex-
+      // shaped); rect/sprite use the rectangular white. (The empty stem is how the
+      // `^r2` resolver flags unmigrated objects — they render white, not hidden,
+      // so missing art is visible; conditional hiding is via `alpha`.)
+      if (this.kind === "hex" && this.deps.hexTexture) this.node.setTextures(this.deps.hexTexture, null);
+      else this.node.setTextures(this.deps.whiteTexture, null);
+      this.mode = { kind: "fill" };
     }
     setAnchor(this.node, n);
   }
 
   protected writeNode(): void {
+    if (this.mode.kind === "hidden") {
+      this.node.visible = false;
+      return;
+    }
     const c = this.cur;
-    this.node.position.set(this.originX + c.x, this.originY + c.y);
-    this.node.rotation = c.rot;
-    this.node.alpha = c.alpha;
-    this.node.tint = c.tint;
-    const s = this.texturedHex ? 1 : c.scale;
-    this.node.setSize(c.w * s, c.h * s);
-  }
-}
-
-/** `sprite` — LOD art. Footprint × dpr drives the bucket; the resolver returns
- *  the scale that draws it at the requested CSS size. */
-export class SpritePrim extends BasePrim {
-  readonly kind = "sprite" as const;
-  readonly node: LitSprite;
-  private baseScale = 1;
-  constructor(private readonly deps: PrimDeps) {
-    super();
-    this.node = new LitSprite(deps.deferred);
-  }
-
-  protected applyDiscrete(n: VisualNode, box: CardBox): void {
-    // An unresolved/absent stem (the `^r2` resolver returns "" for objects not yet
-    // migrated to the new texture tree) resolves to the WHITE fallback rather than
-    // hiding the sprite — so missing/unmigrated art renders as a visible white
-    // rectangle instead of vanishing. (Conditional hiding is via `alpha`, not a
-    // null texture, so this doesn't swallow intentionally-hidden prims.)
     this.node.visible = true;
-    const r = resolveAsset(this.deps.lod, n.texture ?? "", footprintPx(box, n.size), { dpr: box.dpr });
-    this.node.setTextures(r.texture, r.normal, r.emissive);
-    this.baseScale = r.scale;
-    setAnchor(this.node, n);
-  }
-
-  protected writeNode(): void {
-    const c = this.cur;
     this.node.position.set(this.originX + c.x, this.originY + c.y);
     this.node.rotation = c.rot;
     this.node.alpha = c.alpha;
     this.node.tint = c.tint;
-    this.node.scale.set(this.baseScale * c.scale);
+    switch (this.mode.kind) {
+      // LOD art: the resolver's scale draws the bucket at CSS px; `scale` composes.
+      case "art": this.node.scale.set(this.mode.baseScale * c.scale); break;
+      // Clipped hex: the bake consumed `scale`, so render at the cell size only.
+      case "clippedHex": this.node.setSize(c.w, c.h); break;
+      // Solid fill: the eased `scale` multiplies the box.
+      case "fill": this.node.setSize(c.w * c.scale, c.h * c.scale); break;
+    }
   }
 }
 
@@ -384,7 +406,11 @@ export class MaskPrim extends BasePrim {
 export class LightPrim extends BasePrim {
   readonly kind = "light" as const;
   readonly node = new Container();
-  private readonly light: Light = { x: 0, y: 0, height: 0, radius: 0, color: 0xffffff, brightness: 1 };
+  // Card lights bake + cast by default; radius is in hex-tile units (see `Light`).
+  private readonly light: Light = {
+    x: 0, y: 0, height: 0, radius: 0, color: 0xffffff, brightness: 1,
+    castsShadow: true, canBake: true, dirty: false, priority: LightPriority.static,
+  };
   constructor(private readonly deps: PrimDeps) {
     super();
     deps.deferred.registerLight(this.light);
@@ -392,7 +418,7 @@ export class LightPrim extends BasePrim {
 
   protected applyDiscrete(n: VisualNode): void {
     this.light.height = n.light?.height ?? 0;
-    this.light.radius = n.light?.radius ?? 0;
+    this.light.radius = n.light?.radius ?? 0; // hex-tile units (see `Light`)
     this.light.color = n.tint ?? 0xffffff;
     this.light.brightness = n.light?.intensity ?? 1;
   }
@@ -430,9 +456,8 @@ export function makePrimitive(kind: PrimKind, deps: PrimDeps): Primitive {
   switch (kind) {
     case "rect":
     case "hex":
-      return new FillPrim(kind, deps);
     case "sprite":
-      return new SpritePrim(deps);
+      return new TexPrim(kind, deps);
     case "text":
       return new TextPrim();
     case "progress":

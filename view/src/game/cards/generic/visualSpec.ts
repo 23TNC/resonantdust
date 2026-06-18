@@ -30,8 +30,24 @@ export interface Vec2 {
  *  `<category>.<biome>/<object>.<faction>/<id>.<count>.<part>`. The client appends
  *  the LOD `<size>/` + per-channel `.<map>.png` and fetches from R2 — all
  *  variation/biome/faction/part resolution already happened in the VM. Empty/absent
- *  → no art (the sprite hides / a fill stays solid). */
+ *  → no art (the sprite hides / a fill stays solid). Two reserved sentinels select
+ *  a BUILT-IN texture instead of a stem — see {@link TEX_WHITE} / {@link TEX_TRANSPARENT}. */
 export type AssetRef = string;
+
+/** Built-in white texture: an atlas-packed white fill, tinted by the node's
+ *  `tint` — a solid-colour fill that batches with the art. On a `hex` it uses the
+ *  hex-MASK (stays hex-shaped); on `rect`/`sprite` it's the rectangular white. The
+ *  `^` sigil makes it unambiguous against a resolver stem (which always has a `/`)
+ *  and reads as an intrinsic. */
+export const TEX_WHITE = "^white";
+/** Built-in transparent texture: the prim renders nothing (a placeholder slot —
+ *  e.g. a hex body you want invisible while its scattered objects show). */
+export const TEX_TRANSPARENT = "^transparent";
+
+/** A reserved built-in texture sentinel (not a resolver stem). */
+export function isTexSentinel(ref: string | null | undefined): ref is typeof TEX_WHITE | typeof TEX_TRANSPARENT {
+  return ref === TEX_WHITE || ref === TEX_TRANSPARENT;
+}
 
 /** The numeric fields the engine eases `current → target`. A primitive's
  *  discrete fields (`kind`, `texture`, `text`) are applied immediately on
@@ -67,7 +83,17 @@ export interface VisualNode {
    *  `hex` fill this IS the fill colour (white texture × tint). */
   tint?: number;
   /** Art for `sprite`, or a textured fill for `rect`/`hex`. Null/absent =
-   *  solid tinted fill (fills) or hidden (sprite). */
+   *  solid tinted fill (fills) or hidden (sprite). A {@link TEX_WHITE} /
+   *  {@link TEX_TRANSPARENT} sentinel selects a built-in texture.
+   *
+   *  This is ONE stem for ALL channels — albedo, normal, and emissive resolve from
+   *  it (`<stem>.<channel>.png`). TODO(per-channel maps): allow overriding a
+   *  channel's stem independently — e.g. souls sharing one albedo but each with its
+   *  own emissive glow. Add per-channel fields here (e.g. `normalTex?`/`emissiveTex?`),
+   *  resolve them in `resolveAsset`/the LOD manager when present (else fall back to
+   *  `texture`), and expose a DSL override (a common `:visuals` function sets the
+   *  base, the card overrides `&h.emissive`). The Card Editor already shows the
+   *  (disabled) per-channel inputs awaiting this. */
   texture?: AssetRef | null;
   /** Resolved display string for `text` (already localised). */
   text?: string;

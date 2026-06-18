@@ -1,15 +1,28 @@
 import { Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
 import type { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
+import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor when lit (multiply baseline) — low so the cursor light reads
  *  as casting light rather than just brightening an already-lit scene. */
 const LIT_AMBIENT = 0.12;
 
+/** Re-bake priority for the dirty-region queue (higher = serviced first). The
+ *  cursor is highest (it moves every frame), souls next (move often, our focus),
+ *  static torches/campfires last. Consumed by the queue in Phase D; see
+ *  docs/shadow_lighting.md. */
+export const LightPriority = {
+  cursor: 100,
+  soul: 50,
+  static: 0,
+} as const;
+
 /** A world-space point light. `x/y` are viewport world (panLayer-local) units;
- *  `height` is the light's height above the flat sprite plane (what makes the
- *  normal map read); `radius` is the max-distance falloff; `color` is 0xRRGGBB;
- *  `brightness` scales it. */
+ *  `height` is the light's height above the flat sprite plane (content px — what
+ *  makes the normal map read); `radius` is the falloff radius in HEX-TILE units
+ *  (px = radius × hexSize, so the smooth circle scales with the grid and the
+ *  integer hex disk is the dirty/occluder index — see docs/shadow_lighting.md);
+ *  `color` is 0xRRGGBB; `brightness` scales it. */
 export interface Light {
   x: number;
   y: number;
@@ -17,14 +30,29 @@ export interface Light {
   radius: number;
   color: number;
   brightness: number;
+  /** Casts shadows when true (default). Per-light opt-out via `casts_shadow`. */
+  castsShadow: boolean;
+  /** May bake into the macro_zone light texture when true (default). False keeps
+   *  it in the live screen-space pass — set for per-frame movers (the cursor),
+   *  whose bake would re-dirty its region every frame. */
+  canBake: boolean;
+  /** Runtime: this light's region needs re-baking. Consumed by the dirty-region
+   *  queue (Phase D); the current screen-space pass ignores it. */
+  dirty: boolean;
+  /** Re-bake priority (see `LightPriority`). Consumed in Phase D. */
+  priority: number;
 }
 
 /** Default cursor-light shape — tuned blind; expect to adjust live. */
 const CURSOR_LIGHT: Omit<Light, "x" | "y"> = {
   height: 180,
-  radius: 480,
+  radius: 5.6, // tiles (≈480 px at hex_radius 86)
   color: 0xffffff,
   brightness: 1.6,
+  castsShadow: true,
+  canBake: false, // follows the cursor every frame — stays in the live pass
+  dirty: false,
+  priority: LightPriority.cursor,
 };
 
 function makeFlatNormal(): Texture {
@@ -224,13 +252,14 @@ export class DeferredLighting {
     const color = u.uLightColor as Float32Array;
     const m = panLayer.localTransform;
     const scale = panLayer.scale.x;
+    const hexR = worldHexRadius(); // tile → world px, for the radius falloff
     const count = Math.min(lights.length, MAX_LIGHTS);
     for (let i = 0; i < count; i++) {
       const l = lights[i];
       data[i * 4 + 0] = m.a * l.x + m.c * l.y + m.tx; // world → content
       data[i * 4 + 1] = m.b * l.x + m.d * l.y + m.ty;
       data[i * 4 + 2] = l.height * scale;
-      data[i * 4 + 3] = l.radius * scale;
+      data[i * 4 + 3] = l.radius * hexR * scale; // tiles → world px → content
       color[i * 4 + 0] = ((l.color >> 16) & 0xff) / 255;
       color[i * 4 + 1] = ((l.color >> 8) & 0xff) / 255;
       color[i * 4 + 2] = (l.color & 0xff) / 255;

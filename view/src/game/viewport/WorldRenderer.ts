@@ -155,6 +155,7 @@ export class WorldRenderer extends LayoutNode {
    *  load events coalesce into one re-resolve per frame. */
   private texturesDirty = false;
   private readonly unsubLod: () => void;
+  private readonly unsubGeo: () => void;
 
   private anchorQ: number;
   private anchorR: number;
@@ -225,6 +226,7 @@ export class WorldRenderer extends LayoutNode {
 
     this.deps = {
       lod: gctx.lodTextures,
+      geometry: gctx.geometry,
       deferred: this.deferred,
       whiteTexture: atlasWhite(gctx.textures, gctx.app.renderer),
       hexTexture: atlasHex(gctx.textures, gctx.app.renderer),
@@ -250,6 +252,9 @@ export class WorldRenderer extends LayoutNode {
     // when it lands, re-resolve so they swap up (the resolver now returns the
     // cached upgrade). Coalesced to one pass per frame in `tick`.
     this.unsubLod = gctx.lodTextures.onLoad(() => { this.texturesDirty = true; });
+    // Geometry sidecar landed → re-resolve so the first-frame placeholder appears
+    // (same coalesced re-resolve as a LOD upgrade).
+    this.unsubGeo = gctx.geometry.onLoad(() => { this.texturesDirty = true; });
 
     // Gate content hot-swap: drop + rebuild retained nodes against the new defs.
     this.unsubContent = onContentReloaded(() => this.reload());
@@ -265,7 +270,11 @@ export class WorldRenderer extends LayoutNode {
    *  {@link LodTextureManager.prewarmPreviews}). Re-run on reload — the swapped
    *  content may add objects/variations. */
   private prewarmPreviews(): void {
-    void this.gctx.lodTextures.prewarmPreviews(sharedContent().previewStems());
+    const stems = sharedContent().previewStems();
+    void this.gctx.lodTextures.prewarmPreviews(stems);
+    // Geometry sidecars too — resident before cards render so the placeholder
+    // beats the texture instead of racing a cold per-object fetch.
+    this.gctx.geometry.prewarm(stems);
   }
 
   /** Rebuild every retained tile/card against freshly-reloaded content. A def's
@@ -791,6 +800,7 @@ export class WorldRenderer extends LayoutNode {
     this.feed = null;
     this.gctx.app.stage.off("globalpointermove", this.onCursorMove);
     this.unsubLod();
+    this.unsubGeo();
     this.unsubContent();
     this.deferred.destroy();
     for (const t of this.tiles.values()) t.prims.destroy();

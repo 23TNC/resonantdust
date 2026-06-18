@@ -8,7 +8,7 @@
  *   - `visualSpec`     the data contract (PrimList / VisualNode)
  *   - `cardBox`        normalized 0..100 → px + LOD footprint (dpr-aware)
  *   - `resolveAsset`   the single LodTextureManager consumer (the soul fix)
- *   - `primitives`     retained backings (FillPrim / SpritePrim / TextPrim)
+ *   - `primitives`     retained backings (TexPrim / TextPrim / …)
  *   - `PrimitiveLayer` by-index reconciler + tween host
  *   - `drawVisuals`    the wasm `:visuals` → PrimList bridge (the live spec source)
  */

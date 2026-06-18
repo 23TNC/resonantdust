@@ -109,6 +109,9 @@ export class ArtToolsPanel {
   /** Whether the preview's default (fixed white) inspection light is active.
    *  Unchecking it previews the card's OWN lights alone. */
   defaultLight = true;
+  /** Whether to overlay a red cross at each object primitive's anchor point (its
+   *  `0,0`) — an alignment aid. Off by default. */
+  showAnchors = false;
 
   private readonly primaryInput: HTMLInputElement;
   private readonly secondaryInput: HTMLInputElement;
@@ -116,9 +119,12 @@ export class ArtToolsPanel {
   private readonly toolRows: { el: HTMLDivElement; tools: ArtTool[] }[] = [];
   /** Fired when a change should re-light the preview (the default-light toggle). */
   private readonly onLightingChange: () => void;
+  /** Fired when the object-centres overlay should be redrawn (its toggle). */
+  private readonly onOverlayChange: () => void;
 
-  constructor(opts: { onLightingChange?: () => void } = {}) {
+  constructor(opts: { onLightingChange?: () => void; onOverlayChange?: () => void } = {}) {
     this.onLightingChange = opts.onLightingChange ?? (() => {});
+    this.onOverlayChange = opts.onOverlayChange ?? (() => {});
     this.element = document.createElement("div");
     Object.assign(this.element.style, PANEL_CSS);
     this.element.addEventListener("pointerdown", (e) => e.stopPropagation());
@@ -140,6 +146,13 @@ export class ArtToolsPanel {
       this.onLightingChange();
     });
     this.element.appendChild(defLight);
+
+    // Object anchors — a red cross at each object prim's anchor point (alignment aid).
+    const anchors = checkbox("Object anchors", this.showAnchors, (on) => {
+      this.showAnchors = on;
+      this.onOverlayChange();
+    });
+    this.element.appendChild(anchors);
 
     // Tool — a dropdown (pipette is folded into the colour selectors, so it's
     // not a tool here).

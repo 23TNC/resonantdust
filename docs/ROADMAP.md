@@ -83,6 +83,13 @@ client hot-reload / S3 authoring write-back) landed. Loose ends:
   (authority gate authoring path).
 - **Editor server LOD regen** — the Card Editor write-back versions a card def
   but doesn't regenerate server-side LOD/light bakes on remaster.
+- **Per-channel texture maps** — a prim's `texture` is ONE stem for all channels
+  (albedo/normal/emissive resolve `<stem>.<channel>.png`). Add per-channel override
+  so e.g. souls share one albedo but each carry their own emissive glow: a
+  `VisualNode` per-channel field (`view/.../visualSpec.ts` `texture` TODO),
+  resolved in `resolveAsset`/the LOD manager (fall back to `texture`), and a DSL
+  override (common `:visuals` fn sets the base, the card overrides `&h.emissive`).
+  The Card Editor already shows the disabled per-channel inputs awaiting this.
 
 ## def-id GC
 

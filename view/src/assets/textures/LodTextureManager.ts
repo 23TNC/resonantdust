@@ -10,6 +10,7 @@ import {
 import { TextureManager, type PackedPair, type SlotHandle } from "./TextureManager";
 import { getPreview, putPreview } from "./previewCache";
 import { debug } from "../../debug";
+import type { Sidecar } from "../geometry/geoTypes";
 
 /** A cached LOD: the framed triple plus the atlas slot handle, so a superseded
  *  version can free its slot (see version eviction in {@link LodTextureManager}). */
@@ -79,6 +80,10 @@ export class LodTextureManager {
    *  was baked from, so the clip re-bakes when the LOD upgrades (preview→full) and
    *  is otherwise reused across every tile sharing that texture. */
   private readonly hexClipped = new Map<string, { src: Texture; pair: PackedPair; handle: SlotHandle }>();
+  /** First-frame silhouette placeholders, keyed by (versioned) stem — a flat-colour
+   *  triangulation bake shown until the real art lands, then released (see `load`).
+   *  See {@link getPlaceholder}. */
+  private readonly placeholders = new Map<string, { pair: PackedPair; handle: SlotHandle }>();
   private readonly listeners = new Set<() => void>();
   private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
@@ -198,12 +203,77 @@ export class LodTextureManager {
     return rt;
   }
 
+  /** Whether `getPair` would return real content (a loaded bucket or a preview)
+   *  rather than the transparent fallback — drives whether the geometry
+   *  placeholder is needed for `stem`. */
+  hasContent(stem: string): boolean {
+    return this.maxSize.has(stem) || this.getPreview(stem) !== null;
+  }
+
+  /** A flat-colour silhouette placeholder for `stem`, baked once from its geometry
+   *  `sidecar` (the earcut triangulation filled with the dominant colour) and
+   *  packed as a NO-NORMAL slot — so it flows through the solid-fill path: hidden
+   *  in the deferred normal pass, lit by ambient + distance only. Cached until the
+   *  real art lands (then released in {@link load}). Call only when
+   *  {@link hasContent} is false. */
+  getPlaceholder(stem: string, desiredSize: number, sidecar: Sidecar): PackedPair {
+    const existing = this.placeholders.get(stem);
+    if (existing) return existing.pair;
+    const baked = this.bakePlaceholder(sidecar, desiredSize);
+    this.placeholders.set(stem, baked);
+    return baked.pair;
+  }
+
+  /** Render the sidecar's triangles (filled `color`) into a small RenderTexture at
+   *  the sprite's aspect, with a 1px transparent margin so the atlas slot can't
+   *  bleed a neighbour, and pack it. Low fidelity is fine — a transient first-frame
+   *  blob. */
+  private bakePlaceholder(sidecar: Sidecar, desiredSize: number): { pair: PackedPair; handle: SlotHandle } {
+    const [bw, bh] = sidecar.bbox;
+    const longest = Math.max(bw, bh, 1);
+    const cap = Math.min(pickLodForSize(desiredSize), 128);
+    const w = Math.max(1, Math.round((bw / longest) * cap));
+    const h = Math.max(1, Math.round((bh / longest) * cap));
+    const pad = 1;
+    const rt = RenderTexture.create({ width: w + pad * 2, height: h + pad * 2 });
+    const g = new Graphics();
+    const color = parseHexColor(sidecar.color);
+    for (const poly of sidecar.polygons) {
+      const verts = poly.contour.concat(...poly.holes); // earcut's flattened order
+      const t = poly.triangles;
+      for (let i = 0; i + 2 < t.length; i += 3) {
+        const a = verts[t[i]];
+        const b = verts[t[i + 1]];
+        const c = verts[t[i + 2]];
+        if (!a || !b || !c) continue;
+        g.moveTo(pad + a[0] * w, pad + a[1] * h)
+          .lineTo(pad + b[0] * w, pad + b[1] * h)
+          .lineTo(pad + c[0] * w, pad + c[1] * h)
+          .closePath();
+      }
+    }
+    g.fill({ color });
+    this.renderer.render({ container: g, target: rt, clear: true });
+    g.destroy();
+    const { pair, handle } = this.textures.packTracked(rt, null, null);
+    rt.destroy(true);
+    return { pair: insetPair(pair), handle };
+  }
+
   /** Resolve a stem to its atlas-packed albedo+normal+emissive triple, with the
    *  substitute + transparent-fallback cascade. Never returns null. Empty stem
    *  (the VM couldn't resolve it) → transparent. */
   getPair(stem: string, desiredSize: number): PackedPair {
     if (!stem) return this.transparentPair();
     this.evictStaleVersions(stem);
+    // Real content (bucket or preview) is now available → retire any first-frame
+    // placeholder in the SAME call that hands back the real texture, so the
+    // caller swaps with no stale-slot gap.
+    const ph = this.placeholders.get(stem);
+    if (ph && this.hasContent(stem)) {
+      ph.handle.release();
+      this.placeholders.delete(stem);
+    }
     let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
     const known = this.maxSize.get(stem);
     if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
@@ -334,6 +404,7 @@ export class LodTextureManager {
     this.maxSize.clear();
     this.versionedByBase.clear();
     this.hexClipped.clear();
+    this.placeholders.clear();
     this.transparentFallback = null;
     // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
     this.highQueue.length = 0;
@@ -484,6 +555,12 @@ async function loadOrNull(url: string): Promise<Texture | null> {
   } catch {
     return null;
   }
+}
+
+/** `#rrggbb` → `0xRRGGBB` (mid-grey on a malformed value). */
+function parseHexColor(s: string): number {
+  const n = parseInt(s.replace(/^#/, ""), 16);
+  return Number.isFinite(n) ? n : 0x808080;
 }
 
 /** Inset every channel of a packed triple by `FRAME_INSET` (bilinear bleed

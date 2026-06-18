@@ -59,6 +59,7 @@ export class GenericCardFace extends Container {
     super();
     this.deps = {
       lod: ctx.lodTextures,
+      geometry: ctx.geometry,
       // Offline preview → plain albedo (never goes through the deferred passes).
       deferred: DeferredLighting.offline(),
       whiteTexture: atlasWhite(ctx.textures, ctx.app.renderer),

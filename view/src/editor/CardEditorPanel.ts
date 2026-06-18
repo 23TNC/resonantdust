@@ -5,14 +5,15 @@ import type { PanelTaskbar } from "../ui/dom/PanelTaskbar";
 import type { UiEditMode } from "../ui/dom/UiEditMode";
 import { PixiPanel } from "../ui/dom/PixiPanel";
 import { ArtToolsPanel } from "./ArtToolsPanel";
-import { masterChannelUrl, loadMasterTexture, type MasterChannel } from "./masterTextures";
+import { masterChannelUrl, loadMasterTexture, baseStem, type MasterChannel } from "./masterTextures";
 import { type Surface, type SurfaceChannel, type Brush, surfaceTexel, outlineRect, cssColor, floodFill } from "./brush";
 import { PaintHistory } from "./paintHistory";
 import { type Light, composite, Bloom } from "./lighting";
 import { type DslLight, syncLightRegion, buildCardSource, unflattenLocale } from "./dslEdit";
 import { GenericCardFace, buildCardPrimList } from "../game/cards/generic/GenericCardFace";
 import { tilePrims } from "../game/cards/generic/drawVisuals";
-import type { PrimList, VisualNode } from "../game/cards/generic/visualSpec";
+import { atlasHex } from "../game/cards/generic/atlasFills";
+import { TEX_TRANSPARENT, TEX_WHITE, type PrimList, type VisualNode } from "../game/cards/generic/visualSpec";
 import { global } from "../game/definitions/globals";
 import { sharedContent, contentSources } from "../game/definitions/contentBoot";
 import { debug } from "../debug";
@@ -53,21 +54,35 @@ const LABEL_STYLE: TextStyleOptions = {
 const FRAME_COLOR = 0x3a3a4a;
 /** Brush footprint outline colour. */
 const OUTLINE_COLOR = 0xffcc33;
-// Preview lighting (CPU, texel space). Heights/radii scale with the texture's
-// larger dimension; the marker is in sprite-local px (scales with zoom).
+// Preview lighting (CPU, texel space). The fixed inspection light is an ABSOLUTE
+// shape in card px (tuned to read like the game's world light), not object-scaled;
+// the marker is in sprite-local px (scales with zoom).
 const LIGHT_AMBIENT = 0.3;
 const LIGHT_Y_SIGN = -1;       // matches the deferred pass's normal convention
-const LIGHT_HEIGHT = 0.5;
-const LIGHT_RADIUS = 1.6;
-const LIGHT_INTENSITY = 1.3;
+const LIGHT_HEIGHT = 180;      // card px above the plane (makes the normal read)
+const LIGHT_RADIUS = 960;      // card-px falloff radius
+const LIGHT_INTENSITY = 1.2;
 const LIGHT_MARKER_R = 8;
 const LIGHT_MARKER_COLOR = 0xffee88;
+/** Object-anchor cross colour (the "Object anchors" overlay). */
+const ANCHOR_MARKER_COLOR = 0xff3030;
+/** Preview depth-sort, mirroring `PrimitiveLayer`/the world: each object's zIndex is
+ *  `round(pos.y · Z_SCALE) + (z ?? index)`, so objects paint back-to-front by their
+ *  anchor row; FLOOR_BAND drops fills (hex/rect grounds) under every object. */
+const Z_SCALE = 16;
+const FLOOR_BAND = -1e7;
 // Preview bloom (CPU, texel space — blooms ONLY the emissive contribution).
 const BLOOM_THRESHOLD = 24;    // emissive luma 0–255 to bloom (skips near-black)
 const BLOOM_RADIUS_FRAC = 0.03; // blur radius as a fraction of the larger dim
 const BLOOM_INTENSITY = 0.9;   // add-back strength
 const LABEL_H = 16;
 const PAD = 12;
+/** Height of the per-square control row that floats ABOVE each square: the prim
+ *  selector over the diffuse square, a texture-stem input over each channel
+ *  square. Above (not over) the squares so the full square stays paintable. */
+const INPUT_H = 22;
+/** Gap between the input row and the squares below it. */
+const INPUT_GAP = 4;
 /** Max squares the bottom row is sized for (prim + albedo + normal + emissive +
  *  1 sprite placeholder), so the prim square's size stays stable as the
  *  selection — and the square count — changes. */
@@ -131,6 +146,10 @@ interface SpriteLit {
   emissiveData: ImageData | null;
   /** Overlay that draws the lit result over the card (child of `previewContent`). */
   sprite: Sprite;
+  /** Hex-shaped clip for a `hex` ground overlay (matches the bake's mask, so the lit
+   *  result is clipped to the CELL exactly like the flat `bigFace` hex — without it
+   *  the `fill` over-cover spills past the tile). `null` for sprites. */
+  mask: Sprite | null;
   /** Footprint on the card preview (square-local, pre pan/zoom) — markers + the
    *  card paint surface map against the primary sprite's. */
   ox: number; oy: number; w: number; h: number; texW: number; texH: number;
@@ -191,6 +210,9 @@ const INPUT_CSS: Partial<CSSStyleDeclaration> = {
  */
 export class CardEditorPanel extends PixiPanel {
   private readonly ctx: GameContext;
+  /** White hex-shape mask (the same atlas mask the world/bake use) — clips a hex
+   *  ground's lit overlay to the cell. */
+  private readonly hexMask: Texture;
 
   /** Deep-copied, editable primitive list — the single source every render in
    *  this panel derives from. Replaced on each {@link show}, mutated by edits. */
@@ -210,7 +232,6 @@ export class CardEditorPanel extends PixiPanel {
   private readonly normalSprite = new Sprite();
   private readonly emissiveSprite = new Sprite();
   private readonly frame = new Graphics();
-  private readonly cardLabel = new Text({ text: "Card", style: LABEL_STYLE });
   /** Prim-square label — "Diffuse" while a sprite's master diffuse is shown. */
   private readonly primLabel = new Text({ text: "", style: LABEL_STYLE });
   /** Reusable labels for the trailing row squares (albedo / normal / slots). */
@@ -266,8 +287,6 @@ export class CardEditorPanel extends PixiPanel {
   private fixedLight = { x: 0, y: 0 };
   /** Cursor-follow light in CARD-PX while the Light tool is active + over the card. */
   private cursorLight: { x: number; y: number } | null = null;
-  /** False until the movable light has been seeded for the current card. */
-  private lightSeeded = false;
   /** Per-emissive bloom overrides, keyed by master stem — the controls under the
    *  emissive square edit the selected sprite's entry; {@link relight} reads it.
    *  Absent → the module-constant defaults. */
@@ -288,8 +307,14 @@ export class CardEditorPanel extends PixiPanel {
   /** Which button is held while painting (0 = primary colour, 2 = secondary). */
   private paintButton = 0;
 
-  /** DOM primitive picker, floated over the small square's top edge. */
+  /** DOM primitive picker, floated above the diffuse (prim) square. */
   private readonly select: HTMLSelectElement;
+  /** Per-channel texture-stem inputs, floated above the four channel squares
+   *  `[albedo, normal, emissive, slot4]`. Index 0 (Albedo) is the live texture
+   *  setter (a stem, or `white` / `transparent`); 1-3 are placeholders for
+   *  per-channel overrides that aren't wired yet (see {@link channelInputs} setup
+   *  + the TODO there). */
+  private readonly channelInputs: HTMLInputElement[] = [];
   /** DOM per-primitive edit controls, rebuilt per selection. */
   private readonly editControls: HTMLDivElement;
   /** DOM bloom controls, floated under the emissive square for a sprite selection
@@ -317,7 +342,13 @@ export class CardEditorPanel extends PixiPanel {
    *  add rewrites the Visual buffer). Indexed like `paneEditors`. */
   private loadedTab: string[] = [];
   /** Art tools right of the card preview — visible only for a sprite selection. */
-  private readonly artTools = new ArtToolsPanel({ onLightingChange: () => { this.relight(); this.drawLightMarkers(); } });
+  private readonly artTools = new ArtToolsPanel({
+    onLightingChange: () => { this.relight(); this.drawLightMarkers(); },
+    onOverlayChange: () => this.drawObjectAnchors(),
+  });
+  /** Red-cross overlay at each object's anchor point (toggled by Art Tools), inside
+   *  the preview viewport so it pans/zooms with the card. */
+  private readonly anchorGfx = new Graphics();
 
   private geom: Geom | null = null;
   private readonly unsubRelayout: () => void;
@@ -335,6 +366,7 @@ export class CardEditorPanel extends PixiPanel {
       closable: true,
     });
     this.ctx = opts.ctx;
+    this.hexMask = atlasHex(opts.ctx.textures, opts.ctx.app.renderer);
 
     // Lift the inherited resize handles above this panel's DOM content. Unlike
     // other panels, the editor fills its body with `position: fixed` overlays
@@ -359,7 +391,15 @@ export class CardEditorPanel extends PixiPanel {
     // Preview viewport: bigFace (flat albedo) + the per-sprite lit overlays (added
     // dynamically by `buildLitSprites`) live inside a pan/zoom container, clipped
     // to the card square by previewMask. The light markers stay topmost.
+    // The preview depth-sorts its children by zIndex (like the world's sort layer):
+    // bigFace is the flat base under everything; each lit overlay gets a Y-depth
+    // zIndex in `placeLitSprites`; the marker overlays stay on top.
+    this.previewContent.sortableChildren = true;
+    this.bigFace.zIndex = 2 * FLOOR_BAND;             // base, below the fill band
+    this.anchorGfx.zIndex = -FLOOR_BAND;              // crosses + markers on top
+    this.lightGfx.zIndex = -FLOOR_BAND + 1;
     this.previewContent.addChild(this.bigFace);
+    this.previewContent.addChild(this.anchorGfx);     // object-anchor crosses
     this.previewContent.addChild(this.lightGfx);      // light markers (kept on top)
     this.previewView.addChild(this.previewContent);
     c.addChild(this.previewView);
@@ -370,7 +410,6 @@ export class CardEditorPanel extends PixiPanel {
     c.addChild(this.albedoSprite);
     c.addChild(this.normalSprite);
     c.addChild(this.emissiveSprite);
-    c.addChild(this.cardLabel);
     c.addChild(this.primLabel);
     for (const lbl of this.rowLabels) c.addChild(lbl);
     c.addChild(this.outlineGfx); // brush outline draws over the squares + preview
@@ -392,6 +431,60 @@ export class CardEditorPanel extends PixiPanel {
     this.select.addEventListener("change", () => this.selectPrimitive(this.select.selectedIndex));
     this.select.addEventListener("pointerdown", (e) => e.stopPropagation());
     this.panel.appendChild(this.select);
+
+    // Per-channel texture inputs (above albedo / normal / emissive / slot4). Only
+    // ALBEDO is wired: it sets the prim's single `texture` stem (a path, or the
+    // `white` / `transparent` built-ins). The renderer resolves normal + emissive
+    // from that SAME stem today, so the other three inputs are disabled placeholders.
+    //
+    // TODO(per-channel maps): support overriding a channel's stem independently of
+    // albedo — e.g. souls sharing one albedo but each carrying its own emissive
+    // glow. The real authoring path is the DSL (a common function sets the albedo,
+    // then the card manually overrides `&h.normal`/`&h.emissive`); that needs a
+    // VisualNode per-channel field + resolver support (see visualSpec `texture`).
+    // When that lands, enable inputs 1-3 and route them to those fields.
+    const channels: { key: string; editable: boolean }[] = [
+      { key: "albedo", editable: true },
+      { key: "normal", editable: false },
+      { key: "emissive", editable: false },
+      { key: "slot4", editable: false },
+    ];
+    for (const { key, editable } of channels) {
+      const input = document.createElement("input");
+      input.type = "text";
+      input.spellcheck = false;
+      Object.assign(input.style, {
+        position: "fixed",
+        zIndex: "30",
+        pointerEvents: "auto",
+        boxSizing: "border-box",
+        background: "rgba(20, 22, 30, 0.98)",
+        border: "1px solid #3a3a4a",
+        borderRadius: "3px",
+        color: "#ecd6aa",
+        fontFamily: "sans-serif",
+        fontSize: "11px",
+        padding: "2px 4px",
+        display: "none",
+      } satisfies Partial<CSSStyleDeclaration>);
+      input.addEventListener("pointerdown", (e) => e.stopPropagation());
+      input.addEventListener("keydown", (e) => e.stopPropagation());
+      if (editable) {
+        input.placeholder = "stem / white / transparent";
+        input.addEventListener("input", () => {
+          const n = this.selected;
+          if (!n) return;
+          n.texture = this.normalizeTextureInput(input.value);
+          this.onEdit();
+        });
+      } else {
+        input.disabled = true;
+        input.style.opacity = "0.5";
+        input.title = `${key} stem override — not yet wired (derives from Albedo). See TODO in CardEditorPanel.`;
+      }
+      this.channelInputs.push(input);
+      this.panel.appendChild(input);
+    }
 
     this.editControls = document.createElement("div");
     Object.assign(this.editControls.style, {
@@ -498,14 +591,19 @@ export class CardEditorPanel extends PixiPanel {
     this.panning = false;
     this.pan = { x: 0, y: 0 };
     this.zoom = 1;
-    // Reset lighting so a new card re-seeds its movable light + rebuilds the lit
-    // canvases (the stem signature change forces `buildLitSprites` to rebuild).
+    // Reset lighting: the movable light defaults to the card origin (0,0) each card
+    // and the stem-signature change forces `buildLitSprites` to rebuild the canvases.
     this.litSig = "";
-    this.lightSeeded = false;
+    this.fixedLight = { x: 0, y: 0 };
     this.cursorLight = null;
-    // Designate the card's main (first) sprite as the paint-surface owner, so it
-    // stays constant as other primitives are selected. ALL sprites are lit.
-    this.previewSpriteNode = this.workingList.find((n) => n.kind === "sprite" && !!n.texture) ?? null;
+    // Designate the card's main (first) TEXTURED prim as the paint-surface owner,
+    // so it stays constant as other primitives are selected. ALL textured prims are
+    // lit. Prefer a sprite (objects), else fall back to the first textured prim
+    // (a tile is just a hex ground — it should still own the card paint surface).
+    this.previewSpriteNode =
+      this.workingList.find((n) => n.kind === "sprite" && !!this.texStem(n)) ??
+      this.workingList.find((n) => !!this.texStem(n)) ??
+      null;
     this.selectedIndex = this.workingList.length > 0 ? 0 : -1;
     this.populateSelect();
     this.select.selectedIndex = this.selectedIndex;
@@ -594,7 +692,9 @@ export class CardEditorPanel extends PixiPanel {
     this.select.replaceChildren();
     this.workingList.forEach((n, i) => {
       const opt = document.createElement("option");
-      const tex = n.texture ? ` · ${n.texture}` : "";
+      // Show the BASE stem (drop the `?v=` version) or the sentinel, not the raw
+      // versioned stem — keeps the dropdown readable.
+      const tex = n.texture ? ` · ${this.texStem(n) ?? n.texture}` : "";
       opt.value = String(i);
       opt.textContent = `${i}: ${n.kind}${tex}`;
       this.select.appendChild(opt);
@@ -620,6 +720,48 @@ export class CardEditorPanel extends PixiPanel {
     return this.selectedIndex >= 0 ? this.workingList[this.selectedIndex] : undefined;
   }
 
+  /** The BASE master stem of a TEXTURED primitive (sprite / hex / rect with a real
+   *  resolver stem), or null when the prim has no master (a non-textured kind, an
+   *  empty/unmigrated stem, or a `^white` / `^transparent` sentinel). The single
+   *  gate the editor uses to decide "does this prim get channel squares + paint":
+   *  hex tile grounds now carry a `grass_hex` master, so they qualify alongside
+   *  sprites. Strips the `?v=` version suffix — masters are unversioned. */
+  private texStem(node: VisualNode | undefined): string | null {
+    if (!node || (node.kind !== "sprite" && node.kind !== "hex" && node.kind !== "rect")) return null;
+    return baseStem(node.texture);
+  }
+
+  /** A prim kind that carries a texture (sprite / hex / rect) — gets the channel
+   *  squares + their texture inputs, even when its current texture is a `^white` /
+   *  `^transparent` fill (so the Albedo input is always there to type a stem). */
+  private isTexturedKind(node: VisualNode | undefined): boolean {
+    return !!node && (node.kind === "sprite" || node.kind === "hex" || node.kind === "rect");
+  }
+
+  /** Parse an Albedo-input value into a `texture`: a trimmed stem, the `white` /
+   *  `transparent` built-ins (sigil optional), or null for empty. */
+  private normalizeTextureInput(v: string): string | null {
+    const t = v.trim();
+    if (!t) return null;
+    const lc = t.toLowerCase();
+    if (lc === "white" || lc === TEX_WHITE) return TEX_WHITE;
+    if (lc === "transparent" || lc === TEX_TRANSPARENT) return TEX_TRANSPARENT;
+    return t;
+  }
+
+  /** Seed the channel inputs from the selection — the Albedo input shows the base
+   *  stem or the sentinel; the (disabled) normal/emissive/slot4 inputs echo the
+   *  current stem to convey "derives from this". Called on SELECTION change only
+   *  (not per relayout), so typing into Albedo isn't clobbered mid-edit. */
+  private refreshChannelInputValues(): void {
+    const node = this.selected;
+    const base = this.texStem(node);
+    const tex = node?.texture ?? "";
+    // Albedo shows the sentinel verbatim (`^white`/`^transparent`) or the base stem.
+    this.channelInputs[0].value = base ?? (TEX_WHITE === tex || TEX_TRANSPARENT === tex ? tex : "");
+    for (let i = 1; i < this.channelInputs.length; i++) this.channelInputs[i].value = base ?? "";
+  }
+
   // ── layout ──────────────────────────────────────────────────────────
   private relayout(): void {
     const W = this.content.width;
@@ -634,13 +776,16 @@ export class CardEditorPanel extends PixiPanel {
     // — leaving uniform padding instead of dead space either side of a centred card.
     const colW = clamp(W * COL_FRAC, COL_MIN, COL_MAX);
     const rightColX = W - PAD - colW;
-    const heightCap = H - side - LABEL_H * 2 - CONTROLS_MIN - 5 * PAD;
+    // Reserve the input strip (a texture input floats ABOVE each square) on top of
+    // the existing card-label band.
+    const heightCap = H - side - LABEL_H * 2 - INPUT_H - INPUT_GAP - CONTROLS_MIN - 5 * PAD;
     // Cap the card so the expanding left section keeps at least LEFT_MIN.
     const widthCap = rightColX - 3 * PAD - LEFT_MIN;
     const bigSide = clamp(Math.min(heightCap, widthCap), 80, Math.max(80, rightColX - 2 * PAD));
     const bigY = PAD;
     const bigX = rightColX - PAD - bigSide;
-    const rowY = bigY + bigSide + LABEL_H + PAD;
+    // Squares sit below the card label AND the input strip (input row + its gap).
+    const rowY = bigY + bigSide + LABEL_H + INPUT_H + INPUT_GAP;
 
     const squares = this.squareLayout(side);
     this.geom = {
@@ -654,6 +799,7 @@ export class CardEditorPanel extends PixiPanel {
     this.positionBigFace();
     this.renderSelection();
     this.positionSelect();
+    this.positionChannelInputs();
     this.positionControls();
     this.positionBloomControls();
     this.positionSideSections();
@@ -670,9 +816,11 @@ export class CardEditorPanel extends PixiPanel {
   private squareLayout(side: number): Square[] {
     const node = this.selected;
     const squares: Square[] = [{ kind: "prim", x: 0, label: "" }];
-    // Channel squares are a sprite concern (its master diffuse/albedo/normal +
-    // two future slots). Other prims show only the prim square.
-    if (node?.kind === "sprite") {
+    // Channel squares show for any TEXTURED-kind prim (sprite / hex / rect) — even
+    // when it currently has no stem (a `^white` / `^transparent` / empty fill), so
+    // its Albedo input is always present to type a stem into. The squares just
+    // render blank until a master resolves. Non-textured prims show only the prim.
+    if (this.isTexturedKind(node)) {
       squares.push({ kind: "albedo", x: 0, label: "Albedo" });
       squares.push({ kind: "normal", x: 0, label: "Normal" });
       squares.push({ kind: "emissive", x: 0, label: "Emissive" });
@@ -690,7 +838,6 @@ export class CardEditorPanel extends PixiPanel {
     for (const sq of g.squares) {
       this.frame.rect(sq.x, g.rowY, g.side, g.side).stroke({ color: FRAME_COLOR, width: 1 });
     }
-    this.cardLabel.position.set(g.bigX, g.bigY + g.bigSide + 2);
     // Trailing-square labels (skip the prim square — the dropdown sits over it).
     const trailing = g.squares.filter((s) => s.kind !== "prim");
     this.rowLabels.forEach((lbl, i) => {
@@ -751,7 +898,7 @@ export class CardEditorPanel extends PixiPanel {
     const ch = Math.min(oy + h, g.bigY + g.bigSide) - cy;
     this.cardSurface = cw <= 0 || ch <= 0
       ? null
-      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.cardLit()?.stem ?? "", channel: "lit" };
+      : { rx: cx, ry: cy, rw: cw, rh: ch, ox, oy, sx: w / sp.texW, sy: h / sp.texH, texW: sp.texW, texH: sp.texH, stem: this.texStem(this.selected) ?? "", channel: "lit" };
   }
 
   /** Cursor (content-local) is over the card preview square. */
@@ -789,20 +936,22 @@ export class CardEditorPanel extends PixiPanel {
     const node = this.selected;
     this.surfaces = [];
     // Selection drives the prim square + channel squares + their paint surfaces.
-    const stem = node?.kind === "sprite" && node.texture ? node.texture : null;
+    // The BASE stem (no `?v=`) — sprites and textured hex/rect grounds qualify.
+    const stem = this.texStem(node);
     this.activeStem = stem;
-    if (g && node && stem) {
+    if (g && node && this.isTexturedKind(node)) {
       const primX = g.squares.find((s) => s.kind === "prim")?.x ?? 0;
       const albedoSq = g.squares.find((s) => s.kind === "albedo");
       const normalSq = g.squares.find((s) => s.kind === "normal");
       const emissiveSq = g.squares.find((s) => s.kind === "emissive");
-      // Diffuse (read-only) fills the prim square; the small face is its
-      // placeholder until the master loads. Albedo / normal show their editable
-      // canvas copies (the brush paints these).
-      const diffuse = this.masterTex(stem, "diffuse");
+      // Diffuse (read-only) fills the prim square when there's a master; otherwise
+      // (no stem, or a `^white`/`^transparent` fill) the small face renders the
+      // prim itself there. Channel squares show their editable canvas copies (the
+      // brush paints these), or stay blank when the prim has no master.
+      const diffuse = stem ? this.masterTex(stem, "diffuse") : null;
       if (diffuse) {
         this.smallFace.visible = false;
-        this.fitChannelAt(this.diffuseSprite, diffuse, primX, g.rowY, g.side, stem, "diffuse");
+        this.fitChannelAt(this.diffuseSprite, diffuse, primX, g.rowY, g.side, stem!, "diffuse");
         this.primLabel.text = "Diffuse";
         this.primLabel.visible = true;
         this.primLabel.position.set(primX, g.rowY + g.side + 2);
@@ -811,14 +960,15 @@ export class CardEditorPanel extends PixiPanel {
         this.renderSmallFace(node, primX, g);
         this.primLabel.visible = false;
       }
-      if (albedoSq) this.fitChannelAt(this.albedoSprite, this.channelTexture(stem, "albedo"), albedoSq.x, g.rowY, g.side, stem, "albedo");
-      else this.albedoSprite.visible = false;
-      if (normalSq) this.fitChannelAt(this.normalSprite, this.channelTexture(stem, "normal"), normalSq.x, g.rowY, g.side, stem, "normal");
-      else this.normalSprite.visible = false;
-      if (emissiveSq) this.fitChannelAt(this.emissiveSprite, this.channelTexture(stem, "emissive"), emissiveSq.x, g.rowY, g.side, stem, "emissive");
-      else this.emissiveSprite.visible = false;
+      const chan = (sprite: Sprite, sq: Square | undefined, c: "albedo" | "normal" | "emissive"): void => {
+        if (sq) this.fitChannelAt(sprite, stem ? this.channelTexture(stem, c) : null, sq.x, g.rowY, g.side, stem ?? "", c);
+        else sprite.visible = false;
+      };
+      chan(this.albedoSprite, albedoSq, "albedo");
+      chan(this.normalSprite, normalSq, "normal");
+      chan(this.emissiveSprite, emissiveSq, "emissive");
     } else if (g && node) {
-      // Non-sprite: the small face renders the prim; no channel squares.
+      // Non-textured prim: the small face renders it; no channel squares.
       this.diffuseSprite.visible = false;
       this.albedoSprite.visible = false;
       this.normalSprite.visible = false;
@@ -830,6 +980,9 @@ export class CardEditorPanel extends PixiPanel {
     }
     // The PREVIEW lights EVERY sprite on the card — independent of selection.
     this.renderPreview();
+    // Object-anchor overlay — independent of the lighting pipeline (so it shows even
+    // on a sprite-less tile, where `renderPreview` early-returns).
+    this.drawObjectAnchors();
     this.drawOutline();
     this.refreshHistoryButtons();
   }
@@ -845,18 +998,6 @@ export class CardEditorPanel extends PixiPanel {
       this.lightGfx.clear();
       return;
     }
-    // Seed the movable light once per card — from the top-left of the primary
-    // sprite (card-px), reproducing the old single-sprite default.
-    if (!this.lightSeeded) {
-      const p = this.primaryLit();
-      if (p) {
-        const n = p.node;
-        const ax = (n.anchor?.x ?? 0) / 100;
-        const ay = (n.anchor?.y ?? 0) / 100;
-        this.fixedLight = { x: n.pos.x - ax * n.size.x + n.size.x * 0.15, y: n.pos.y - ay * n.size.y + n.size.y * 0.15 };
-        this.lightSeeded = true;
-      }
-    }
     this.placeLitSprites();
     this.refreshLightingSource();
     this.relight();
@@ -871,15 +1012,6 @@ export class CardEditorPanel extends PixiPanel {
   /** The selected sprite's lit pipeline, if the selection is a (built) sprite. */
   private selectedLit(): SpriteLit | undefined {
     return this.litSprites.find((s) => s.node === this.selected);
-  }
-
-  /** The sprite the card paint surface + light-tool cursor map against: the
-   *  SELECTED sprite when one is selected (so the brush lands on the sprite you're
-   *  editing, at ITS position on the card — sprites aren't at 0,0), else the
-   *  primary. The card paint surface + bucket "lit" source + light texel↔card
-   *  conversions all key off this so they stay mutually consistent. */
-  private cardLit(): SpriteLit | undefined {
-    return this.selectedLit() ?? this.primaryLit();
   }
 
   private hideSelectionRenders(): void {
@@ -937,9 +1069,11 @@ export class CardEditorPanel extends PixiPanel {
    *  whose master albedo isn't loaded yet are skipped (a later `masterTex` load
    *  re-runs this via relayout). */
   private buildLitSprites(): void {
+    // Every TEXTURED object prim is lit — sprites AND hex grounds (the hex's geometry
+    // is handled in `placeLitSprites`). Keyed by the BASE stem (no `?v=`) so its paint
+    // layers are the SAME ones the channel squares edit — version-stable + consistent.
     const desired = this.workingList
-      .filter((n) => n.kind === "sprite" && !!n.texture)
-      .map((n) => ({ node: n, stem: n.texture! }))
+      .map((n) => ({ node: n, stem: this.texStem(n) }))
       .filter((d): d is { node: VisualNode; stem: string } => d.stem !== null);
     const sig = desired.map((d) => d.stem).join("|");
     // A sprite that's wanted but not yet built, whose master is now available →
@@ -948,7 +1082,7 @@ export class CardEditorPanel extends PixiPanel {
     if (sig === this.litSig && !stale) return;
     this.litSig = sig;
 
-    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); }
+    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); s.mask?.destroy(); }
     this.litSprites = [];
     for (const d of desired) {
       // Ensure the editable channel copies exist (blank emissive if absent), then
@@ -964,59 +1098,126 @@ export class CardEditorPanel extends PixiPanel {
       canvas.height = h;
       const ctx = canvas.getContext("2d");
       if (!ctx) continue;
+      const sprite = new Sprite();
+      // A hex ground's overlay is clipped to the cell hex (like the bake) so the
+      // `fill` over-cover doesn't spill past the tile; sprites need no clip.
+      const mask = d.node.kind === "hex" ? new Sprite(this.hexMask) : null;
+      if (mask) sprite.mask = mask;
       this.litSprites.push({
         node: d.node, stem: d.stem, canvas, ctx,
         texture: Texture.from(canvas),
         out: ctx.createImageData(w, h),
         bloom: new Bloom(w, h),
         albedoData: null, normalData: null, emissiveData: null,
-        sprite: new Sprite(),
+        sprite, mask,
         ox: 0, oy: 0, w: 0, h: 0, texW: w, texH: h,
       });
     }
-    // Overlays sit above the flat bigFace render (in working-list order, matching
-    // its self-mounted paint order) but below the light markers.
-    for (const s of this.litSprites) this.previewContent.addChild(s.sprite);
-    this.previewContent.setChildIndex(this.lightGfx, this.previewContent.children.length - 1);
+    // Overlays are depth-sorted by the zIndex `placeLitSprites` assigns (sortable
+    // container), so add order doesn't matter; bigFace + the markers keep their
+    // fixed base/top zIndex. A hex overlay's mask is parented alongside it.
+    for (const s of this.litSprites) {
+      this.previewContent.addChild(s.sprite);
+      if (s.mask) this.previewContent.addChild(s.mask);
+    }
   }
 
   /** Position every lit overlay over its sprite's footprint on the card (square-
    *  local, pre pan/zoom — `previewContent` applies pan/zoom). Matches `SpritePrim`'s
    *  transform: anchor pivot at `pos`, displayed size `size·scale`, rotated by
-   *  `rot`. The primary sprite's footprint also drives the card paint surface. */
+   *  `rot`. Then {@link updateCardPaintSurface} points the card paint surface at the
+   *  SELECTED prim. */
   private placeLitSprites(): void {
     const sc = this.bigFace.scale.x;
     for (const s of this.litSprites) {
       const n = s.node;
       const ax = (n.anchor?.x ?? 0) / 100;
       const ay = (n.anchor?.y ?? 0) / 100;
-      const ns = n.scale ?? 1;
-      const w = n.size.x * sc * ns;
-      const h = n.size.y * sc * ns;
-      // bigFace.position is square-local; the sprite's anchor point sits at `pos`.
-      const px = this.bigFace.position.x + n.pos.x * sc;
-      const py = this.bigFace.position.y + n.pos.y * sc;
       s.sprite.texture = s.texture;
-      s.sprite.anchor.set(ax, ay);
       s.sprite.rotation = n.rot ?? 0;
       s.sprite.alpha = n.alpha ?? 1;
-      s.sprite.setSize(w, h);
-      s.sprite.position.set(px, py);
-      // Axis-aligned footprint (pre-rotation) for markers + the card paint surface.
-      s.ox = px - ax * w;
-      s.oy = py - ay * h;
-      s.w = w;
-      s.h = h;
+      if (n.kind === "hex") {
+        // Hex ground: replicate the bake (`getHexClipped`/`renderMasked`) exactly —
+        // scale the SQUARE master by a UNIFORM cover-fit (`max(w/srcW, h/srcH)·fill`,
+        // i.e. the LARGER cell dimension) centred on the cell, then CLIP to the cell
+        // hex with `s.mask`. An anamorphic `setSize(cellW·fill, cellH·fill)` would
+        // stretch the square master to the hex aspect — squishing it horizontally
+        // (the width-specific bug). `fill` (DSL `&fill`) over-covers; the mask trims.
+        const cw = n.size.x * sc;
+        const ch = n.size.y * sc;
+        const cover = Math.max(cw / s.texW, ch / s.texH) * (n.scale ?? 1); // screen px / master texel
+        const dispW = s.texW * cover;
+        const dispH = s.texH * cover; // == dispW for a square master — a uniform box
+        const cx = this.bigFace.position.x + (n.pos.x + (0.5 - ax) * n.size.x) * sc;
+        const cy = this.bigFace.position.y + (n.pos.y + (0.5 - ay) * n.size.y) * sc;
+        s.sprite.anchor.set(0.5);
+        s.sprite.setSize(dispW, dispH);
+        s.sprite.position.set(cx, cy);
+        // The mask is the CELL footprint (the visible tile hex) — clips the over-cover.
+        const mx = this.bigFace.position.x + (n.pos.x - ax * n.size.x) * sc;
+        const my = this.bigFace.position.y + (n.pos.y - ay * n.size.y) * sc;
+        if (s.mask) { s.mask.anchor.set(0); s.mask.position.set(mx, my); s.mask.setSize(cw, ch); }
+        // Brush footprint = the (square) cover span, centred — the master's full
+        // displayed extent (the mask-clipped texels are still paintable).
+        s.w = dispW;
+        s.h = dispH;
+        s.ox = cx - dispW / 2;
+        s.oy = cy - dispH / 2;
+      } else {
+        const ns = n.scale ?? 1;
+        const w = n.size.x * sc * ns;
+        const h = n.size.y * sc * ns;
+        // bigFace.position is square-local; the sprite's anchor point sits at `pos`.
+        const px = this.bigFace.position.x + n.pos.x * sc;
+        const py = this.bigFace.position.y + n.pos.y * sc;
+        s.sprite.anchor.set(ax, ay);
+        s.sprite.setSize(w, h);
+        s.sprite.position.set(px, py);
+        // Axis-aligned footprint (pre-rotation) for markers + the card paint surface.
+        s.ox = px - ax * w;
+        s.oy = py - ay * h;
+        s.w = w;
+        s.h = h;
+      }
+      // Depth-sort like the world: fills (grounds) under objects, else by Y (the
+      // anchor row) with the spec index as a tiebreak.
+      const idx = this.workingList.indexOf(n);
+      const fill = n.kind === "hex" || n.kind === "rect" ? FLOOR_BAND : 0;
+      s.sprite.zIndex = Math.round(n.pos.y * Z_SCALE) + (n.z ?? idx) + fill;
     }
-    // The card paint surface follows the SELECTED sprite (its footprint already
-    // bakes in `pos`, so the brush offsets correctly), falling back to the primary.
-    const target = this.cardLit();
-    if (target) {
-      this.cardSpaceSprite = { ox: target.ox, oy: target.oy, w: target.w, h: target.h, texW: target.texW, texH: target.texH };
-    } else {
-      this.cardSpaceSprite = null;
-      this.cardSurface = null;
+    this.updateCardPaintSurface();
+  }
+
+  /** Point the card paint surface at the SELECTED prim, so the brush on the preview
+   *  lands on what you're editing — NOT a fallback sprite. A selected sprite reuses
+   *  its lit-overlay footprint (exact). A selected textured hex/rect (a tile ground)
+   *  has no lit overlay, so its footprint is derived from the node geometry the
+   *  renderer uses and its master is FIT into that footprint (centre-accurate; the
+   *  hex bake's cover-overscale is ignored — paint channel squares for pixel work).
+   *  No textured selection → no card surface (the channel squares still paint). */
+  private updateCardPaintSurface(): void {
+    const n = this.selected;
+    const stem = this.texStem(n);
+    if (!n || !stem) { this.cardSpaceSprite = null; this.cardSurface = null; return; }
+    const lit = this.selectedLit();
+    if (lit) {
+      this.cardSpaceSprite = { ox: lit.ox, oy: lit.oy, w: lit.w, h: lit.h, texW: lit.texW, texH: lit.texH };
+      this.computeCardSurface();
+      return;
     }
+    const master = this.channelTexture(stem, "albedo");
+    if (!master) { this.cardSpaceSprite = null; this.cardSurface = null; return; }
+    const sc = this.bigFace.scale.x;
+    const ax = (n.anchor?.x ?? 0) / 100;
+    const ay = (n.anchor?.y ?? 0) / 100;
+    // A clipped hex renders at `size` (its `scale` is consumed by the texture bake);
+    // a rect fill renders at `size·scale`.
+    const ns = n.kind === "hex" ? 1 : (n.scale ?? 1);
+    const w = n.size.x * sc * ns;
+    const h = n.size.y * sc * ns;
+    const px = this.bigFace.position.x + n.pos.x * sc;
+    const py = this.bigFace.position.y + n.pos.y * sc;
+    this.cardSpaceSprite = { ox: px - ax * w, oy: py - ay * h, w, h, texW: master.width || 1, texH: master.height || 1 };
     this.computeCardSurface();
   }
 
@@ -1058,12 +1259,11 @@ export class CardEditorPanel extends PixiPanel {
     this.relight();
   }
 
-  /** The selected sprite's master stem (null when the selection isn't a sprite
-   *  or has no texture) — the key its bloom override is stored under. */
+  /** The selected textured prim's BASE master stem (null when the selection has no
+   *  master — non-textured, empty, or a sentinel) — the key its bloom override is
+   *  stored under. Covers sprites AND textured hex/rect grounds. */
   private selectedSpriteStem(): string | null {
-    const n = this.selected;
-    if (n?.kind !== "sprite" || !n.texture) return null;
-    return n.texture;
+    return this.texStem(this.selected);
   }
 
   /** Every light shading the card, in the shared CARD-PX space: the fixed (white)
@@ -1073,13 +1273,11 @@ export class CardEditorPanel extends PixiPanel {
    *  the others carry their own. The fixed light is skippable via the Art Tools
    *  toggle, to preview the card's own lights alone. */
   private cardLights(): CardLight[] {
-    const primary = this.primaryLit();
-    const cardDim = primary
-      ? Math.max(primary.node.size.x, primary.node.size.y)
-      : Math.max(global("card_width"), global("body_height"));
     const lights: CardLight[] = [];
     if (this.artTools.defaultLight) {
-      lights.push({ x: this.fixedLight.x, y: this.fixedLight.y, height: cardDim * LIGHT_HEIGHT, radius: cardDim * LIGHT_RADIUS, intensity: LIGHT_INTENSITY, color: 0xffffff });
+      // The fixed inspection light is an absolute card-px shape (height 180,
+      // radius 960, intensity 1.2) — tuned to read like the game's world light.
+      lights.push({ x: this.fixedLight.x, y: this.fixedLight.y, height: LIGHT_HEIGHT, radius: LIGHT_RADIUS, intensity: LIGHT_INTENSITY, color: 0xffffff });
     }
     if (this.cursorLight) {
       lights.push({ x: this.cursorLight.x, y: this.cursorLight.y, height: this.artTools.lightHeight, radius: this.artTools.lightRadius, intensity: this.artTools.lightIntensity, color: this.artTools.primary });
@@ -1111,28 +1309,37 @@ export class CardEditorPanel extends PixiPanel {
   // (`pos`/`size·scale`, anchor-pivoted) ↔ its texel grid.
   private cardToTexel(s: SpriteLit, cx: number, cy: number): { tx: number; ty: number } {
     const n = s.node;
+    const ax = (n.anchor?.x ?? 0) / 100;
+    const ay = (n.anchor?.y ?? 0) / 100;
+    const cw = n.size.x || 1;
+    const ch = n.size.y || 1;
+    if (n.kind === "hex") {
+      // UNIFORM cover-fit (matches `renderMasked`'s `max(w/srcW, h/srcH)·fill` + the
+      // overlay display): the SQUARE master spans `max(cell) · fill` on BOTH axes,
+      // centred on the cell. (Anamorphic `cell·fill` would squish the square master
+      // to the hex aspect — the width-specific stretch bug.)
+      const span = Math.max(cw, ch) * (n.scale ?? 1);
+      const left = n.pos.x + (0.5 - ax) * cw - span / 2;
+      const top = n.pos.y + (0.5 - ay) * ch - span / 2;
+      return { tx: ((cx - left) / span) * s.canvas.width, ty: ((cy - top) / span) * s.canvas.height };
+    }
     const ns = n.scale ?? 1;
-    const wpx = (n.size.x || 1) * ns;
-    const hpx = (n.size.y || 1) * ns;
-    const left = n.pos.x - ((n.anchor?.x ?? 0) / 100) * wpx;
-    const top = n.pos.y - ((n.anchor?.y ?? 0) / 100) * hpx;
+    const wpx = cw * ns;
+    const hpx = ch * ns;
+    const left = n.pos.x - ax * wpx;
+    const top = n.pos.y - ay * hpx;
     return { tx: ((cx - left) / wpx) * s.canvas.width, ty: ((cy - top) / hpx) * s.canvas.height };
   }
 
-  private texelToCard(s: SpriteLit, tx: number, ty: number): { x: number; y: number } {
-    const n = s.node;
-    const ns = n.scale ?? 1;
-    const wpx = (n.size.x || 1) * ns;
-    const hpx = (n.size.y || 1) * ns;
-    const left = n.pos.x - ((n.anchor?.x ?? 0) / 100) * wpx;
-    const top = n.pos.y - ((n.anchor?.y ?? 0) / 100) * hpx;
-    return { x: left + (tx / s.canvas.width) * wpx, y: top + (ty / s.canvas.height) * hpx };
-  }
 
-  /** Card-px length → a sprite's texel length. */
+  /** Card-px length → a sprite's texel length. A hex uses its UNIFORM cover span
+   *  (`max(cell)·fill`), matching {@link cardToTexel}. */
   private cardLenToTexel(s: SpriteLit, len: number): number {
     const n = s.node;
-    return (len / ((n.size.x || 1) * (n.scale ?? 1))) * s.canvas.width;
+    const span = n.kind === "hex"
+      ? Math.max(n.size.x || 1, n.size.y || 1) * (n.scale ?? 1)
+      : (n.size.x || 1) * (n.scale ?? 1);
+    return (len / span) * s.canvas.width;
   }
 
   /** Draw a marker for every light — the fixed light + each light primitive — at
@@ -1155,18 +1362,36 @@ export class CardEditorPanel extends PixiPanel {
     }
   }
 
-  /** Add a `light` primitive at texel `(tx, ty)` (Light tool, left-click), then
+  /** Overlay a red cross at each object primitive's ANCHOR point — its `0,0`, which
+   *  the renderer places at `pos`. Toggled by the Art Tools "Object anchors" box (an
+   *  alignment aid). Drawn in the preview viewport (square-local · `bigFace` scale),
+   *  so it pans/zooms with the card like the light markers. Cleared when off. */
+  private drawObjectAnchors(): void {
+    this.anchorGfx.clear();
+    if (!this.artTools.showAnchors) return;
+    const sc = this.bigFace.scale.x;
+    if (sc <= 0) return;
+    for (const n of this.workingList) {
+      if (n.kind !== "sprite" && n.kind !== "hex" && n.kind !== "rect") continue;
+      // The anchor point is the prim's `pos` (the renderer pivots the object there).
+      const lx = this.bigFace.position.x + n.pos.x * sc;
+      const ly = this.bigFace.position.y + n.pos.y * sc;
+      this.anchorGfx
+        .moveTo(lx - LIGHT_MARKER_R, ly).lineTo(lx + LIGHT_MARKER_R, ly)
+        .moveTo(lx, ly - LIGHT_MARKER_R).lineTo(lx, ly + LIGHT_MARKER_R)
+        .stroke({ color: ANCHOR_MARKER_COLOR, width: 1.5 });
+    }
+  }
+
+  /** Add a `light` primitive at CARD px `(x, y)` (Light tool, left-click), then
    *  select it. Stored in CARD px (the game/DSL unit) — position from the click,
    *  height/radius/intensity from the Light tool's Art Tools options, colour from
    *  the primary swatch. Joins the working list, so it shows in the dropdown +
    *  drives the preview lighting (and is sandbox DSL). */
-  private addLightPrim(tx: number, ty: number): void {
-    const ref = this.cardLit();
-    if (!ref) return;
-    const c = this.texelToCard(ref, tx, ty);
+  private addLightPrim(x: number, y: number): void {
     const node: VisualNode = {
       kind: "light",
-      pos: { x: c.x, y: c.y },
+      pos: { x, y },
       size: { x: 0, y: 0 },
       tint: this.artTools.primary,
       light: { height: this.artTools.lightHeight, radius: this.artTools.lightRadius, intensity: this.artTools.lightIntensity },
@@ -1263,12 +1488,21 @@ export class CardEditorPanel extends PixiPanel {
     return null;
   }
 
-  /** Texel under the cursor on the PREVIEW card surface (the primary sprite's
-   *  footprint); callers convert it to shared card-px for the movable lights. */
-  private locateCard(e: PointerEvent): { tx: number; ty: number } | null {
-    if (!this.cardSurface) return null;
+  /** The cursor's CARD-PX position on the preview — the lights' coordinate frame
+   *  (independent of any sprite, so it works whatever's selected). Inverts the
+   *  preview transform: square-local → un-pan/zoom (`previewContent`) → un-position/
+   *  scale (`bigFace`). Null when the cursor is off the preview square. */
+  private cursorToCardPx(e: PointerEvent): { x: number; y: number } | null {
+    const g = this.geom;
+    if (!g || !this.overPreview(e)) return null;
+    const sc = this.bigFace.scale.x;
+    if (sc <= 0) return null;
     const body = this.bodyRect;
-    return surfaceTexel(this.cardSurface, e.clientX - body.left, e.clientY - body.top);
+    const lx = e.clientX - body.left - g.bigX; // square-local
+    const ly = e.clientY - body.top - g.bigY;
+    const px = (lx - this.pan.x) / this.zoom - this.bigFace.position.x;
+    const py = (ly - this.pan.y) / this.zoom - this.bigFace.position.y;
+    return { x: px / sc, y: py / sc };
   }
 
   private onPaintMove(e: PointerEvent): void {
@@ -1282,11 +1516,8 @@ export class CardEditorPanel extends PixiPanel {
       return;
     }
     if (tool === "light") {
-      // The cursor is a second light. `locateCard` gives the primary sprite's
-      // texel; store it in shared CARD-PX (so it lights every sprite) and relight.
-      const hit = this.locateCard(e);
-      const ref = this.cardLit();
-      this.cursorLight = hit && ref ? this.texelToCard(ref, hit.tx, hit.ty) : null;
+      // The cursor is a second light, in shared CARD-PX (so it lights every sprite).
+      this.cursorLight = this.cursorToCardPx(e);
       this.relight();
       return;
     }
@@ -1305,18 +1536,17 @@ export class CardEditorPanel extends PixiPanel {
   private onPaintDown(e: PointerEvent): void {
     const tool = this.artTools.tool;
     if (tool === "light") {
-      const hit = this.locateCard(e);
-      const ref = this.cardLit();
-      if (!hit || !ref) return;
+      const c = this.cursorToCardPx(e);
+      if (!c) return;
       e.preventDefault();
       if (e.button === 1) {
-        // Middle-click moves the fixed light (card-surface texel → shared card-px).
-        this.fixedLight = this.texelToCard(ref, hit.tx, hit.ty);
+        // Middle-click moves the fixed light (shared card-px).
+        this.fixedLight = c;
         this.drawLightMarkers();
         this.relight();
       } else if (e.button === 0) {
         // Left-click drops a light PRIMITIVE at the cursor.
-        this.addLightPrim(hit.tx, hit.ty);
+        this.addLightPrim(c.x, c.y);
       }
       return;
     }
@@ -1379,7 +1609,7 @@ export class CardEditorPanel extends PixiPanel {
    *  card preview, the edited channel canvas (or its master) for a paint channel,
    *  the master for diffuse. */
   private surfacePixels(stem: string, channel: SurfaceChannel): ImageData | null {
-    if (channel === "lit") return canvasData(this.cardLit()?.canvas ?? null);
+    if (channel === "lit") return canvasData(this.selectedLit()?.canvas ?? null);
     if (channel === "diffuse") {
       const tex = this.masterTex(stem, "diffuse");
       return tex ? textureData(tex) : null;
@@ -1474,16 +1704,18 @@ export class CardEditorPanel extends PixiPanel {
     }
 
     // Master-channel texture write: upload each EDITED channel. The paint key is
-    // `<stem>|<channel>`, stem `/textures/master/<aspect>/<faction>/<variant>`.
+    // `<base-stem>|<channel>`, where the base stem IS `<aspect>/<faction>/<variant>`
+    // (the resolved stem with the `?v=` version suffix already stripped) — the same
+    // shape the gate's `upload_master` keys (`textures/master/<a>/<f>/<v>.<ch>.png`).
     const dirty = this.paint.dirtyChannels();
     for (const { key, canvas } of dirty) {
       const bar = key.lastIndexOf("|");
       if (bar < 0) continue;
-      const stem = key.slice(0, bar);
+      const base = baseStem(key.slice(0, bar));
       const channel = key.slice(bar + 1);
-      const m = stem.match(/^\/textures\/master\/([^/]+)\/([^/]+)\/(.+)$/);
-      if (!m) continue;
-      const [, aspect, faction, variant] = m;
+      const parts = base?.split("/") ?? [];
+      if (parts.length !== 3) continue;
+      const [aspect, faction, variant] = parts;
       this.uploadMasterChannel(aspect, faction, variant, channel, canvas);
     }
     debug.log(
@@ -1536,14 +1768,20 @@ export class CardEditorPanel extends PixiPanel {
   private buildControls(): void {
     this.editControls.replaceChildren();
     this.buildBloomControls();
+    this.refreshChannelInputValues();
     const node = this.selected;
     if (!node) return;
     switch (node.kind) {
       case "text":
         this.addRow("Text", this.textInput(node.text ?? "", (v) => { node.text = v; this.onEdit(); }));
         break;
+      // Textured prims (rect/hex/sprite) share one control set: a `tint` (on a
+      // `^white`/empty fill it IS the solid colour; on art it colourises) + the
+      // geometry. The TEXTURE itself is set via the Albedo input over its square,
+      // not here.
       case "rect":
       case "hex":
+      case "sprite":
         this.addRow("Color", this.colorInput(node.tint ?? 0xffffff, (v) => { node.tint = v; this.onEdit(); }));
         this.addRow("Pos X", this.numberInput(node.pos.x, (v) => { node.pos.x = v; this.onEdit(); }));
         this.addRow("Pos Y", this.numberInput(node.pos.y, (v) => { node.pos.y = v; this.onEdit(); }));
@@ -1552,19 +1790,6 @@ export class CardEditorPanel extends PixiPanel {
         break;
       case "progress":
         this.addRow("Style", this.numberInput(node.style ?? 1, (v) => { node.style = v; this.onEdit(); }));
-        break;
-      case "sprite":
-        // `texture` is the resolved stem (<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>)
-        // the wasm `^r2` emits; editing it overrides the PREVIEW (the card's real
-        // art comes from its DSL pack+variant, resolved at draw time).
-        this.addRow("Texture", this.textInput(node.texture ?? "", (v) => {
-          node.texture = v ? v : null;
-          this.onEdit();
-        }, false));
-        this.addRow("Pos X", this.numberInput(node.pos.x, (v) => { node.pos.x = v; this.onEdit(); }));
-        this.addRow("Pos Y", this.numberInput(node.pos.y, (v) => { node.pos.y = v; this.onEdit(); }));
-        this.addRow("Width", this.numberInput(node.size.x, (v) => { node.size.x = v; this.onEdit(); }));
-        this.addRow("Height", this.numberInput(node.size.y, (v) => { node.size.y = v; this.onEdit(); }));
         break;
       case "light": {
         // Same variables as the cursor light: position, colour, height, radius,
@@ -1684,12 +1909,33 @@ export class CardEditorPanel extends PixiPanel {
     const g = this.geom;
     if (!g) return;
     // `content` (padding 0) sits at the body rect; content-local maps to body
-    // viewport coords. Both DOM widgets are position:fixed → viewport coords.
+    // viewport coords. Both DOM widgets are position:fixed → viewport coords. The
+    // prim picker floats in the input strip ABOVE the diffuse (prim) square.
     const body = this.bodyRect;
     const primX = g.squares.find((s) => s.kind === "prim")?.x ?? 0;
+    const inputY = g.rowY - INPUT_H - INPUT_GAP;
     this.select.style.left = `${body.left + primX}px`;
-    this.select.style.top = `${body.top + g.rowY}px`;
+    this.select.style.top = `${body.top + inputY}px`;
     this.select.style.width = `${g.side}px`;
+  }
+
+  /** Float each channel texture input in the strip above its square (albedo /
+   *  normal / emissive / slot4); hide inputs whose square isn't shown. */
+  private positionChannelInputs(): void {
+    const g = this.geom;
+    if (!g) return;
+    const body = this.bodyRect;
+    const inputY = g.rowY - INPUT_H - INPUT_GAP;
+    const order: Square["kind"][] = ["albedo", "normal", "emissive", "placeholder"];
+    order.forEach((kind, i) => {
+      const sq = g.squares.find((s) => s.kind === kind);
+      if (!sq) return; // hidden by syncDomVisibility; leave geometry stale
+      const input = this.channelInputs[i];
+      input.style.left = `${body.left + sq.x}px`;
+      input.style.top = `${body.top + inputY}px`;
+      input.style.width = `${g.side}px`;
+      input.style.height = `${INPUT_H}px`;
+    });
   }
 
   private positionControls(): void {
@@ -1743,6 +1989,9 @@ export class CardEditorPanel extends PixiPanel {
     const open = this.isOpen && !this.isMinimized;
     const hasList = open && this.workingList.length > 0;
     this.select.style.display = hasList ? "" : "none";
+    // Channel texture inputs: shown for a textured-kind selection (their squares).
+    const showInputs = open && this.isTexturedKind(this.selected);
+    for (const inp of this.channelInputs) inp.style.display = showInputs ? "" : "none";
     this.editControls.style.display = hasList && this.editControls.childElementCount > 0 ? "" : "none";
     // Bloom controls: only for a sprite selection (the emissive square's column).
     this.bloomControls.style.display = open && this.bloomControls.childElementCount > 0 ? "flex" : "none";
@@ -1765,6 +2014,7 @@ export class CardEditorPanel extends PixiPanel {
     this.unsubVis();
     this.unsubVis2();
     this.select.remove();
+    for (const inp of this.channelInputs) inp.remove();
     this.editControls.remove();
     this.bloomControls.remove();
     this.leftSection.remove();
@@ -1773,7 +2023,7 @@ export class CardEditorPanel extends PixiPanel {
     this.saveBtn.remove();
     this.paintOverlay.remove();
     this.paint.clear();
-    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); }
+    for (const s of this.litSprites) { s.sprite.destroy(); s.texture.destroy(true); s.mask?.destroy(); }
     this.artTools.destroy();
     this.bigFace.destroy();
     this.smallFace.destroy();

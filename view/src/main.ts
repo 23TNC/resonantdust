@@ -28,6 +28,7 @@ import { WasmClient } from "./client/WasmClient";
 import { gateUrlFor, httpBaseFor, type Environment } from "./client/environments";
 import { TextureManager } from "./assets/textures/TextureManager";
 import { LodTextureManager } from "./assets/textures/LodTextureManager";
+import { GeometryStore } from "./assets/geometry/GeometryStore";
 import { ObjectManager } from "./assets/ObjectManager";
 import { DefinitionManager } from "./game/definitions/DefinitionManager";
 import { reloadContent, initContentFromCache, sharedContent } from "./game/definitions/contentBoot";
@@ -96,6 +97,13 @@ async function main(): Promise<void> {
   // for absolute `fetch()` byte reads. Ask for durable storage so the pinned
   // preview floor (IndexedDB) survives between sessions (best-effort).
   lodTextures.setTextureBase(TEXTURE_BASE);
+  // Silhouette-geometry sidecars (first-frame placeholders) — same origins as the
+  // LOD fetches: R2-direct, gate on miss (the gate generates the sidecar from the
+  // master). Prewarmed over `previewStems()` at login so geometry is resident
+  // before cards render.
+  const geometry = new GeometryStore();
+  geometry.setGateBase(httpBaseFor("dev"));
+  geometry.setTextureBase(TEXTURE_BASE);
   void persistStorage();
   const objects = new ObjectManager(lodTextures);
   // Optimistic pre-login warm: if a previous session cached a corpus, seed the
@@ -103,7 +111,7 @@ async function main(): Promise<void> {
   // login screen). A returning player's placeholders fetch from HTTP disk cache
   // and are ready before login completes, so the world doesn't flash white. No-op
   // on a first-ever visit; reconciled against the gate's corpus at login.
-  void prewarmFromCache(lodTextures);
+  void prewarmFromCache(lodTextures, geometry);
   // Textures otherwise resolve per-stem from the wasm VM and stream from R2 (white
   // fallback until they land), so there's nothing to block boot on.
   const assetsReady = Promise.resolve();
@@ -146,6 +154,7 @@ async function main(): Promise<void> {
     client,
     textures,
     lodTextures,
+    geometry,
     objects,
     assetsReady,
     taskbar,
@@ -253,13 +262,16 @@ function toSyncStats(s: ClockStats): SyncStats {
  *  a returning player's placeholders are ready (served from HTTP disk cache)
  *  before login. Best-effort — no cache, or any failure, falls back to the normal
  *  post-login prewarm in WorldRenderer. */
-async function prewarmFromCache(lod: LodTextureManager): Promise<void> {
+async function prewarmFromCache(lod: LodTextureManager, geometry: GeometryStore): Promise<void> {
   try {
     const env = await lastEnv();
     if (!env) return;
     if (!(await initContentFromCache(env))) return;
     lod.setGateBase(httpBaseFor(env as Environment));
-    lod.prewarmPreviews(sharedContent().previewStems());
+    geometry.setGateBase(httpBaseFor(env as Environment));
+    const stems = sharedContent().previewStems();
+    lod.prewarmPreviews(stems);
+    geometry.prewarm(stems);
   } catch {
     /* best-effort warm — the normal cold path still runs at login */
   }

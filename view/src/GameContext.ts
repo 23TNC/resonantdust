@@ -11,6 +11,7 @@ import type { UiEditMode } from "./ui/dom/UiEditMode";
 import type { WasmClient } from "./client/WasmClient";
 import type { TextureManager } from "./assets/textures/TextureManager";
 import type { LodTextureManager } from "./assets/textures/LodTextureManager";
+import type { GeometryStore } from "./assets/geometry/GeometryStore";
 import type { ObjectManager } from "./assets/ObjectManager";
 import type { DrawCallCounter } from "./debug/DrawCallCounter";
 import type { DefinitionManager } from "./game/definitions/DefinitionManager";
@@ -31,6 +32,9 @@ export interface GameContext {
   readonly textures: TextureManager;
   /** LOD-aware lazy loader / picker + per-URL atlas cache (the LOD atlas system). */
   readonly lodTextures: LodTextureManager;
+  /** Per-stem silhouette geometry sidecars — first-frame placeholders + (later)
+   *  shadow casters. Fetched from the gate/R2, prewarmed at login. */
+  readonly geometry: GeometryStore;
   /** World-object sprite/texture resolver over the LOD atlas. */
   readonly objects: ObjectManager;
   /** Resolves once the 64px LOD prewarm floor is loaded. */
