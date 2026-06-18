@@ -178,14 +178,28 @@ export class DeferredLighting {
     // to the flat-up clear instead of writing their albedo COLOUR as a bogus
     // normal — that colour-as-normal was the directional "lit on one side"
     // artifact. Empty space is flat-up from the clear too.
+    // The tint is the ALBEDO's colour (e.g. a tile's ground tint). It must NOT
+    // apply to the normal — multiplying the normal's RGB by a coloured tint skews
+    // the encoded vector (a low-blue tint crushes the +Z component, so flat ground
+    // reads as facing sideways: black under a top-down light, glowing edges). Force
+    // white for the normal render and restore the real tint after.
+    const restore: { sp: LitSprite; tint: number }[] = [];
     for (const sp of this.sprites) {
-      if (sp.normalTexture) sp.texture = sp.normalTexture;
-      else sp.renderable = false;
+      if (sp.normalTexture) {
+        restore.push({ sp, tint: sp.tint });
+        sp.texture = sp.normalTexture;
+        sp.tint = 0xffffff;
+      } else {
+        sp.renderable = false;
+      }
     }
     renderer.render({ container: world, target: rt, clear: true, clearColor: [0.5, 0.5, 1, 1] });
     for (const sp of this.sprites) {
-      if (sp.normalTexture) sp.texture = sp.albedoTexture;
-      else sp.renderable = true;
+      if (!sp.normalTexture) sp.renderable = true;
+    }
+    for (const { sp, tint } of restore) {
+      sp.texture = sp.albedoTexture;
+      sp.tint = tint;
     }
   }
 
