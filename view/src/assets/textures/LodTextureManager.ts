@@ -7,8 +7,15 @@ import {
   PREVIEW_LOD,
   type Channel,
 } from "../lodUrls";
-import { TextureManager, type PackedPair } from "./TextureManager";
+import { TextureManager, type PackedPair, type SlotHandle } from "./TextureManager";
 import { debug } from "../../debug";
+
+/** A cached LOD: the framed triple plus the atlas slot handle, so a superseded
+ *  version can free its slot (see version eviction in {@link LodTextureManager}). */
+interface LodEntry {
+  readonly pair: PackedPair;
+  readonly handle: SlotHandle;
+}
 
 /** Pixels trimmed off each side of a packed frame, so bilinear sampling can't
  *  bleed from neighbouring atlas slots. */
@@ -50,17 +57,23 @@ export class LodTextureManager {
   private readonly preview: TextureManager;
   private readonly renderer: Renderer;
   private readonly qualityCap: number;
-  /** Master atlas-packed triple keyed by `${stem}@${size}`. */
-  private readonly byKey = new Map<string, PackedPair>();
+  /** Master atlas entry keyed by `${stem}@${size}`. The stem includes any
+   *  `?v=<hash>` version suffix, so a re-mastered object's bytes are a distinct
+   *  key (new fetch) and the old one is evictable (see {@link evictStaleVersions}). */
+  private readonly byKey = new Map<string, LodEntry>();
   /** Keys whose master load is in flight (dedupe). */
   private readonly loading = new Set<string>();
-  /** Preview atlas-packed triple keyed by stem (one preview size per stem). */
-  private readonly previewByKey = new Map<string, PackedPair>();
+  /** Preview atlas entry keyed by the (versioned) stem — one preview per stem. */
+  private readonly previewByKey = new Map<string, LodEntry>();
   /** Stems whose preview load is in flight (dedupe). */
   private readonly previewLoading = new Set<string>();
   /** Per-stem largest bucket known to exist (set on first successful descend),
    *  so the picker clamps the ideal and avoids re-probing absent buckets. */
   private readonly maxSize = new Map<string, number>();
+  /** The currently-cached versioned stem per base stem (path without `?v=`), so a
+   *  changed version evicts the previous one's atlas slots. Only tracked for
+   *  versioned stems — un-versioned content never evicts. */
+  private readonly versionedByBase = new Map<string, string>();
   private readonly listeners = new Set<() => void>();
   private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
@@ -106,13 +119,14 @@ export class LodTextureManager {
    *  (the VM couldn't resolve it) → transparent. */
   getPair(stem: string, desiredSize: number): PackedPair {
     if (!stem) return this.transparentPair();
+    this.evictStaleVersions(stem);
     let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
     const known = this.maxSize.get(stem);
     if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
 
     const key = `${stem}@${ideal}`;
     const cached = this.byKey.get(key);
-    if (cached) return cached;
+    if (cached) return cached.pair;
 
     if (!this.loading.has(key)) {
       this.loading.add(key);
@@ -126,13 +140,37 @@ export class LodTextureManager {
     return this.getPreview(stem) ?? this.transparentPair();
   }
 
+  /** When a versioned stem's `?v=<hash>` differs from the one currently cached for
+   *  its base path (a re-mastered object), release every cached size + the preview
+   *  of the OLD version — freeing their atlas slots — so superseded versions don't
+   *  accumulate. No-op for an un-versioned stem or an unchanged version. */
+  private evictStaleVersions(stem: string): void {
+    const q = stem.indexOf("?");
+    if (q < 0) return; // un-versioned — nothing to track or evict
+    const base = stem.slice(0, q);
+    const prev = this.versionedByBase.get(base);
+    if (prev !== undefined && prev !== stem) {
+      for (const size of LOD_SIZES) {
+        const k = `${prev}@${size}`;
+        this.byKey.get(k)?.handle.release();
+        this.byKey.delete(k);
+        this.loading.delete(k);
+      }
+      this.previewByKey.get(prev)?.handle.release();
+      this.previewByKey.delete(prev);
+      this.previewLoading.delete(prev);
+      this.maxSize.delete(prev);
+    }
+    this.versionedByBase.set(base, stem);
+  }
+
   /** Cached preview for the stem, or null if its prewarm hasn't landed yet (or it
    *  has no small bucket). Previews are loaded EAGERLY by {@link prewarmPreviews}
    *  at login — NOT lazily here — so by the time an object renders its placeholder
    *  is already packed and a streaming full-res texture upgrades from colour/shape
    *  rather than popping in from nothing. */
   private getPreview(stem: string): PackedPair | null {
-    return this.previewByKey.get(stem) ?? null;
+    return this.previewByKey.get(stem)?.pair ?? null;
   }
 
   /** Enqueue a `PREVIEW_LOD` placeholder load for every stem into the preview
@@ -179,7 +217,7 @@ export class LodTextureManager {
   private findCachedSubstitute(stem: string): PackedPair | null {
     for (let i = LOD_SIZES.length - 1; i >= 0; i--) {
       const cached = this.byKey.get(`${stem}@${LOD_SIZES[i]}`);
-      if (cached) return cached;
+      if (cached) return cached.pair;
     }
     return null;
   }
@@ -208,6 +246,7 @@ export class LodTextureManager {
     this.previewLoading.clear();
     this.preview.destroy();
     this.maxSize.clear();
+    this.versionedByBase.clear();
     this.transparentFallback = null;
     // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
     this.highQueue.length = 0;
@@ -227,13 +266,9 @@ export class LodTextureManager {
       if (albedoSrc) {
         const normalSrc = await this.fetchChannel(stem, ideal, "normal");
         const emissiveSrc = await this.fetchChannel(stem, ideal, "emissive");
-        const packed = this.textures.pack(albedoSrc, normalSrc, emissiveSrc);
+        const { pair, handle } = this.textures.packTracked(albedoSrc, normalSrc, emissiveSrc);
         const key = `${stem}@${ideal}`;
-        this.byKey.set(key, {
-          albedo: insetFrame(packed.albedo, FRAME_INSET),
-          normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
-          emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
-        });
+        this.byKey.set(key, { pair: insetPair(pair), handle });
         if (ideal > (this.maxSize.get(stem) ?? 0)) this.maxSize.set(stem, ideal);
         landedKey = key;
       }
@@ -252,12 +287,13 @@ export class LodTextureManager {
    *  common case for `emissive`). Both URLs cache independently in PIXI Assets;
    *  within a session the packed result is held in `byKey`, so we never re-probe. */
   private async fetchChannel(stem: string, size: number, channel: Channel): Promise<Texture | null> {
-    const direct = channelUrl(stem, size, channel); // R2-direct via Assets basePath
-    const fromCache = await loadOrNull(direct);
+    // `channelUrl` is version-aware: it splits any `?v=` off the path and re-adds
+    // it as the query, so both the R2-direct path and the gate URL carry it.
+    const path = channelUrl(stem, size, channel);
+    const fromCache = await loadOrNull(path); // R2-direct via Assets basePath
     if (fromCache) return fromCache;
     if (this.gateBase) {
-      const viaGate = `${this.gateBase}/textures/lod/${size}/${stem}.${channel}.png`;
-      const generated = await loadOrNull(viaGate);
+      const generated = await loadOrNull(`${this.gateBase}${path}`);
       if (generated) return generated;
     }
     return null;
@@ -275,12 +311,8 @@ export class LodTextureManager {
       if (albedoSrc) {
         const normalSrc = await this.fetchChannel(stem, PREVIEW_LOD, "normal");
         const emissiveSrc = await this.fetchChannel(stem, PREVIEW_LOD, "emissive");
-        const packed = this.preview.pack(albedoSrc, normalSrc, emissiveSrc);
-        this.previewByKey.set(stem, {
-          albedo: insetFrame(packed.albedo, FRAME_INSET),
-          normal: packed.normal ? insetFrame(packed.normal, FRAME_INSET) : null,
-          emissive: packed.emissive ? insetFrame(packed.emissive, FRAME_INSET) : null,
-        });
+        const { pair, handle } = this.preview.packTracked(albedoSrc, normalSrc, emissiveSrc);
+        this.previewByKey.set(stem, { pair: insetPair(pair), handle });
         landed = true;
       }
     } catch (err) {
@@ -302,6 +334,16 @@ async function loadOrNull(url: string): Promise<Texture | null> {
   } catch {
     return null;
   }
+}
+
+/** Inset every channel of a packed triple by `FRAME_INSET` (bilinear bleed
+ *  guard), preserving nulls. */
+function insetPair(pair: PackedPair): PackedPair {
+  return {
+    albedo: insetFrame(pair.albedo, FRAME_INSET),
+    normal: pair.normal ? insetFrame(pair.normal, FRAME_INSET) : null,
+    emissive: pair.emissive ? insetFrame(pair.emissive, FRAME_INSET) : null,
+  };
 }
 
 function insetFrame(tex: Texture, inset: number): Texture {

@@ -241,9 +241,10 @@ impl Catalog {
           _ => 1,
         }
         .max(1);
+        let ver = version_suffix(facet);
         for i in 0..len {
           for part in 0..parts {
-            out.push(format!("{category}.0/{object}.0/{}.{}.{}", ids[i], counts[i], part));
+            out.push(format!("{category}.0/{object}.0/{}.{}.{}{ver}", ids[i], counts[i], part));
           }
         }
       }
@@ -628,6 +629,24 @@ fn facet_ints(cell: &Cell, key: &str) -> Vec<i64> {
   }
 }
 
+/// A scalar int facet field (`&key set`), or `None` if absent. Used for the
+/// per-object `&hash` (master content version) the manifest carries.
+fn facet_int(cell: &Cell, key: &str) -> Option<i64> {
+  match cell {
+    Cell::Map(m) => m.iter().find(|(k, _)| k == key).map(|(_, c)| c.as_int()),
+    _ => None,
+  }
+}
+
+/// The `?v=<hash>` version suffix for a manifest object facet, or empty when the
+/// manifest carries no `&hash` (un-versioned content — the resolved stem is then
+/// the bare path, exactly as before). The suffix rides along inside the stem
+/// string and is split back off client-side when building the LOD URL, so a
+/// re-mastered object (new hash) yields a distinct URL that busts every cache.
+fn version_suffix(facet: &Cell) -> String {
+  facet_int(facet, "hash").map_or(String::new(), |h| format!("?v={h}"))
+}
+
 /// Resolve a texture STEM `<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>` from
 /// the manifest — the `^r2` intrinsic's core. Picks a variation (fixed 1-based
 /// `index`, else `seed % len` — `seed` is EXPLICIT so a tile ring can vary per
@@ -672,7 +691,7 @@ fn resolve_r2(
     .unwrap_or(false);
   let bdir = if bio_present { biome } else { 0 };
 
-  format!("{category}.{bdir}/{object}.{fdir}/{id}.{count}.{part}")
+  format!("{category}.{bdir}/{object}.{fdir}/{id}.{count}.{part}{}", version_suffix(facet))
 }
 
 fn hash(x: i64) -> i64 {

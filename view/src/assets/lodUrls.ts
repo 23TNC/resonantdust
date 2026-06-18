@@ -43,7 +43,14 @@ export function lodsDescendingFrom(start: number): LodSize[] {
 }
 
 /** Build the fetch URL for a resolved stem at a LOD size + channel:
- *  `/textures/lod/<size>/<stem>.<channel>.png`. */
+ *  `/textures/lod/<size>/<stem>.<channel>.png[?v=<hash>]`. The stem may carry a
+ *  `?v=<hash>` version suffix (from the `^r2` resolver) — it's split off the path
+ *  and re-attached as the query, so the version keys the browser/CDN cache (a
+ *  re-mastered object → new hash → new URL → clean bust) while the path stays the
+ *  stable R2 object key. An un-versioned stem yields the bare URL, as before. */
 export function channelUrl(stem: string, size: number, channel: Channel): string {
-  return `/textures/lod/${size}/${stem}.${channel}.png`;
+  const q = stem.indexOf("?");
+  const base = q < 0 ? stem : stem.slice(0, q);
+  const query = q < 0 ? "" : stem.slice(q);
+  return `/textures/lod/${size}/${base}.${channel}.png${query}`;
 }
