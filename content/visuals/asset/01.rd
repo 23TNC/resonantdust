@@ -127,6 +127,16 @@
       "concrete &object set
       256 &size set
 
+  ; Ground texture for grassy tiles (forest/plains). Set as a tile's `&ground`
+  ; pack; `hex_body` resolves it via `^r2` and the view clips it to the hex.
+  ; `grass_hex` (vs square `grass`) is authored hex-shaped, so its normal map
+  ; reads correctly at the hex edges — a square normal clipped to a hex looks off.
+  ::grass>
+    @define>
+      "tiles &category set
+      "grass_hex &object set
+      256 &size set
+
   ::symbols>
     @define>
       "symbols &category set

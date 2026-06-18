@@ -45,9 +45,10 @@
   ::forest>
     :visuals>
       @define>
-        #395C39 &color.bg set
+        #395C39 &color.bg set       ; tints the grass ground (multiply)
         #2A2A2A &color.title set
         #0B1426 &color.text set
+        $asset::grass &ground set    ; grass ground texture, hex-clipped by the view
       @init>
         $functions::ring_prims call drop
       @update>
@@ -58,9 +59,10 @@
   ::plains>
     :visuals>
       @define>
-        #C9D75F &color.bg set
+        #C9D75F &color.bg set       ; brighter tint than forest → plains reads lighter
         #0b1426 &color.title set
         #0b1426 &color.text set
+        $asset::grass &ground set    ; same grass ground, lighter tint
       @init>
         $functions::ring_prims call drop
       @update>

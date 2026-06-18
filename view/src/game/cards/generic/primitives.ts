@@ -173,7 +173,12 @@ export class FillPrim extends BasePrim {
     // otherwise). A textured fill swaps the base texture here; the atlas fills
     // (white / hex) have no normal map, so the lit shader uses the flat-up
     // fallback and they get distance falloff + ambient only.
-    if (n.texture) {
+    if (n.texture && this.kind === "hex" && this.deps.hexTexture) {
+      // A textured hex (a tile ground): resolve the LOD and clip it to the hex
+      // cell so it doesn't overflow into neighbours. Tint still multiplies it.
+      const p = this.deps.lod.getHexClipped(n.texture, footprintPx(box, n.size), this.deps.hexTexture);
+      this.node.setTextures(p.albedo, p.normal, p.emissive);
+    } else if (n.texture) {
       const r = resolveAsset(this.deps.lod, n.texture, footprintPx(box, n.size), { dpr: box.dpr });
       this.node.setTextures(r.texture, r.normal, r.emissive);
     } else if (this.kind === "hex" && this.deps.hexTexture) {

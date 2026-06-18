@@ -1,4 +1,4 @@
-import { Assets, Graphics, Rectangle, RenderTexture, Texture, type Renderer } from "pixi.js";
+import { Assets, Container, Graphics, Rectangle, RenderTexture, Sprite, Texture, type Renderer } from "pixi.js";
 import {
   channelUrl,
   pickLodForSize,
@@ -75,6 +75,10 @@ export class LodTextureManager {
    *  changed version evicts the previous one's atlas slots. Only tracked for
    *  versioned stems — un-versioned content never evicts. */
   private readonly versionedByBase = new Map<string, string>();
+  /** Hex-clipped tile textures keyed by stem. `src` is the source albedo the clip
+   *  was baked from, so the clip re-bakes when the LOD upgrades (preview→full) and
+   *  is otherwise reused across every tile sharing that texture. */
+  private readonly hexClipped = new Map<string, { src: Texture; pair: PackedPair; handle: SlotHandle }>();
   private readonly listeners = new Set<() => void>();
   private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
@@ -125,6 +129,58 @@ export class LodTextureManager {
     return this.getPair(stem, desiredSize).albedo;
   }
 
+  /** Resolve `stem` and return it **clipped to the hex cell** (`hexMask`'s alpha),
+   *  packed into the atlas — for textured tiles. Cached per stem and re-baked only
+   *  when the LOD upgrades (preview→full), so every tile sharing a texture reuses
+   *  one clipped frame. While the source is still the transparent placeholder it's
+   *  returned unclipped, so the solid-colour tile bg shows through until grass lands. */
+  getHexClipped(stem: string, desiredSize: number, hexMask: Texture): PackedPair {
+    if (!stem) return this.transparentPair();
+    const source = this.getPair(stem, desiredSize);
+    if (source.albedo === this.ensureTransparentFallback()) return source; // not loaded yet
+    const prev = this.hexClipped.get(stem);
+    if (prev && prev.src === source.albedo) return prev.pair;
+    if (prev) prev.handle.release();
+    const baked = this.bakeHexClip(source, hexMask);
+    this.hexClipped.set(stem, { src: source.albedo, pair: baked.pair, handle: baked.handle });
+    return baked.pair;
+  }
+
+  /** Cover-stretch each channel of `source` over the hex bbox, clip by `hexMask`'s
+   *  alpha, and pack the result as one atlas slot. The hex mask already carries a
+   *  transparent pad, so no frame inset is needed (the seams between tiles stay
+   *  tight). */
+  private bakeHexClip(source: PackedPair, hexMask: Texture): { pair: PackedPair; handle: SlotHandle } {
+    const w = Math.round(hexMask.frame.width);
+    const h = Math.round(hexMask.frame.height);
+    const albedoRT = this.renderMasked(source.albedo, hexMask, w, h);
+    const normalRT = source.normal ? this.renderMasked(source.normal, hexMask, w, h) : null;
+    const emissiveRT = source.emissive ? this.renderMasked(source.emissive, hexMask, w, h) : null;
+    const { pair, handle } = this.textures.packTracked(albedoRT, normalRT, emissiveRT);
+    albedoRT.destroy(true);
+    normalRT?.destroy(true);
+    emissiveRT?.destroy(true);
+    return { pair, handle };
+  }
+
+  /** Render `src` cover-stretched to `w×h` and masked by `hexMask`'s alpha into a
+   *  fresh RenderTexture. */
+  private renderMasked(src: Texture, hexMask: Texture, w: number, h: number): RenderTexture {
+    const rt = RenderTexture.create({ width: w, height: h });
+    const cont = new Container();
+    const tex = new Sprite(src);
+    tex.width = w;
+    tex.height = h;
+    const mask = new Sprite(hexMask);
+    mask.width = w;
+    mask.height = h;
+    cont.addChild(tex, mask);
+    cont.mask = mask;
+    this.renderer.render({ container: cont, target: rt, clear: true });
+    cont.destroy({ children: true });
+    return rt;
+  }
+
   /** Resolve a stem to its atlas-packed albedo+normal+emissive triple, with the
    *  substitute + transparent-fallback cascade. Never returns null. Empty stem
    *  (the VM couldn't resolve it) → transparent. */
@@ -171,6 +227,8 @@ export class LodTextureManager {
       this.previewByKey.delete(prev);
       this.previewLoading.delete(prev);
       this.maxSize.delete(prev);
+      this.hexClipped.get(prev)?.handle.release();
+      this.hexClipped.delete(prev);
     }
     this.versionedByBase.set(base, stem);
   }
@@ -258,6 +316,7 @@ export class LodTextureManager {
     this.preview.destroy();
     this.maxSize.clear();
     this.versionedByBase.clear();
+    this.hexClipped.clear();
     this.transparentFallback = null;
     // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
     this.highQueue.length = 0;
