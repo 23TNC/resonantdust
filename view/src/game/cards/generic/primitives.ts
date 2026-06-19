@@ -4,7 +4,6 @@ import type { LodTextureManager } from "../../../assets/textures/LodTextureManag
 import type { DeferredLighting, Light } from "../../lighting/DeferredLighting";
 import { LightPriority } from "../../lighting/DeferredLighting";
 import { LitSprite } from "../../lighting/LitSprite";
-import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
 import { footprintPx, pxX, pxY, type CardBox } from "./cardBox";
 import { resolveAsset } from "./resolveAsset";
 import { TEX_TRANSPARENT, TEX_WHITE, type AnimatableFields, type PrimKind, type VisualNode } from "./visualSpec";
@@ -21,10 +20,6 @@ const TINT_EPS = 1.5;
 /** Shared deps a primitive needs to resolve itself. */
 export interface PrimDeps {
   lod: LodTextureManager;
-  /** Per-stem silhouette geometry — drives the first-frame placeholder shown
-   *  before the real art (LOD/preview) lands. Optional: preview/editor contexts
-   *  may omit it (no placeholder, same as before). */
-  geometry?: GeometryStore;
   /** Viewport deferred lighting. Textured prims (`rect`/`hex`/`sprite`) are
    *  `LitSprite`s registered here so the deferred normal pass can reach them;
    *  the system scopes lights to this viewport. */
@@ -221,22 +216,13 @@ export class TexPrim extends BasePrim {
       this.node.setTextures(p.albedo, p.normal, p.emissive);
       this.mode = { kind: "clippedHex" };
     } else if (stem) {
-      const fp = footprintPx(box, n.size);
-      // First-frame placeholder: until the real art (LOD/preview) lands, draw the
-      // silhouette geometry (a flat-colour triangulation baked NO-NORMAL) instead
-      // of nothing. `applyDiscrete` re-runs on every `refreshTextures`, so it swaps
-      // to real art the frame it lands (which also releases the placeholder).
-      const sidecar =
-        this.deps.geometry && !this.deps.lod.hasContent(stem) ? this.deps.geometry.get(stem) : null;
-      if (sidecar) {
-        const p = this.deps.lod.getPlaceholder(stem, fp, sidecar);
-        this.node.setTextures(p.albedo, null);
-        this.mode = { kind: "art", baseScale: fp / p.albedo.width };
-      } else {
-        const r = resolveAsset(this.deps.lod, stem, fp, { dpr: box.dpr });
-        this.node.setTextures(r.texture, r.normal, r.emissive);
-        this.mode = { kind: "art", baseScale: r.scale };
-      }
+      // A resolved LOD stem: bind the texture-manager's frame-set for this stem at
+      // the on-screen footprint. The manager fills/rewrites that frame in place
+      // (geo → preview → real LOD), so the sprite never swaps — it just re-reads
+      // the same frame as its contents upgrade.
+      const r = resolveAsset(this.deps.lod, stem, footprintPx(box, n.size), { dpr: box.dpr });
+      this.node.setTextures(r.texture, r.normal, r.emissive);
+      this.mode = { kind: "art", baseScale: r.scale };
     } else {
       // `^white` / empty → solid tinted fill. A `hex` uses its MASK (stays hex-
       // shaped); rect/sprite use the rectangular white. (The empty stem is how the

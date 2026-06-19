@@ -1,4 +1,4 @@
-import { Rectangle, RenderTexture, Sprite, Texture, type Renderer } from "pixi.js";
+import { Graphics, Rectangle, RenderTexture, Sprite, Texture, type Renderer } from "pixi.js";
 
 /**
  * Logical atlas size. Every atlas is exactly this large, regardless of
@@ -236,6 +236,114 @@ export class TextureManager {
     return { pair, handle };
   }
 
+  /** Allocate a STABLE `w×h` slot in the shared atlas whose contents are rewritten
+   *  **in place** (geo → preview → real LOD). The frame the caller binds never
+   *  changes identity, so every sprite bound to it follows the upgrade with **no
+   *  texture swap** — and the slot stays in the shared atlas, so all these sprites
+   *  still batch into one draw (this scales to thousands of objects).
+   *
+   *  The slot is cleared transparent at acquire: slots are REUSED (a released
+   *  version's slot returns to the free list with its old pixels), so a fresh
+   *  acquire can't assume blank — and the geo/preview tiers have transparent areas
+   *  that would otherwise reveal the stale pixels. Thereafter `rewrite` fills the
+   *  slot (clear + draw) so each tier fully replaces the last. */
+  packResizable(
+    w: number,
+    h: number,
+  ): {
+    pair: PackedPair;
+    handle: SlotHandle;
+    rewrite: (albedo: Texture | null, normal: Texture | null, emissive: Texture | null) => void;
+  } {
+    const slotSize = nextPow2(Math.max(w, h));
+    if (slotSize > ATLAS_SIZE) {
+      throw new Error(`TextureManager: ${w}×${h} (slot ${slotSize}) exceeds atlas size ${ATLAS_SIZE}`);
+    }
+    this.slotCounts.set(slotSize, (this.slotCounts.get(slotSize) ?? 0) + 1);
+    const { atlas, slot, page } = this.allocate(slotSize);
+    // Eagerly stand up the parallel pages so the frame triple is stable for the
+    // slot's whole life (a later rewrite may add a normal/emissive).
+    if (!page.normal) {
+      page.normal = RenderTexture.create({ width: page.albedo.width, height: page.albedo.height });
+      this.clearTransparent(page.normal);
+    }
+    if (!page.emissive) {
+      page.emissive = RenderTexture.create({ width: page.albedo.width, height: page.albedo.height });
+      this.clearTransparent(page.emissive);
+    }
+    const frameOf = (src: RenderTexture): Texture =>
+      new Texture({ source: src.source, frame: new Rectangle(slot.x, slot.y, w, h) });
+    const pair: PackedPair = {
+      albedo: frameOf(page.albedo),
+      normal: frameOf(page.normal),
+      emissive: frameOf(page.emissive),
+    };
+    const rewrite = (albedo: Texture | null, normal: Texture | null, emissive: Texture | null): void => {
+      this.fillSlot(page.albedo, slot, w, h, albedo);
+      this.fillSlot(page.normal!, slot, w, h, normal);
+      this.fillSlot(page.emissive!, slot, w, h, emissive);
+    };
+    const handle: SlotHandle = {
+      release: () => {
+        atlas.release(slot, slotSize);
+        this.slotCounts.set(slotSize, Math.max(0, (this.slotCounts.get(slotSize) ?? 0) - 1));
+      },
+    };
+    return { pair, handle, rewrite };
+  }
+
+  /** Fill the slot rect of `target`: clear it transparent, then (if any) draw
+   *  `source` scaled into it — so each tier fully replaces the last without bleeding
+   *  the previous one through the new tier's transparent areas. `clear:false` on the
+   *  draw keeps every other slot intact; the per-slot reset is the scissored clear in
+   *  {@link clearSlot} (an `erase`-blend quad is a no-op to a RenderTexture here). */
+  private fillSlot(
+    target: RenderTexture,
+    slot: { x: number; y: number },
+    w: number,
+    h: number,
+    source: Texture | null,
+  ): void {
+    this.clearSlot(target, slot.x, slot.y, w, h);
+    if (source) {
+      const sprite = new Sprite(source);
+      sprite.position.set(slot.x, slot.y);
+      sprite.width = w;
+      sprite.height = h;
+      this.renderer.render({ container: sprite, target, clear: false });
+      sprite.destroy();
+    }
+  }
+
+  /** Clear a sub-rectangle of `target` to transparent black via a scissored
+   *  framebuffer clear — the minimal way to zero ONE atlas slot without disturbing
+   *  its neighbours. Texture-space coords map directly to the framebuffer here (PIXI
+   *  v8 stores RenderTextures top-left), so no y-flip. WebGL-only; a no-op if the
+   *  renderer exposes no `gl` (the project runs the WebGL backend). */
+  private clearSlot(target: RenderTexture, x: number, y: number, w: number, h: number): void {
+    const r = this.renderer as unknown as {
+      gl?: WebGL2RenderingContext;
+      renderTarget: { bind(t: RenderTexture, clear: boolean): void };
+    };
+    const gl = r.gl;
+    if (!gl) return;
+    r.renderTarget.bind(target, false);
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(x, y, w, h);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.disable(gl.SCISSOR_TEST);
+  }
+
+  /** Clear a whole RenderTexture to transparent black. Used to initialise a fresh
+   *  atlas page, whose untouched area would otherwise show uninitialised GPU garbage
+   *  (often opaque white) through the transparent parts of packed sprites. */
+  private clearTransparent(rt: RenderTexture): void {
+    const g = new Graphics();
+    this.renderer.render({ container: g, target: rt, clear: true });
+    g.destroy();
+  }
+
   /** Find an existing atlas slot of `slotSize`, or create a new atlas/page for it;
    *  returns the slot plus the owning atlas (for `release`) and page (for `bake`). */
   private allocate(
@@ -281,6 +389,7 @@ export class TextureManager {
           width: page.albedo.width,
           height: page.albedo.height,
         });
+        this.clearTransparent(page.normal);
       }
       normalFrame = this.renderInto(normal, slot, page.normal, w, h);
     }
@@ -293,6 +402,7 @@ export class TextureManager {
           width: page.albedo.width,
           height: page.albedo.height,
         });
+        this.clearTransparent(page.emissive);
       }
       emissiveFrame = this.renderInto(emissive, slot, page.emissive, w, h);
     }
@@ -330,6 +440,7 @@ export class TextureManager {
 
     const size = this.maxTextureSize;
     const albedo = RenderTexture.create({ width: size, height: size });
+    this.clearTransparent(albedo);
     const page: PhysicalPage = { albedo, normal: null, emissive: null, atlases: [] };
     this.pages.push(page);
     const atlas = new Atlas(0, 0);

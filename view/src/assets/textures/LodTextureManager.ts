@@ -10,13 +10,26 @@ import {
 import { TextureManager, type PackedPair, type SlotHandle } from "./TextureManager";
 import { getPreview, putPreview } from "./previewCache";
 import { debug } from "../../debug";
+import type { GeometryStore } from "../geometry/GeometryStore";
 import type { Sidecar } from "../geometry/geoTypes";
 
-/** A cached LOD: the framed triple plus the atlas slot handle, so a superseded
- *  version can free its slot (see version eviction in {@link LodTextureManager}). */
+/** Content tiers a master-atlas frame can hold (only ever upgrades). */
+const enum FrameLevel {
+  Geo = 1,
+  Preview = 2,
+  Real = 3,
+}
+
+/** A master-atlas frame entry. The `pair` (albedo/normal/emissive frames) is bound
+ *  by sprites ONCE and never re-issued; `rewrite` re-renders the slot in place
+ *  (geo → preview → real LOD), so bound sprites follow the upgrade with no swap.
+ *  `level` is the current content tier; the preview-atlas reuses this shape without
+ *  `rewrite`/`level` (it's a plain `packTracked` slot). */
 interface LodEntry {
   readonly pair: PackedPair;
   readonly handle: SlotHandle;
+  readonly rewrite?: (albedo: Texture | null, normal: Texture | null, emissive: Texture | null) => void;
+  level?: FrameLevel;
 }
 
 /** Pixels trimmed off each side of a packed frame, so bilinear sampling can't
@@ -80,10 +93,6 @@ export class LodTextureManager {
    *  was baked from, so the clip re-bakes when the LOD upgrades (preview→full) and
    *  is otherwise reused across every tile sharing that texture. */
   private readonly hexClipped = new Map<string, { src: Texture; pair: PackedPair; handle: SlotHandle }>();
-  /** First-frame silhouette placeholders, keyed by (versioned) stem — a flat-colour
-   *  triangulation bake shown until the real art lands, then released (see `load`).
-   *  See {@link getPlaceholder}. */
-  private readonly placeholders = new Map<string, { pair: PackedPair; handle: SlotHandle }>();
   private readonly listeners = new Set<() => void>();
   private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
@@ -102,12 +111,29 @@ export class LodTextureManager {
   private readonly highQueue: Array<() => Promise<unknown>> = [];
   private readonly lowQueue: Array<() => Promise<unknown>> = [];
   private activeFetches = 0;
+  /** Silhouette geometry source — fills a frame with a flat-colour triangulation
+   *  when neither the real LOD nor a preview is available yet. Wired post-construct
+   *  (both managers built in `main`); null = no geo fallback (just transparent). */
+  private geometry: GeometryStore | null = null;
+  /** 1×1 flat-up (+Z) normal, scaled into the normal frame whenever a fill has no
+   *  real normal (geo / a preview or LOD that lacks one) — so it lights flat. */
+  private readonly flatNormal: Texture;
 
   constructor(textures: TextureManager, renderer: Renderer, options?: { qualityCap?: number }) {
     this.textures = textures;
     this.preview = new TextureManager(renderer);
     this.renderer = renderer;
     this.qualityCap = options?.qualityCap ?? DEFAULT_QUALITY_CAP;
+    this.flatNormal = makeFlatNormal();
+  }
+
+  /** Wire the geometry source (the geo fill tier). Re-fire our own listeners when a
+   *  sidecar lands, so the world re-resolves and allocates the geo frame. */
+  setGeometry(geometry: GeometryStore): void {
+    this.geometry = geometry;
+    geometry.onLoad(() => {
+      for (const cb of this.listeners) cb();
+    });
   }
 
   /** Point the on-miss fallback at the selected environment's gate (its HTTP
@@ -203,95 +229,111 @@ export class LodTextureManager {
     return rt;
   }
 
-  /** Whether `getPair` would return real content (a loaded bucket or a preview)
-   *  rather than the transparent fallback — drives whether the geometry
-   *  placeholder is needed for `stem`. */
-  hasContent(stem: string): boolean {
-    return this.maxSize.has(stem) || this.getPreview(stem) !== null;
+  /** Resolve a stem to its ONE stable atlas frame at the requested LOD. The frame is
+   *  allocated on first request from the best content available (preview → geo) and
+   *  rewritten in place as better content lands (preview/geo → real LOD), so the
+   *  bound sprite never swaps texture. Returns transparent only until the very first
+   *  content (geo/preview/real) for the stem exists. */
+  getPair(stem: string, desiredSize: number): PackedPair {
+    if (!stem) return this.transparentPair();
+    this.evictStaleVersions(stem);
+    let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
+    const known = this.maxSize.get(stem);
+    if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
+    const key = `${stem}@${ideal}`;
+
+    const entry = this.byKey.get(key);
+    if (entry) {
+      this.ensureRealLoad(stem, ideal, key);
+      // Upgrade a geo frame in place once its preview lands (preview beats geo);
+      // the real LOD still rewrites over the top when it arrives.
+      if ((entry.level ?? 0) < FrameLevel.Preview) {
+        const preview = this.getPreview(stem);
+        if (preview) {
+          entry.rewrite?.(preview.albedo, preview.normal ?? this.flatNormal, preview.emissive);
+          entry.level = FrameLevel.Preview;
+        }
+      }
+      return entry.pair;
+    }
+    // No frame yet — kick the real + preview loads, then allocate from whatever
+    // content is available NOW (preview beats geo; the real LOD allocates via load).
+    this.ensureRealLoad(stem, ideal, key);
+    this.ensurePreviewLoad(stem);
+    const preview = this.getPreview(stem);
+    if (preview) return this.allocateFromPreview(key, ideal, preview).pair;
+    const sidecar = this.geometry?.get(stem) ?? null; // also kicks the geo fetch
+    if (sidecar) return this.allocateFromGeo(key, ideal, sidecar).pair;
+    return this.transparentPair();
   }
 
-  /** A flat-colour silhouette placeholder for `stem`, baked once from its geometry
-   *  `sidecar` (the earcut triangulation filled with the dominant colour) and
-   *  packed as a NO-NORMAL slot — so it flows through the solid-fill path: hidden
-   *  in the deferred normal pass, lit by ambient + distance only. Cached until the
-   *  real art lands (then released in {@link load}). Call only when
-   *  {@link hasContent} is false. */
-  getPlaceholder(stem: string, desiredSize: number, sidecar: Sidecar): PackedPair {
-    const existing = this.placeholders.get(stem);
-    if (existing) return existing.pair;
-    const baked = this.bakePlaceholder(sidecar, desiredSize);
-    this.placeholders.set(stem, baked);
-    return baked.pair;
+  /** Schedule the real-LOD load for `key` unless it's already loaded (level Real)
+   *  or in flight. */
+  private ensureRealLoad(stem: string, ideal: number, key: string): void {
+    if (this.loading.has(key)) return;
+    if ((this.byKey.get(key)?.level ?? 0) >= FrameLevel.Real) return;
+    this.loading.add(key);
+    this.schedule(() => this.load(stem, ideal, key), "high");
   }
 
-  /** Render the sidecar's triangles (filled `color`) into a small RenderTexture at
-   *  the sprite's aspect, with a 1px transparent margin so the atlas slot can't
-   *  bleed a neighbour, and pack it. Low fidelity is fine — a transient first-frame
-   *  blob. */
-  private bakePlaceholder(sidecar: Sidecar, desiredSize: number): { pair: PackedPair; handle: SlotHandle } {
-    const [bw, bh] = sidecar.bbox;
-    const longest = Math.max(bw, bh, 1);
-    const cap = Math.min(pickLodForSize(desiredSize), 128);
-    const w = Math.max(1, Math.round((bw / longest) * cap));
-    const h = Math.max(1, Math.round((bh / longest) * cap));
-    const pad = 1;
-    const rt = RenderTexture.create({ width: w + pad * 2, height: h + pad * 2 });
+  /** Kick the low-res preview load for `stem` unless cached or in flight. */
+  private ensurePreviewLoad(stem: string): void {
+    if (this.previewByKey.has(stem) || this.previewLoading.has(stem)) return;
+    this.previewLoading.add(stem);
+    this.schedule(() => this.loadPreview(stem), "low");
+  }
+
+  /** Allocate a stable frame at `ideal` (master aspect from the preview's dims) and
+   *  fill it by scaling the preview triple up into the slot. */
+  private allocateFromPreview(key: string, ideal: number, preview: PackedPair): LodEntry {
+    const pw = preview.albedo.frame.width;
+    const ph = preview.albedo.frame.height;
+    const entry = this.allocateFrame(key, fitTo(ideal, pw, ph), FrameLevel.Preview);
+    entry.rewrite!(preview.albedo, preview.normal ?? this.flatNormal, preview.emissive);
+    return entry;
+  }
+
+  /** Allocate a stable frame at `ideal` (master aspect from the sidecar bbox) and
+   *  fill it with the geo triangulation (flat-up normal so it lights flat). */
+  private allocateFromGeo(key: string, ideal: number, sidecar: Sidecar): LodEntry {
+    const [w, h] = fitTo(ideal, sidecar.bbox[0], sidecar.bbox[1]);
+    const entry = this.allocateFrame(key, [w, h], FrameLevel.Geo);
+    const geoRT = this.renderGeo(sidecar, w, h);
+    entry.rewrite!(geoRT, this.flatNormal, null);
+    geoRT.destroy(true);
+    return entry;
+  }
+
+  /** Allocate the stable atlas frame for `key` at `w×h`, store + return the entry.
+   *  Inset like every other packed frame so bilinear sampling can't bleed from a
+   *  neighbouring atlas slot. */
+  private allocateFrame(key: string, [w, h]: [number, number], level: FrameLevel): LodEntry {
+    const { pair, handle, rewrite } = this.textures.packResizable(w, h);
+    const entry: LodEntry = { pair: insetPair(pair), handle, rewrite, level };
+    this.byKey.set(key, entry);
+    return entry;
+  }
+
+  /** Render the sidecar's earcut triangles (flat dominant colour) into a fresh
+   *  `w×h` RenderTexture — the geo placeholder source the frame is filled from. */
+  private renderGeo(sidecar: Sidecar, w: number, h: number): RenderTexture {
+    const rt = RenderTexture.create({ width: w, height: h });
     const g = new Graphics();
-    const color = parseHexColor(sidecar.color);
     for (const poly of sidecar.polygons) {
-      const verts = poly.contour.concat(...poly.holes); // earcut's flattened order
+      const verts = poly.contour.concat(...poly.holes);
       const t = poly.triangles;
       for (let i = 0; i + 2 < t.length; i += 3) {
         const a = verts[t[i]];
         const b = verts[t[i + 1]];
         const c = verts[t[i + 2]];
         if (!a || !b || !c) continue;
-        g.moveTo(pad + a[0] * w, pad + a[1] * h)
-          .lineTo(pad + b[0] * w, pad + b[1] * h)
-          .lineTo(pad + c[0] * w, pad + c[1] * h)
-          .closePath();
+        g.moveTo(a[0] * w, a[1] * h).lineTo(b[0] * w, b[1] * h).lineTo(c[0] * w, c[1] * h).closePath();
       }
     }
-    g.fill({ color });
+    g.fill({ color: parseHexColor(sidecar.color) });
     this.renderer.render({ container: g, target: rt, clear: true });
     g.destroy();
-    const { pair, handle } = this.textures.packTracked(rt, null, null);
-    rt.destroy(true);
-    return { pair: insetPair(pair), handle };
-  }
-
-  /** Resolve a stem to its atlas-packed albedo+normal+emissive triple, with the
-   *  substitute + transparent-fallback cascade. Never returns null. Empty stem
-   *  (the VM couldn't resolve it) → transparent. */
-  getPair(stem: string, desiredSize: number): PackedPair {
-    if (!stem) return this.transparentPair();
-    this.evictStaleVersions(stem);
-    // Real content (bucket or preview) is now available → retire any first-frame
-    // placeholder in the SAME call that hands back the real texture, so the
-    // caller swaps with no stale-slot gap.
-    const ph = this.placeholders.get(stem);
-    if (ph && this.hasContent(stem)) {
-      ph.handle.release();
-      this.placeholders.delete(stem);
-    }
-    let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
-    const known = this.maxSize.get(stem);
-    if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
-
-    const key = `${stem}@${ideal}`;
-    const cached = this.byKey.get(key);
-    if (cached) return cached.pair;
-
-    if (!this.loading.has(key)) {
-      this.loading.add(key);
-      this.schedule(() => this.load(stem, ideal, key), "high");
-    }
-    // Best already-loaded full-res bucket for this stem (Pixi downscales cleanly).
-    const substitute = this.findCachedSubstitute(stem);
-    if (substitute) return substitute;
-    // No full-res yet → fall back to the low-res PREVIEW atlas (kicking its load
-    // on first miss); transparent only if even the preview hasn't landed.
-    return this.getPreview(stem) ?? this.transparentPair();
+    return rt;
   }
 
   /** When a versioned stem's `?v=<hash>` differs from the one currently cached for
@@ -368,16 +410,6 @@ export class LodTextureManager {
     return { albedo: this.ensureTransparentFallback(), normal: null, emissive: null };
   }
 
-  /** Highest-resolution already-cached bucket for this stem (Pixi downscales
-   *  cleanly), or null. */
-  private findCachedSubstitute(stem: string): PackedPair | null {
-    for (let i = LOD_SIZES.length - 1; i >= 0; i--) {
-      const cached = this.byKey.get(`${stem}@${LOD_SIZES[i]}`);
-      if (cached) return cached.pair;
-    }
-    return null;
-  }
-
   /** A fully transparent MIN_LOD square, packed once into the atlas. Players
    *  prefer an invisible placeholder over a white square, so an unresolved /
    *  not-yet-loaded sprite renders as nothing rather than a flash of white.
@@ -404,38 +436,44 @@ export class LodTextureManager {
     this.maxSize.clear();
     this.versionedByBase.clear();
     this.hexClipped.clear();
-    this.placeholders.clear();
     this.transparentFallback = null;
     // Drop queued (not-yet-started) fetches; in-flight ones settle and decrement.
     this.highQueue.length = 0;
     this.lowQueue.length = 0;
   }
 
-  /** Fetch + pack the stem at `ideal` (albedo + optional normal/emissive),
-   *  R2-direct with a gate fallback per channel. Caches the result under
-   *  `${stem}@${ideal}`. The gate clamps a request above the master's native
-   *  resolution, so a too-large `ideal` returns a smaller image — harmless, the
-   *  draw-scale math keys off the texture's own width. `idealKey` is released
-   *  from `loading` regardless so a later reference can retry. */
-  private async load(stem: string, ideal: number, idealKey: string): Promise<void> {
-    let landedKey: string | null = null;
+  /** Fetch the real LOD for `key` (albedo + optional normal/emissive), R2-direct
+   *  with a gate fallback per channel, and land it into the stem's STABLE frame:
+   *  rewrite the slot in place if a geo/preview frame already exists (so bound
+   *  sprites upgrade with no swap), else allocate a fresh frame from the real dims.
+   *  The gate clamps a request above the master's native resolution, so a too-large
+   *  `ideal` returns a smaller image — harmless, the slot is sized from the source's
+   *  own dims. `key` is released from `loading` regardless so a later reference can
+   *  retry. */
+  private async load(stem: string, ideal: number, key: string): Promise<void> {
+    let landed = false;
     try {
       const albedoSrc = await this.fetchChannel(stem, ideal, "albedo");
       if (albedoSrc) {
         const normalSrc = await this.fetchChannel(stem, ideal, "normal");
         const emissiveSrc = await this.fetchChannel(stem, ideal, "emissive");
-        const { pair, handle } = this.textures.packTracked(albedoSrc, normalSrc, emissiveSrc);
-        const key = `${stem}@${ideal}`;
-        this.byKey.set(key, { pair: insetPair(pair), handle });
+        // Reuse the stem's existing stable frame (geo/preview) so every bound
+        // sprite follows the upgrade in place; otherwise stand a fresh one up at
+        // the real source's aspect.
+        const entry =
+          this.byKey.get(key) ??
+          this.allocateFrame(key, fitTo(ideal, albedoSrc.width, albedoSrc.height), FrameLevel.Real);
+        entry.rewrite?.(albedoSrc, normalSrc ?? this.flatNormal, emissiveSrc);
+        entry.level = FrameLevel.Real;
         if (ideal > (this.maxSize.get(stem) ?? 0)) this.maxSize.set(stem, ideal);
-        landedKey = key;
+        landed = true;
       }
     } catch (err) {
       debug.warn(["lod"], `[lod] failed to load ${stem}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.loading.delete(idealKey);
+      this.loading.delete(key);
     }
-    if (landedKey) for (const cb of this.listeners) cb();
+    if (landed) for (const cb of this.listeners) cb();
   }
 
   /** Fetch one channel for `stem` at `size`: R2-direct first (the CDN serves
@@ -557,12 +595,6 @@ async function loadOrNull(url: string): Promise<Texture | null> {
   }
 }
 
-/** `#rrggbb` → `0xRRGGBB` (mid-grey on a malformed value). */
-function parseHexColor(s: string): number {
-  const n = parseInt(s.replace(/^#/, ""), 16);
-  return Number.isFinite(n) ? n : 0x808080;
-}
-
 /** Inset every channel of a packed triple by `FRAME_INSET` (bilinear bleed
  *  guard), preserving nulls. */
 function insetPair(pair: PackedPair): PackedPair {
@@ -579,4 +611,34 @@ function insetFrame(tex: Texture, inset: number): Texture {
     source: tex.source,
     frame: new Rectangle(x + inset, y + inset, width - inset * 2, height - inset * 2),
   });
+}
+
+/** Fit `w×h` into a box whose longest side is `ideal`, preserving aspect — the
+ *  slot dimensions for a stem's stable frame. The master's own aspect (preview
+ *  downscale / sidecar bbox / real LOD) drives it, so geo→preview→real all target
+ *  the same slot shape. Guards against zero/degenerate dims. */
+function fitTo(ideal: number, w: number, h: number): [number, number] {
+  if (w <= 0 || h <= 0) return [ideal, ideal];
+  const s = ideal / Math.max(w, h);
+  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+
+/** A 1×1 flat-up (+Z) normal (`#8080ff`), scaled into the normal frame whenever a
+ *  fill has no real normal (geo, or a preview/LOD without one) so it lights flat
+ *  rather than reading the colour bytes as a normal. */
+function makeFlatNormal(): Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1;
+  canvas.height = 1;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = "#8080ff";
+  ctx.fillRect(0, 0, 1, 1);
+  return Texture.from(canvas);
+}
+
+/** Parse a sidecar `#rrggbb` dominant colour to a 0xRRGGBB number for the geo
+ *  fill. Falls back to mid-grey on a malformed string. */
+function parseHexColor(hex: string): number {
+  const m = /^#?([0-9a-fA-F]{6})$/.exec(hex);
+  return m ? parseInt(m[1], 16) : 0x808080;
 }

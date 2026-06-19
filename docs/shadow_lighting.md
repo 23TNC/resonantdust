@@ -111,38 +111,45 @@ write-back): decode alpha → threshold/downsample → marching-squares (incl. h
   cached pieces, co-versioned with the manifest, **blocked-on at login**. Size
   threshold → fall back to lazy per-object if the catalog outgrows it (log it).
 
-### First-frame placeholder
+### First-frame placeholder — SHIPPED (stable-frame model, supersedes the swap design)
 
-Until a sprite's albedo LOD arrives, show a triangulation blob filled with
-`color` instead of the transparent fallback, then swap to the real `LitSprite`.
-View fetches geometry directly (a render concern; not through the visuals wasm).
-Three findings from wiring this against the real render path:
+The original sketch here (bake a triangulation blob as a throwaway no-normal
+`LitSprite`, then **swap** to the real sprite once art lands, gated on a
+`hasContent` check) was replaced during implementation by a single-frame model
+that's strictly better and needs no swap:
 
-1. **Must NOT be a raw `Graphics`/`Mesh` in the world container.** The deferred
-   normal pass renders the whole `world` container and only hides no-normal
-   *`LitSprite`s* (`renderNormals` sets `renderable=false`); a `Graphics`/`Mesh`
-   would write its fill colour into the normal G-buffer (the color-as-normal
-   artifact the code already guards against for fills). **Decision:** bake the
-   triangulation to a texture and feed it as a **no-normal `LitSprite`**, reusing
-   the existing fill path verbatim (hidden in the normal pass, ambient+falloff
-   lit). Mirror `LodTextureManager.bakeHexClip`/`renderMasked` — render the earcut
-   triangles (filled `color`) into a `RenderTexture`, `packTracked` it, cache per
-   stem, release on real-art load (in `load()` success, like `hexClipped`).
-2. **Detection:** show the placeholder only when `getPair` would return the
-   transparent fallback — add `LodTextureManager.hasContent(stem)` (`maxSize.has`
-   || preview present); the placeholder branch in `TexPrim` (the `art` case,
-   `primitives.ts`) keys on `!hasContent && geometry.get(stem)`.
-3. **Value is contingent on geometry being preloaded.** Per-object fetch just
-   races the 32px preview (marginal). The win comes from `GeometryStore.prewarm(
-   sharedContent().previewStems())` at login — mirroring `prewarmPreviews`, called
-   at the same two sites (`main.ts` `prewarmFromCache`, `WorldRenderer` post-login)
-   — so geometry is resident before cards render. The server bundle (one file vs N
-   prewarm fetches) becomes a later optimization, not a prerequisite.
+- **One stable atlas frame per `stem@size`.** `LodTextureManager.getPair` allocates
+  exactly one frame and the sprite binds it **once, for life**. The frame's pixels
+  are rewritten in place across tiers — geo → preview → real LOD — so the upgrade is
+  invisible to the sprite (no texture swap, no reconcile, no `hasContent` branch in
+  `TexPrim`). `getPair` returns the transparent fallback only until the very first
+  tier (geo/preview/real) exists.
+- **Frame mechanism (`TextureManager.packResizable`).** A stable slot in the SHARED
+  atlas (so all object sprites still batch into one draw — this must scale to
+  thousands of objects). `rewrite(albedo, normal, emissive)` fills the slot per
+  tier. Each fill is **clear-the-slot-then-draw**: the slot is zeroed with a
+  `gl.scissor` + `glClear` (the minimal way to reset one atlas slot without
+  touching its neighbours) so the new tier fully replaces the last instead of
+  source-over compositing onto it. The geo tier renders the earcut triangulation
+  (filled `color`) with a flat-up normal; preview/real overwrite it in place.
+  - **Gotcha (cost us a long debug):** the `erase` blend mode is a **no-op when
+    rendering to a RenderTexture** in this WebGL backend — it composites as an
+    opaque white fill. The original rewrite used an erase-quad to clear the slot,
+    which left every geo/preview frame sitting on a white block. `gl.scissor` is the
+    reliable per-slot clear; freshly-created atlas pages are also cleared transparent
+    on creation (uninitialised GPU memory is otherwise opaque-white garbage).
+- **Still NOT a raw `Graphics`/`Mesh` in the world container** (the original finding
+  holds): the geo fill is baked into the atlas frame and drawn as the same
+  no-normal `LitSprite` as any fill — hidden in the normal pass, ambient+falloff lit
+  — so it never writes its colour into the normal G-buffer.
+- **Geometry preload still matters.** `GeometryStore` is threaded onto the game
+  context + `PrimDeps`, wired to `LodTextureManager.setGeometry`, and its `onLoad`
+  shares the `texturesDirty` redraw. The login bundle / `prewarm` is still the win
+  for resident-before-render geometry (currently lazy per-object via `get`).
 
-Remaining Phase C = items 1–3 above + threading `GeometryStore` onto the game
-context and into `PrimDeps` (built in `WorldRenderer` and `GenericCardFace`), and
-subscribing `geometry.onLoad` to the same `texturesDirty` redraw as `lod.onLoad`.
-Wants browser verification (placeholder sizing, swap timing, tint).
+Verified in-browser: shared atlas (one source across 248 objects + tiles),
+transparent slot backgrounds, geo→preview→real upgrades in place, no white. Phase C
+is **done** (and improved over this sketch).
 
 ## Phasing (dependency- and risk-ordered)
 
@@ -154,9 +161,10 @@ Wants browser verification (placeholder sizing, swap timing, tint).
 - **B — Geometry sidecars (gate).** **Start with the `earcutr` / `rust:slim` build
   spike** (can invalidate the approach). Then `geometry.rs`, per-object cache,
   `/geo/bundle.json` assembly.
-- **C — Block-on-load + placeholder (view).** Consume the bundle; draw
-  triangulation placeholders. Validates B end-to-end, ships the first-frame fix.
-  **Decision gate: stop here if shadows aren't worth D+E.**
+- **C — Block-on-load + placeholder (view). ✅ DONE.** Shipped as the stable-frame
+  model (see "First-frame placeholder" above) — geo→preview→real rewritten in one
+  atlas slot, no swap. Geometry still fetched lazily per-object (login bundle =
+  later optimization). **Decision gate passed: pursuing D+E (full relight).**
 - **D — Baked per-macro_zone lighting (view).** The heavy rearchitecture, split:
   - **D1** baked zone textures reproducing *today's output* (incremental bake, no
     shadows) — "looks identical + perf holds" checkpoint;

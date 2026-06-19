@@ -104,6 +104,9 @@ async function main(): Promise<void> {
   const geometry = new GeometryStore();
   geometry.setGateBase(httpBaseFor("dev"));
   geometry.setTextureBase(TEXTURE_BASE);
+  // Wire the geo fill tier: a stem with no preview/LOD yet allocates its stable
+  // frame from the sidecar silhouette, upgraded in place as content lands.
+  lodTextures.setGeometry(geometry);
   void persistStorage();
   const objects = new ObjectManager(lodTextures);
   // Optimistic pre-login warm: if a previous session cached a corpus, seed the
@@ -111,7 +114,7 @@ async function main(): Promise<void> {
   // login screen). A returning player's placeholders fetch from HTTP disk cache
   // and are ready before login completes, so the world doesn't flash white. No-op
   // on a first-ever visit; reconciled against the gate's corpus at login.
-  void prewarmFromCache(lodTextures, geometry);
+  void prewarmFromCache(lodTextures);
   // Textures otherwise resolve per-stem from the wasm VM and stream from R2 (white
   // fallback until they land), so there's nothing to block boot on.
   const assetsReady = Promise.resolve();
@@ -262,16 +265,15 @@ function toSyncStats(s: ClockStats): SyncStats {
  *  a returning player's placeholders are ready (served from HTTP disk cache)
  *  before login. Best-effort — no cache, or any failure, falls back to the normal
  *  post-login prewarm in WorldRenderer. */
-async function prewarmFromCache(lod: LodTextureManager, geometry: GeometryStore): Promise<void> {
+async function prewarmFromCache(lod: LodTextureManager): Promise<void> {
   try {
     const env = await lastEnv();
     if (!env) return;
     if (!(await initContentFromCache(env))) return;
     lod.setGateBase(httpBaseFor(env as Environment));
-    geometry.setGateBase(httpBaseFor(env as Environment));
-    const stems = sharedContent().previewStems();
-    lod.prewarmPreviews(stems);
-    geometry.prewarm(stems);
+    lod.prewarmPreviews(sharedContent().previewStems());
+    // Geometry is fetched lazily on-demand (see WorldRenderer.prewarmPreviews) —
+    // prewarming every stem here would flood the gate/network and stall textures.
   } catch {
     /* best-effort warm — the normal cold path still runs at login */
   }

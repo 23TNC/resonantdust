@@ -40,11 +40,12 @@ export class GeometryStore {
     return () => this.listeners.delete(callback);
   }
 
-  /** Eagerly fetch sidecars for every stem (the login warm — mirrors
-   *  `LodTextureManager.prewarmPreviews`). This is what makes the first-frame
-   *  placeholder actually beat the texture: geometry is resident before a card
-   *  renders, instead of racing the cold per-object fetch. Dedup'd via the cache
-   *  + in-flight map, so calling it repeatedly is cheap. */
+  /** Eagerly fetch sidecars for every stem. CAUTION: this fires one raw `fetch`
+   *  per stem with NO concurrency cap, so on a cold corpus it floods the browser
+   *  connection pool and the gate (each miss = a gate generation + R2 master read)
+   *  and starves the LOD texture loads. NOT currently called — geometry is fetched
+   *  lazily on-demand (`get`) for the visible set instead. Reserve this for the
+   *  future login BUNDLE (one request), or gate it behind a concurrency limiter. */
   prewarm(stems: readonly string[]): void {
     for (const s of stems) {
       if (s && !this.cache.has(s) && !this.inflight.has(s)) void this.ensure(s);

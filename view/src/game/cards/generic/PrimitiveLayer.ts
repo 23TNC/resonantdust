@@ -76,6 +76,7 @@ export class PrimitiveLayer extends Container {
     this.lastList = list;
     this.drawSeed = this.deps.seed;
     this.drawFaction = this.deps.faction;
+
     const parent = this.mountTarget ?? this;
     for (let i = 0; i < list.length; i++) {
       const node = list[i];
