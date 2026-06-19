@@ -201,3 +201,73 @@ is **done** (and improved over this sketch).
   need new bookkeeping?
 - Surface `casts_shadow`/`can_bake` through the `^light` DSL when light authoring
   actually lands (no `^light` content exists yet).
+
+---
+
+## Handoff — 2026-06-18 (continue in a fresh chat; this one is exhausted)
+
+### RESOLVED: the bright edge-rim / "ambient line" on tiles & sprites
+The bright line tracing hex seams and cutting through trees was **not** layering,
+**not** normal-map content, **not** a z-order bug. It was the deferred light
+overlay using the albedo's **anti-aliased alpha ramp** as its coverage/opacity:
+every silhouette edge faded the multiply-dim from the `0.12` ambient floor back up
+to full-bright albedo over the ~1px AA edge → a scale-invariant bright rim on every
+tile and sprite edge.
+
+Fix (already applied, **uncommitted**):
+- `view/src/game/lighting/deferredLightShader.ts` — `coverage = ceil(texture(uAlbedo, vUV).a)`
+  so any non-zero coverage snaps to full dim (the albedo's own alpha still fades the
+  edge into the dark background). **This is the actual fix.**
+- `content/visuals/functions/01.rd` — `hex_radius` 86 → 87 (tiles overlap ~1px so
+  adjacent hexes meet with no sub-pixel seam). Keep synced with `WORLD_HEX_RADIUS`.
+- `content/visuals/asset/01.rd` — grass `&fill` overscale 1.08 → 2.
+
+### Working-tree state at handoff
+Committed this session (branch `0.7`):
+- `cfedc06` — stable-frame LOD placeholders (geo→preview→real in one shared-atlas
+  slot, rewritten in place; the `erase`-blend-to-RenderTexture gotcha is in §First-
+  frame placeholder).
+- `3a0906b` — hex-clip re-bakes on content-tier advance (tiles were frozen at the
+  blurry preview LOD because the stable frame's texture identity never changes).
+
+Uncommitted, NOT the fix — decide whether to keep:
+- `view/src/assets/textures/TextureManager.ts` + `DeferredLighting.ts` — set the
+  normal page + normal G-buffer to **NEAREST** filtering. Defensible on its own
+  (normal maps should never be bilinear-filtered) but it did **not** fix the rim;
+  keep or drop independently.
+- `versions.json`, `gateway` (submodule) — generated / other in-flight work; leave.
+
+### Agreed forward design (the one useful thing from this chat — don't relose it)
+For Phase D (incremental, scalable lighting), we converged on:
+
+1. **Two layers, not one combined G-buffer.** Tile layer and object layer get
+   separate albedo/normal(/emissive); light each separately; composite object-lit
+   **over** tile-lit by object coverage. A single combined normal re-merges them and
+   re-creates edge contamination. (With the `ceil` coverage fix the *current* single
+   buffer is acceptable for now; two-layer is the clean target.)
+2. **Z-ordering is solved by the hexagon clip, for free.** Grounds never overlap
+   (no z-order). Clip every object to the hexagons it covers → each pixel is owned by
+   exactly one hex, which sorts its own bounded overlap set by world-Y; hexes
+   tessellate so an incrementally redrawn hex can't conflict with un-redrawn ones.
+   So the object layer is the only thing that sorts, and it sorts locally.
+3. **Per visible macro_zone, pooled RTs, world-space @ zoom 1**, composited to screen
+   by the `panLayer` transform → pan/zoom are free; only changed hexes re-bake. (Not
+   a literal world RT — unbounded. Not per-hex RTs — too many textures.)
+4. **Per-hex, per-channel dirty bitmask**: `albedo`/`normal`/`emissive` (geometry
+   changed → redraw that channel for the dirtied hex + its 6 neighbours, since
+   objects overflow ≤1 ring) and `light` (the set of lights covering the hex changed
+   → re-run the light pass only, against the stored normal — the cheap common case).
+   Lights carry a tile-unit radius; the inverted `tile → [lights]` index drives the
+   `light`-dirty set (symmetric difference of old/new disks on a move).
+5. **Dynamic lights (cursor, fast movers, `canBake:false`)** stay in a small per-frame
+   live pass over the baked zones; everything else bakes.
+
+### Next steps
+- **D1**: implement the per-zone incremental bake of the static layer (two-layer
+  composite, hex-clipped, world-space @ zoom 1, composite-by-transform). Recommended
+  to first prove the two-layer split in screen-space/per-frame before wiring the zone
+  machinery.
+- **D2**: dirty-region queue (K hexes/frame, priority/aging) + the per-tile light index.
+- **E**: projected-billboard shadows from the geometry sidecars, masked into D's regions.
+- Decide the fate of the uncommitted NEAREST normal-filter change; commit the ambient
+  fix (`ceil` coverage + hex_radius 87 + fill) once verified.

@@ -47,13 +47,13 @@
     @define>
       $globals::card_height $globals::cell_margin 2 mul add &value set
 
-  ; world hex cell — pointy-top, fixed display radius of 86 (up from the
+  ; world hex cell — pointy-top, fixed display radius of 87 (up from the
   ; card-inscribed ≈80.78). The hex runs slightly larger than the 72×120 card it
   ; hosts, so cards sit comfortably inside it. width = √3·r, height = 2·r
   ; (matches the client WORLD_HEX_RADIUS in hexSize.ts — keep synced).
   ::hex_radius>
     @define>
-      86 &value set
+      87 &value set
   ::hex_width>
     @define>
       $globals::hex_radius 3 sqrt mul &value set

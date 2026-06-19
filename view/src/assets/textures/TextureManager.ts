@@ -264,7 +264,16 @@ export class TextureManager {
     // Eagerly stand up the parallel pages so the frame triple is stable for the
     // slot's whole life (a later rewrite may add a normal/emissive).
     if (!page.normal) {
-      page.normal = RenderTexture.create({ width: page.albedo.width, height: page.albedo.height });
+      // NEAREST: a normal map must never be bilinearly filtered. Interpolating two
+      // unit normals as RGB yields a short, skewed vector that points wherever the
+      // average lands — at a sharp normal edge (the hex-tile bevel, a sprite seam)
+      // that average aims at the light and flares as a bright line. Albedo stays
+      // linear; only the normal page is point-sampled.
+      page.normal = RenderTexture.create({
+        width: page.albedo.width,
+        height: page.albedo.height,
+        scaleMode: "nearest",
+      });
       this.clearTransparent(page.normal);
     }
     if (!page.emissive) {
@@ -385,9 +394,12 @@ export class TextureManager {
       // first time this page bakes a normal — the shared allocator already
       // reserved this slot, so the frame lines up with the albedo.
       if (!page.normal) {
+        // NEAREST — see packResizable: normal maps must be point-sampled or their
+        // edges flare under light. Albedo (the parallel page) stays linear.
         page.normal = RenderTexture.create({
           width: page.albedo.width,
           height: page.albedo.height,
+          scaleMode: "nearest",
         });
         this.clearTransparent(page.normal);
       }

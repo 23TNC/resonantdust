@@ -170,7 +170,10 @@ export class DeferredLighting {
   resize(width: number, height: number, resolution: number): void {
     if (width <= 0 || height <= 0) return;
     this.normalRT?.destroy(true);
-    this.normalRT = RenderTexture.create({ width, height, resolution });
+    // NEAREST: the light pass samples this G-buffer; linear filtering would blend
+    // adjacent normals (e.g. across a tree/tile silhouette) into a skewed vector
+    // that flares under the light. Point-sample so each pixel keeps its own normal.
+    this.normalRT = RenderTexture.create({ width, height, resolution, scaleMode: "nearest" });
     this.lightRT?.destroy(true);
     this.lightRT = RenderTexture.create({ width, height, resolution });
     this.albedoRT?.destroy(true);
