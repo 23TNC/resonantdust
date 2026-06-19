@@ -92,7 +92,10 @@ export class LodTextureManager {
   /** Hex-clipped tile textures keyed by stem. `src` is the source albedo the clip
    *  was baked from, so the clip re-bakes when the LOD upgrades (preview→full) and
    *  is otherwise reused across every tile sharing that texture. */
-  private readonly hexClipped = new Map<string, { src: Texture; pair: PackedPair; handle: SlotHandle }>();
+  private readonly hexClipped = new Map<
+    string,
+    { src: Texture; level: number; pair: PackedPair; handle: SlotHandle }
+  >();
   private readonly listeners = new Set<() => void>();
   private transparentFallback: Texture | null = null;
   /** The gate's HTTP origin (`http(s)://host:port`), set at login. The fallback
@@ -169,11 +172,16 @@ export class LodTextureManager {
     if (!stem) return this.transparentPair();
     const source = this.getPair(stem, desiredSize);
     if (source.albedo === this.ensureTransparentFallback()) return source; // not loaded yet
+    // The stable frame is rewritten IN PLACE as its tier upgrades (geo→preview→real),
+    // so its `albedo` Texture identity never changes — the bake must re-run when the
+    // CONTENT level advances, not on identity (which would freeze the clip at whatever
+    // tier was resident at first bake, e.g. the blurry preview).
+    const level = this.byKey.get(`${stem}@${this.idealFor(stem, desiredSize)}`)?.level ?? 0;
     const prev = this.hexClipped.get(stem);
-    if (prev && prev.src === source.albedo) return prev.pair;
+    if (prev && prev.src === source.albedo && prev.level === level) return prev.pair;
     if (prev) prev.handle.release();
     const baked = this.bakeHexClip(source, hexMask, fillScale);
-    this.hexClipped.set(stem, { src: source.albedo, pair: baked.pair, handle: baked.handle });
+    this.hexClipped.set(stem, { src: source.albedo, level, pair: baked.pair, handle: baked.handle });
     return baked.pair;
   }
 
@@ -234,12 +242,20 @@ export class LodTextureManager {
    *  rewritten in place as better content lands (preview/geo → real LOD), so the
    *  bound sprite never swaps texture. Returns transparent only until the very first
    *  content (geo/preview/real) for the stem exists. */
-  getPair(stem: string, desiredSize: number): PackedPair {
-    if (!stem) return this.transparentPair();
-    this.evictStaleVersions(stem);
+  /** The LOD bucket `getPair` resolves `desiredSize` to — clamped by the quality cap
+   *  and the largest bucket known to exist for the stem. Shared with `getHexClipped`
+   *  so both look up the SAME `byKey` entry (and thus its content level). */
+  private idealFor(stem: string, desiredSize: number): number {
     let ideal = pickLodForSize(Math.min(desiredSize, this.qualityCap));
     const known = this.maxSize.get(stem);
     if (known !== undefined && ideal > known) ideal = pickLodForSize(known);
+    return ideal;
+  }
+
+  getPair(stem: string, desiredSize: number): PackedPair {
+    if (!stem) return this.transparentPair();
+    this.evictStaleVersions(stem);
+    const ideal = this.idealFor(stem, desiredSize);
     const key = `${stem}@${ideal}`;
 
     const entry = this.byKey.get(key);
