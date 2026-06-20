@@ -229,6 +229,93 @@ With (1)+(2): ~5 × 8 MB ≈ **~40 MB** for the main viewport — comfortable.
 6. **Shadows.** Static-light shadows raster into the lightmap (free per frame); dynamic-light
    shadows raster per frame in the dirty recompute. Projected-billboard from the sidecars.
 
+## Implementation plan (from the D1b.1b-i checkpoint)
+
+Concrete, sequenced build. Strategy: **build behind a `g4` flag alongside the live
+pipeline; verify each phase; reach visual parity at Phase 3 (the cutover candidate),
+then delete the old path.** The app stays usable throughout — and note that in Phases
+1–2 the cursor light is temporarily absent (G4 is rebuilding lighting bottom-up), so the
+old pipeline remains the default until Phase 3 catches up. The conceptual "Phasing"
+section above is the summary; this is the executable version.
+
+### Phase 0 — decisions + spike (small, blocks everything)
+1. **Cell dimensions.** Pick `cell = √3R × R` (or the variant that tiles the hex vertical
+   period `3R` cleanly); pin exact `(q,r)→cells` and `worldPx→cell`. Pure geometry, unit-
+   testable — the literal first code (`CellGrid`).
+2. **Storage model — RESOLVE the doc's ambiguity.** Per-chunk RTs (8-tile chunks × 5
+   channels) aggregate to hundreds of MB; a single **viewport+overscan scrolled map per
+   channel** is ~40 MB. VRAM is binding → **use the scrolled map** (scroll-copy the
+   overlap + bake the revealed band on pan). What we reuse from D1b.1a/b-i is the **bake
+   logic** (`bakeGround`-style render-prims-into-a-world-space-target-with-offset) and the
+   build-on-enter/drop-on-exit *concept*, NOT the chunk RTs as storage.
+3. **Premultiply/blend convention**, written once for the whole chain (bake → cache →
+   dirty-recompute → restore). The scheme-C killer — prove it with a ~30-line throwaway:
+   bake one cell, recomposite it, assert pixel-identical, before anything depends on it.
+4. **Single vs double buffer** for `static.lit` (in-place dirty recompute can't read+write
+   the same texels mid-pass).
+5. **Per-map bounds in the gate.** Extend `shared/geometry`'s sidecar `bbox` to per-channel
+   (silhouette + emissive). Stub with the existing silhouette bbox for Phases 1–3; tighten
+   later.
+
+### Phase 1 — substrate + static geometry cache (no new lighting)
+- Build: `CellGrid`; the bidirectional `cell↔[static prim]` index; `StaticCache` holding
+  `static.albedo/normal/depth` (scrolled viewport+overscan maps) + `static.lit =
+  albedo×ambient`. Re-bake only dirty cells from `cell→[prims]`, coalesced into bounding
+  rects. Pan = scroll-copy + bake the revealed band.
+- Reuse: D1b.1b-i's bake, extended to also write `depth` (= sort-Y) and `lit`.
+- Wire (flagged): `g4` on ⇒ display `static.lit` instead of the screen-space pass.
+- **Checkpoint:** ground renders at flat ambient correctly (matches the *un-hovered* dark
+  scene); idle = a blit; pan scrolls + bakes only the revealed band; a content edit re-bakes
+  only its dirty cells. (Risk: scroll-on-pan addressing + dirty-cell coalescing.)
+
+### Phase 2 — static lightmap
+- Build: `cell→[lights]` index; lightmap bake (reuse the Lambert+falloff light shader per
+  cell into `static.lightmap`, additive accumulation for >16 lights/cell); `static.lit =
+  albedo × (ambient + lightmap) + emissive`.
+- Need: a couple of static test lights (a debug `^light` placement) to see anything.
+- **Checkpoint:** static lights light their area, cost zero per frame and on pan; moving a
+  static light re-bakes only its disk.
+
+### Phase 3 — dynamic lights (cursor returns) — PARITY / cutover candidate
+- Build: the dynamic-light dirty-rect recompute — over a dynamic light's disk,
+  `static.albedo × (ambient + sample(static.lightmap) + Σ dynamic) + emissive` into the lit
+  buffer; damage-rect restore from `static.lit`. Cursor becomes a dynamic light.
+- **Checkpoint:** cursor lights the ground exactly like today's hover; only its disk
+  recomputes; static stays free. **Visual parity** — A/B against the old pipeline. If it
+  holds, `g4` can become the default (old path stays one more phase as a safety net).
+
+### Phase 4 — dynamic prims + depth
+- Build: composite `static.depth` into a screen depth buffer at display; draw dynamic prims
+  (cards/souls) live, depth-tested, lit fully live, with damage rects.
+- **Checkpoint:** a soul walks behind a tree correctly; dragging recomputes only damage
+  rects. (Resolve depth-vs-soft-alpha here.)
+
+### Phase 5 — budgeted amortized queue
+- Build: `DirtyQueue` — one priority+aging queue for cold re-bakes AND dynamic recomputes,
+  drained to a per-frame budget. (Phases 1–4 just "process all dirty each frame"; this adds
+  the budget.) Implement the three rules (budget recompute not composite; track last-
+  *rendered* rect; redraw overlapping dynamics on restore). Budget render, never sim.
+- **Checkpoint:** synthetic overload (force 64 movers) → peripheral dynamics go stale,
+  framerate holds, sim unaffected.
+
+### Cutover
+After Phase 3 parity confirmed and 4–5 land: flip `g4` to default, then DELETE the old
+`DeferredLighting` screen-space path + the D1b.1b-i chunk-display LitSprite path. Keep the
+chunk lifecycle concept, the `Light` schema, the sidecars.
+
+### Phase 6 — shadows (the original goal)
+Static-light shadows raster into the lightmap bake (free per frame); dynamic-light shadows
+raster per frame in the dirty recompute. Projected-billboard from the sidecars;
+`cell→[lights]` answers "which lights does this occluder affect."
+
+### Critical path & first task
+- Critical path: **Phase 0 → 1 → 2 → 3** (parity). 4–5 harden; 6 is the payoff.
+- Riskiest: the **scroll-on-pan cache (P1)** and the **premultiply convention (P0/P3)** —
+  both de-riskable with the Phase-0 spikes first.
+- **First concrete task:** the Phase-0 spike — `CellGrid` geometry (unit-tested) + the
+  premultiply one-cell recomposite prototype. Lowest integration risk, proves the
+  foundation + the correctness convention.
+
 ## Open questions ("think more")
 
 - Exact **cell dimensions** so the grid tiles the hex period `3R` cleanly (the "~4 cells/
