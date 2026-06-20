@@ -1,13 +1,13 @@
 # Shadow lighting + geometry sidecars
 
 Status: **in progress** — Phases A, B, C + D1a/D1b.1a/D1b.1b-i done & verified.
-**SUPERSEDED FOR D2/E by [G1](g1_renderer.md)** (2026-06-20): the per-frame
-screen-space baking approaches explored below for D2 (scheme C, additive
-decomposition) fight the capture-the-scene pipeline; G1 replaces that pipeline with a
-dirty-cell cold/hot tiled compositor instead. The reusable parts below — the `Light`
-schema, geometry sidecars (Phase B), the projected-billboard shadow technique (Phase E)
-— carry into G1. Read G1 first for the forward plan; this doc remains the record of
-A–D1 and the design exploration that led to G1.
+**SUPERSEDED FOR D2/E by [G4](g4_renderer.md)** (2026-06-20; via [G1](g1_renderer.md),
+now also superseded by G4): the per-frame screen-space baking approaches explored below
+for D2 (scheme C, additive decomposition) fight the capture-the-scene pipeline; G4
+replaces that pipeline with a baked-lightmap deferred renderer + dirty-rect amortization.
+The reusable parts below — the `Light` schema, geometry sidecars (Phase B), the
+projected-billboard shadow technique (Phase E) — carry into G4. Read G4 first for the
+forward plan; this doc remains the record of A–D1 and the exploration that led there.
 
 ## Goal
 

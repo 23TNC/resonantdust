@@ -1,6 +1,11 @@
 # G1 — Dirty-cell cold/hot tiled compositor
 
-Status: **design, iterating** (not final — "think more"). Captures the renderer +
+Status: **SUPERSEDED by [G4](g4_renderer.md)** (2026-06-20). G4 keeps G1's good half
+(rectangular cell grid, per-cell light/prim indexing, static-light cache) and drops
+G1's hardest third — the hot/cold per-prim **overlay machinery** (above/below context,
+depth-split, cold↔hot graph) — replacing it with a depth buffer + dirty-rect recompute
++ a budgeted amortized work queue. Read G4 for the chosen plan; G1 is kept as the record
+of the design exploration. Original status: design, iterating. Captures the renderer +
 lighting architecture converged on 2026-06-20. Supersedes the D2/E *baking*
 approaches explored in `shadow_lighting.md` (per-chunk baked-light buffer "scheme C",
 the additive decomposition) — those fought the per-frame screen-space pipeline; G1
