@@ -274,6 +274,12 @@ export class DeferredLighting {
     const hidden: LitSprite[] = [];
     for (const child of container.children) {
       if (!(child instanceof LitSprite)) continue;
+      // These are bake SOURCES — drawn only into the chunk RTs here, never under
+      // panLayer. Drop them from the live registry so the per-frame screen-space
+      // normal/albedo passes don't iterate + texture-swap them for nothing (the
+      // chunk's single display LitSprite represents the ground there). Idempotent;
+      // re-runs each re-bake, so a recreated prim is re-dropped next bake.
+      this.unregister(child);
       if (!child.normalTexture) {
         if (child.renderable) {
           child.renderable = false;
