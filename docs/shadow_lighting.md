@@ -303,9 +303,10 @@ For Phase D (incremental, scalable lighting), we converged on:
   lights it (the display sprite carries the normal), so ground is now ~1 lit sprite
   per chunk instead of N per tile. Re-bake fires only on tile build/drop in a chunk —
   panning over built chunks bakes nothing. Verified: identical render, seamless chunk
-  tiling, clean pan streaming, no console errors. NOTE: the per-tile ground sprites
-  stay in the `deferred` registry (harmless — detached, never drawn); unregister them
-  in a cleanup pass if the per-frame swap cost matters.
+  tiling, clean pan streaming, no console errors. `bakeGround` also UNREGISTERS each
+  bake-source child from the live registry (they're never drawn under panLayer), so
+  the per-frame screen-space passes no longer iterate/swap the per-tile ground sprites
+  — only the one display LitSprite per chunk.
 - **D1b.1b-ii**: light each chunk into a baked per-chunk light RT (lights in
   chunk-local coords), composite `albedo × light` into the display sprite, and drop
   GROUND from the per-frame screen-space pass entirely — the actual per-frame win.
