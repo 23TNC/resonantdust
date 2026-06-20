@@ -55,6 +55,12 @@ export class PrimitiveLayer extends Container {
    *    container stays empty / out of the scene graph; it remains only the
    *    logical owner (reconcile + ease + lifecycle). */
   private readonly mountTarget: Container | null;
+  /** Where GROUND prims (fills: `rect`/`hex`) are parented, when set — the per-chunk
+   *  ground container under `tileLayer` (D1b.1a), so a zone's ground can be baked in
+   *  isolation. OBJECT prims (sprites) still go to `mountTarget` (the shared sort
+   *  layer). Both must be `sortableChildren`. Null → grounds go to `mountTarget` like
+   *  objects (the pre-D1b.1a behaviour, kept for cards/self-mount). */
+  private readonly groundTarget: Container | null;
   /** True while at least one primitive is still easing — cached result of the
    *  last `settle()` / `draw()`, for diagnostics. The host drives ticking via
    *  `layout()`, so nothing external polls this. */
@@ -63,11 +69,12 @@ export class PrimitiveLayer extends Container {
   constructor(
     box: CardBox,
     private readonly deps: PrimDeps,
-    opts: { target?: Container } = {},
+    opts: { target?: Container; groundTarget?: Container } = {},
   ) {
     super();
     this.box = box;
     this.mountTarget = opts.target ?? null;
+    this.groundTarget = opts.groundTarget ?? null;
   }
 
   /** Reconcile to a new target spec. Newly-created primitives seed `current`
@@ -77,9 +84,13 @@ export class PrimitiveLayer extends Container {
     this.drawSeed = this.deps.seed;
     this.drawFaction = this.deps.faction;
 
-    const parent = this.mountTarget ?? this;
     for (let i = 0; i < list.length; i++) {
       const node = list[i];
+      // GROUND fills route to the per-chunk container (when set); objects to the
+      // mount target. Re-chosen per prim so a kind-swap reparents correctly.
+      const isFill = node.kind === "rect" || node.kind === "hex";
+      const parent =
+        isFill && this.groundTarget ? this.groundTarget : this.mountTarget ?? this;
       let prim = this.prims[i];
       if (!prim || prim.kind !== node.kind) {
         prim?.destroy();

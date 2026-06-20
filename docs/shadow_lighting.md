@@ -282,17 +282,18 @@ For Phase D (incremental, scalable lighting), we converged on:
   live `panLayer` display path is unchanged. Verified: forest renders correctly,
   ground below objects, no double-dim, no bright seam. Cost: 6 screen passes/frame
   vs 3 — acceptable pre-bake; D1b removes the per-frame cost.
-- **D1b.1a — per-zone ground containers. NOT IMPLEMENTED (corrected 2026-06-20).**
-  A prior handoff claimed this was in-tree; it is not. `buildTile` still creates a
-  per-tile `root` Container (`WorldRenderer.ts`), there is no `zoneContainers`/
-  `zoneKey`/`groundTarget` anywhere, and ground prims still go to the shared
-  `sortLayer`. This is the real next step and the prerequisite for D1b.1b. Plan:
-  route each tile's GROUND (its `bg` fill + `clippedHex` prims) into a per-chunk
-  `Container` (fixed render chunk, e.g. NxN axial block keyed `floor(q/N),
-  floor(r/N)` — independent of the server macro_zone, which the bake doesn't need)
-  parented under `tileLayer`; OBJECT prims stay in `sortLayer`. `PrimitiveLayer`
-  gains an optional `groundTarget` and routes per-prim by `LitSprite.groundLayer`.
-  Checkpoint: looks identical (pure reparent — grounds tessellate, below objects).
+- **D1b.1a — per-zone ground containers. IMPLEMENTED + BROWSER-VERIFIED 2026-06-20
+  (claude env).** Each tile's GROUND (its `bg` underlay + `clippedHex`/fill prims)
+  routes into a per-chunk `Container` (`WorldRenderer.groundChunks`, keyed
+  `floor(q/N),floor(r/N)` via `groundChunkKey`, `GROUND_CHUNK = 8`), parented under
+  `tileLayer` so the whole chunk sorts below the object `sortLayer`; OBJECT prims
+  stay in `sortLayer`. `PrimitiveLayer` gained an optional `groundTarget` and routes
+  fill prims (`rect`/`hex`) there per-prim. The per-tile `root` Container is gone —
+  `bg` carries absolute world px (zIndex `TILE_BG_Z`, below the fills). Chunks are
+  refcounted by tile (`acquireGroundChunk`/`releaseGroundChunk`) so an emptied chunk
+  is destroyed on pan-out. Fixed render chunk, independent of the server macro_zone
+  (the bake doesn't need it). Verified: looks identical, panning streams tiles with
+  no gaps/errors, correct layering. Gives the bake a clean per-zone unit.
 - **D1b.1b**: bake each zone container into a world-space RT (albedo + stored
   normal), light it zone-locally, composite the lit result by the pan transform;
   ground leaves the screen-space overlay path. Checkpoint: looks identical + panning

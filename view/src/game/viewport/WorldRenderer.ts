@@ -35,10 +35,28 @@ export function cellHash(q: number, r: number): number {
   return h;
 }
 
-/** A retained world tile: its positioned background + the external-mounted prim
- *  layer (its prims live in the shared `sortLayer`). `sig` gates rebuilds. */
+/** Axial side length (in tiles) of a GROUND CHUNK — the per-chunk container that
+ *  holds a block of tiles' ground (bg + clippedHex fills), the unit the D1b.1b
+ *  bake renders in isolation. A render tiling only; independent of the server
+ *  macro_zone. */
+const GROUND_CHUNK = 8;
+
+/** The ground chunk key for a tile cell — `floor(q/N),floor(r/N)`. */
+function groundChunkKey(q: number, r: number): string {
+  return `${Math.floor(q / GROUND_CHUNK)},${Math.floor(r / GROUND_CHUNK)}`;
+}
+
+/** zIndex of a tile's `bg` underlay within its ground chunk — below every fill
+ *  prim (which `PrimitiveLayer` floors at ≈ −1e7 + worldY), so the textured
+ *  clippedHex ground always draws over the flat tint. */
+const TILE_BG_Z = -2e7;
+
+/** A retained world tile. Its GROUND (the `bg` underlay + the `clippedHex`/fill
+ *  prims) lives in its per-chunk ground container (`chunk` is that container's
+ *  key, for refcounted teardown); its OBJECT prims live in the shared `sortLayer`.
+ *  `sig` gates rebuilds. */
 interface TileNode {
-  root: Container;
+  chunk: string;
   bg: HexTileVisual;
   prims: PrimitiveLayer;
   sig: number;
@@ -138,6 +156,11 @@ export class WorldRenderer extends LayoutNode {
   private readonly tileLayer = new Container();
   private readonly sortLayer = new Container();
   private readonly cardLayer = new Container();
+  /** Per-chunk GROUND containers (D1b.1a): each holds the `bg` + `clippedHex`/fill
+   *  prims of every tile in a `GROUND_CHUNK`² block, parented under `tileLayer` so
+   *  it sorts below objects. Keyed by {@link groundChunkKey}; `count` refcounts the
+   *  tiles in it so an emptied chunk's container is destroyed. The bake unit. */
+  private readonly groundChunks = new Map<string, { node: Container; count: number }>();
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
   /** This viewport's deferred lighting (world-space, scoped here). Owns the
@@ -287,8 +310,10 @@ export class WorldRenderer extends LayoutNode {
   reload(): void {
     for (const t of this.tiles.values()) {
       t.prims.destroy();
-      t.root.destroy({ children: true });
+      t.bg.destroy();
     }
+    for (const e of this.groundChunks.values()) e.node.destroy({ children: true });
+    this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
     this.cards.clear();
@@ -532,7 +557,8 @@ export class WorldRenderer extends LayoutNode {
     for (const [key, node] of this.tiles) {
       if (this.presentTiles.has(key)) continue;
       node.prims.destroy();
-      node.root.destroy({ children: true });
+      node.bg.destroy();
+      this.releaseGroundChunk(node.chunk);
       this.tiles.delete(key);
       this.desiredTiles.delete(key);
     }
@@ -676,6 +702,34 @@ export class WorldRenderer extends LayoutNode {
     }
   }
 
+  /** Get (creating if needed) the ground container for `chunkKey` and bump its
+   *  tile refcount. New containers sort their children by world-Y (the fills
+   *  overlap ~1px via the hex overscale, so draw order matters) and parent under
+   *  `tileLayer` so the whole chunk sits below the object `sortLayer`. */
+  private acquireGroundChunk(chunkKey: string): Container {
+    let entry = this.groundChunks.get(chunkKey);
+    if (!entry) {
+      const node = new Container();
+      node.sortableChildren = true;
+      this.tileLayer.addChild(node);
+      entry = { node, count: 0 };
+      this.groundChunks.set(chunkKey, entry);
+    }
+    entry.count++;
+    return entry.node;
+  }
+
+  /** Drop one tile's hold on its ground chunk; destroy the (now-empty) container
+   *  when the last tile in it leaves. */
+  private releaseGroundChunk(chunkKey: string): void {
+    const entry = this.groundChunks.get(chunkKey);
+    if (!entry) return;
+    if (--entry.count <= 0) {
+      entry.node.destroy({ children: true });
+      this.groundChunks.delete(chunkKey);
+    }
+  }
+
   private buildTile(key: string, spec: TileSpec): void {
     const center = this.grid.cellToPixel(spec.q, spec.r);
     const hexW = worldHexWidth();
@@ -686,20 +740,23 @@ export class WorldRenderer extends LayoutNode {
 
     let node = this.tiles.get(key);
     if (!node) {
-      const root = new Container();
-      root.position.set(cornerX, cornerY);
+      const chunk = groundChunkKey(spec.q, spec.r);
+      const ground = this.acquireGroundChunk(chunk);
       const bg = new HexTileVisual(
         this.deferred,
         this.deps.hexTexture ?? this.deps.whiteTexture,
       );
-      root.addChild(bg);
-      this.tileLayer.addChild(root);
+      // No per-tile root: bg carries absolute world px and lives in the per-chunk
+      // ground container, below every fill prim (the clippedHex grass covers it).
+      bg.position.set(cornerX, cornerY);
+      bg.zIndex = TILE_BG_Z;
+      ground.addChild(bg);
       const prims = new PrimitiveLayer(
         cardBox(hexW, hexH, { x: cornerX, y: cornerY }),
         this.deps,
-        { target: this.sortLayer },
+        { target: this.sortLayer, groundTarget: ground },
       );
-      node = { root, bg, prims, sig: spec.sig };
+      node = { chunk, bg, prims, sig: spec.sig };
       this.tiles.set(key, node);
     } else {
       node.sig = spec.sig;
@@ -805,7 +862,12 @@ export class WorldRenderer extends LayoutNode {
     this.unsubLod();
     this.unsubContent();
     this.deferred.destroy();
-    for (const t of this.tiles.values()) t.prims.destroy();
+    for (const t of this.tiles.values()) {
+      t.prims.destroy();
+      t.bg.destroy();
+    }
+    for (const e of this.groundChunks.values()) e.node.destroy({ children: true });
+    this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
     this.cards.clear();
