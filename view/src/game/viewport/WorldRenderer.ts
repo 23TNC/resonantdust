@@ -1,7 +1,9 @@
 import { Container, Graphics, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import { DeferredLighting } from "../lighting/DeferredLighting";
+import { DeferredLighting, LIT_AMBIENT } from "../lighting/DeferredLighting";
 import { LitSprite } from "../lighting/LitSprite";
+import { G4, G4_AMBIENT } from "../render/g4";
+import { StaticCache } from "../render/StaticCache";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
 import { worldHexRadius, worldHexWidth, worldHexHeight } from "./hex/hexSize";
@@ -177,6 +179,11 @@ export class WorldRenderer extends LayoutNode {
   /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
    *  whole baked ground sorts below the object `sortLayer`. */
   private readonly bakedGroundLayer = new Container();
+  /** G4 (docs/g4_renderer.md), built only under the `?g4` flag: the world-space
+   *  static ground cache (replaces the deferred ground display) + a global ambient
+   *  multiply overlay (Phase 1 stand-in for real lighting). */
+  private readonly g4Static: StaticCache | null = G4 ? new StaticCache(this.tileLayer) : null;
+  private readonly g4Ambient = new Sprite();
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
   /** This viewport's deferred lighting (world-space, scoped here). Owns the
@@ -278,6 +285,20 @@ export class WorldRenderer extends LayoutNode {
       progress: () => -1,
       queue: () => -1,
     };
+
+    // G4 ambient: a full-screen multiply that dims the whole scene to the ambient
+    // floor (Phase-1 stand-in for the lightmap). Composites last (top of container);
+    // only shown under the `?g4` flag. White × ambient-grey = the 0.12 floor.
+    if (G4) {
+      const amb = G4_AMBIENT >= 0 ? G4_AMBIENT : LIT_AMBIENT;
+      const a8 = Math.max(0, Math.min(255, Math.round(amb * 255)));
+      this.g4Ambient.texture = this.deps.whiteTexture;
+      this.g4Ambient.tint = (a8 << 16) | (a8 << 8) | a8;
+      this.g4Ambient.blendMode = "multiply";
+      this.g4Ambient.visible = false;
+      this.g4Ambient.eventMode = "none"; // pure visual — never capture pointer (pan) events
+      this.container.addChild(this.g4Ambient);
+    }
 
     // Drive the cursor light: project the screen position straight into
     // `container` (content) space — the space the light buffer + mesh live in,
@@ -662,6 +683,10 @@ export class WorldRenderer extends LayoutNode {
     // real-normal art), sum the lights into the light buffer sampling it, then
     // show that buffer multiplied over the albedo.
     const renderer = this.gctx.app.renderer;
+    if (G4 && this.g4Static) {
+      this.renderG4(renderer);
+      return;
+    }
     // Re-bake any ground chunks whose content changed (never on pan alone), so the
     // deferred passes below light the baked world-space ground (D1b.1b).
     this.bakeDirtyChunks(renderer);
@@ -689,6 +714,33 @@ export class WorldRenderer extends LayoutNode {
     } else {
       this.emissiveOverlay.visible = false;
     }
+  }
+
+  /** Iterate the detached per-chunk ground containers — the G4 static bake's prim
+   *  source (D1b.1a grouping reused; no separate cell→prim index yet). */
+  private *groundChunkContainers(): Iterable<Container> {
+    for (const e of this.groundChunks.values()) yield e.container;
+  }
+
+  /** G4 render (Phase 1, docs/g4_renderer.md): bake the ground albedo into the static
+   *  world-space cache + display it; dim the whole viewport by the ambient floor.
+   *  Hides the deferred ground display + overlays. Ground renders at `albedo×ambient`
+   *  (matches the un-lit scene); real per-cell lighting lands in Phases 2–3. */
+  private renderG4(renderer: Renderer): void {
+    const tl = this.panLayer.toLocal(new Point(0, 0), this.container);
+    const br = this.panLayer.toLocal(new Point(this.width, this.height), this.container);
+    this.g4Static!.ensureCovers(
+      renderer,
+      { x: tl.x, y: tl.y, w: br.x - tl.x, h: br.y - tl.y },
+      this.groundChunkContainers(),
+    );
+    this.bakedGroundLayer.visible = false;
+    this.lightOverlay.visible = false;
+    this.objectLightOverlay.visible = false;
+    this.emissiveOverlay.visible = false;
+    this.g4Ambient.width = this.width;
+    this.g4Ambient.height = this.height;
+    this.g4Ambient.visible = true;
   }
 
   override setBounds(x: number, y: number, width: number, height: number): void {
@@ -838,6 +890,7 @@ export class WorldRenderer extends LayoutNode {
     this.deps.seed = cellHash(spec.q, spec.r);
     node.prims.draw(tilePrims(spec.packed, spec.stock0, spec.stock1, this.deps.seed));
     this.markChunkDirty(node.chunk); // ground content changed → re-bake the chunk
+    this.g4Static?.markDirty(); // G4: ground content changed → re-bake the static cache
     this.animating = true;
   }
 

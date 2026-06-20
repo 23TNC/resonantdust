@@ -5,7 +5,7 @@ import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor when lit (multiply baseline) — low so the cursor light reads
  *  as casting light rather than just brightening an already-lit scene. */
-const LIT_AMBIENT = 0.12;
+export const LIT_AMBIENT = 0.12;
 
 /** Re-bake priority for the dirty-region queue (higher = serviced first). The
  *  cursor is highest (it moves every frame), souls next (move often, our focus),
