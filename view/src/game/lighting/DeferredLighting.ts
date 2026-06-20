@@ -201,7 +201,15 @@ export class DeferredLighting {
     renderer.render({ container: this.lightMesh, target: litRT, clear: true });
   }
 
-  /** Pack the BAKEABLE (`canBake`) lights into the uniforms in chunk-local px.
+  /** The cursor's world position + radius, for the chunk-overlap dirty test
+   *  (which chunks the live cursor light touches). Null when the cursor is off. */
+  cursorDisk(): { x: number; y: number; r: number } | null {
+    if (!this.cursor) return null;
+    return { x: this.cursor.x, y: this.cursor.y, r: CURSOR_LIGHT.radius * worldHexRadius() };
+  }
+
+  /** Pack the lights affecting a chunk into the uniforms in chunk-local px: the live
+   *  cursor (dynamic — its chunks re-bake when it moves) plus every card/static light.
    *  TODO(perf): with many static lights, pack only those whose disk overlaps the
    *  chunk (cell→lights index); for now every chunk evaluates all of them. */
   private packChunkLights(originX: number, originY: number): void {
@@ -210,9 +218,7 @@ export class DeferredLighting {
     const color = u.uLightColor as Float32Array;
     const hexR = worldHexRadius();
     let i = 0;
-    for (const l of this.cardLights) {
-      if (i >= MAX_LIGHTS) break;
-      if (!l.canBake) continue;
+    const pack = (l: Light): void => {
       data[i * 4 + 0] = l.x - originX;
       data[i * 4 + 1] = l.y - originY;
       data[i * 4 + 2] = l.height;
@@ -222,6 +228,11 @@ export class DeferredLighting {
       color[i * 4 + 2] = (l.color & 0xff) / 255;
       color[i * 4 + 3] = l.brightness;
       i++;
+    };
+    if (this.cursor) pack({ ...CURSOR_LIGHT, x: this.cursor.x, y: this.cursor.y });
+    for (const l of this.cardLights) {
+      if (i >= MAX_LIGHTS) break;
+      pack(l);
     }
     u.uLightCount = i;
     u.uAmbient = LIT_AMBIENT;

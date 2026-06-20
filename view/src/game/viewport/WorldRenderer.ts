@@ -168,14 +168,27 @@ export class WorldRenderer extends LayoutNode {
     {
       container: Container;
       count: number;
+      /** Geometry changed → re-bake albedo + normal + lit. */
       dirty: boolean;
+      /** A light affecting it changed (the cursor moved in/out) → re-light only
+       *  (`bakeChunkLit` from the cached albedo+normal; no geometry re-render). */
+      lightDirty: boolean;
       albedoRT: RenderTexture | null;
       normalRT: RenderTexture | null;
-      /** The LIT map (`albedo×(ambient+Σ static lights)`) the display sprite shows. */
+      /** The LIT map (`albedo×(ambient+Σ lights)`) the display sprite shows. */
       litRT: RenderTexture | null;
       sprite: Sprite | null;
+      /** Chunk world origin (its baked bounds' top-left) — for re-light + the
+       *  cursor-disk overlap test. */
+      originX: number;
+      originY: number;
     }
   >();
+  /** Chunk keys the cursor light currently touches — for damage tracking (re-light
+   *  the chunks it leaves as well as the ones it enters). */
+  private cursorChunks = new Set<string>();
+  /** Last cursor disk centre, so `markCursorChunks` no-ops when it hasn't moved. */
+  private lastCursor: { x: number; y: number } | null = null;
   /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
    *  whole baked ground sorts below the object `sortLayer`. */
   private readonly bakedGroundLayer = new Container();
@@ -662,6 +675,7 @@ export class WorldRenderer extends LayoutNode {
       this.deferred.registerLight(this.g4Fixture);
       for (const e of this.groundChunks.values()) e.dirty = true; // re-light with it
     }
+    this.markCursorChunks(); // dynamic cursor light → re-light the chunks it touches
     this.bakeDirtyChunks(renderer);
   }
 
@@ -710,7 +724,10 @@ export class WorldRenderer extends LayoutNode {
     if (!entry) {
       const container = new Container();
       container.sortableChildren = true;
-      entry = { container, count: 0, dirty: true, albedoRT: null, normalRT: null, litRT: null, sprite: null };
+      entry = {
+        container, count: 0, dirty: true, lightDirty: false,
+        albedoRT: null, normalRT: null, litRT: null, sprite: null, originX: 0, originY: 0,
+      };
       this.groundChunks.set(chunkKey, entry);
     }
     entry.count++;
@@ -751,34 +768,77 @@ export class WorldRenderer extends LayoutNode {
   private bakeDirtyChunks(renderer: Renderer): void {
     const res = renderer.resolution;
     for (const entry of this.groundChunks.values()) {
-      if (!entry.dirty) continue;
-      entry.dirty = false;
-      if (entry.container.children.length === 0) continue;
-      const b = entry.container.getLocalBounds();
-      const w = Math.max(1, Math.ceil(b.width));
-      const h = Math.max(1, Math.ceil(b.height));
-      if (!entry.albedoRT || entry.albedoRT.width !== w || entry.albedoRT.height !== h) {
-        entry.albedoRT?.destroy(true);
-        entry.normalRT?.destroy(true);
-        entry.litRT?.destroy(true);
-        entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
-        entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
-        entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
+      if (!entry.dirty && !entry.lightDirty) continue;
+      if (entry.container.children.length === 0) {
+        entry.dirty = false;
+        entry.lightDirty = false;
+        continue;
       }
-      const albedoRT = entry.albedoRT;
-      const normalRT = entry.normalRT!;
-      const litRT = entry.litRT!;
-      // Bake albedo + normal from the prims, then light them into the lit map the
-      // display shows: albedo × (ambient + Σ static lights), in chunk-local space.
-      this.deferred.bakeGround(renderer, entry.container, albedoRT, normalRT, b.x, b.y);
-      this.deferred.bakeChunkLit(renderer, normalRT, albedoRT, litRT, b.x, b.y);
+      if (entry.dirty) {
+        // Geometry changed: re-bake albedo + normal, then light.
+        const b = entry.container.getLocalBounds();
+        const w = Math.max(1, Math.ceil(b.width));
+        const h = Math.max(1, Math.ceil(b.height));
+        if (!entry.albedoRT || entry.albedoRT.width !== w || entry.albedoRT.height !== h) {
+          entry.albedoRT?.destroy(true);
+          entry.normalRT?.destroy(true);
+          entry.litRT?.destroy(true);
+          entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
+          entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
+          entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
+        }
+        entry.originX = b.x;
+        entry.originY = b.y;
+        this.deferred.bakeGround(renderer, entry.container, entry.albedoRT, entry.normalRT!, b.x, b.y);
+      }
+      // Re-light (always when dirty; on lightDirty without a geometry re-bake). The
+      // albedo + normal are cached, so a light change is just the light pass.
+      this.deferred.bakeChunkLit(
+        renderer, entry.normalRT!, entry.albedoRT!, entry.litRT!, entry.originX, entry.originY,
+      );
       if (!entry.sprite) {
-        entry.sprite = new Sprite(litRT);
+        entry.sprite = new Sprite(entry.litRT!);
         this.bakedGroundLayer.addChild(entry.sprite);
       }
-      entry.sprite.texture = litRT;
-      entry.sprite.position.set(b.x, b.y);
+      entry.sprite.texture = entry.litRT!;
+      entry.sprite.position.set(entry.originX, entry.originY);
+      entry.dirty = false;
+      entry.lightDirty = false;
     }
+  }
+
+  /** Mark the chunks the cursor light touches `lightDirty` (re-light only), plus the
+   *  chunks it just left (so its light clears there). Called once per frame; skips
+   *  when the cursor hasn't moved, so a still cursor / idle costs nothing. */
+  private markCursorChunks(): void {
+    const disk = this.deferred.cursorDisk();
+    // Skip when the cursor hasn't moved — a still cursor re-uses its baked-in light.
+    const same =
+      (disk === null && this.lastCursor === null) ||
+      (disk !== null && this.lastCursor !== null && disk.x === this.lastCursor.x && disk.y === this.lastCursor.y);
+    if (same) return;
+    this.lastCursor = disk ? { x: disk.x, y: disk.y } : null;
+    const next = new Set<string>();
+    if (disk) {
+      for (const [key, e] of this.groundChunks) {
+        if (!e.albedoRT) continue;
+        const ew = e.albedoRT.width;
+        const eh = e.albedoRT.height;
+        if (
+          disk.x + disk.r >= e.originX && disk.x - disk.r <= e.originX + ew &&
+          disk.y + disk.r >= e.originY && disk.y - disk.r <= e.originY + eh
+        ) {
+          next.add(key);
+          e.lightDirty = true;
+        }
+      }
+    }
+    for (const key of this.cursorChunks) {
+      if (next.has(key)) continue;
+      const e = this.groundChunks.get(key);
+      if (e) e.lightDirty = true; // cursor left → re-light without it
+    }
+    this.cursorChunks = next;
   }
 
   private buildTile(key: string, spec: TileSpec): void {
