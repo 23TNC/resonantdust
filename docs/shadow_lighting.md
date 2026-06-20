@@ -307,10 +307,36 @@ For Phase D (incremental, scalable lighting), we converged on:
   bake-source child from the live registry (they're never drawn under panLayer), so
   the per-frame screen-space passes no longer iterate/swap the per-tile ground sprites
   — only the one display LitSprite per chunk.
-- **D1b.1b-ii**: light each chunk into a baked per-chunk light RT (lights in
-  chunk-local coords), composite `albedo × light` into the display sprite, and drop
-  GROUND from the per-frame screen-space pass entirely — the actual per-frame win.
-  Checkpoint: looks identical + panning/idle triggers zero ground re-light.
+- **D1b.1b-ii** (designed 2026-06-20; the D2 lighting core — own focused pass):
+  hybrid baked + live ground lighting via an EXACT decomposition.
+  - **The math (key unlock, makes it verifiable):**
+    `final = albedo × (ambient + Σbaked + Σlive)`
+    `= [albedo × (ambient + Σbaked)]  +  [albedo × Σlive]`.
+    First bracket = baked per-chunk (zero per-frame cost); second = a per-frame
+    ADDITIVE overlay. Because it's exact, with only the cursor (live) and no
+    bakeable lights it reduces to `albedo×ambient + albedo×cursor =
+    albedo×(ambient+cursor)` — algebraically IDENTICAL to today's single multiply
+    pass. So the refactor is verifiable as "looks identical" with NO fixture; a
+    bakeable light later just moves a term from the live overlay into the baked term.
+  - **ii-a (verifiable-identical refactor):** chunk display shows
+    `albedo × (ambient + Σbaked)` (baked; starts as just `albedo×ambient` since no
+    bakeable lights yet — a 0.12 sprite tint). Change the GROUND light pass to
+    output `albedo.rgb × Σlive` (live lights only, NO ambient) and composite it
+    ADDITIVELY instead of multiply. `deferredLightShader` already samples `uAlbedo`
+    (for coverage) — multiply `lightSum` by `texture(uAlbedo,vUV).rgb` and keep the
+    `coverage` alpha so it only adds on ground pixels (the `uSuppress` object-cutout
+    still applies). OBJECT overlay is UNCHANGED (stays multiply `ambient + all`).
+    Checkpoint: looks identical to now.
+  - **ii-b (the win + fixture):** per chunk, run the light shader over the chunk's
+    baked normalRT with the BAKED lights in chunk-local coords → `chunkLightRT`;
+    composite `litRT = albedoRT × chunkLightRT`; display sprite shows `litRT`.
+    Re-light a chunk only when a bakeable light overlapping it changes (or content
+    changes) — NOT on pan. Add a temporary static `canBake:true` light (or author a
+    `^light` card) as the fixture. Checkpoint: the static light shows on the ground,
+    the cursor still lights live on top, and panning/idle triggers zero re-light.
+  - Needs: split `DeferredLighting.activeLights()` into `bakedLights()`/`liveLights()`;
+    a per-chunk light pass (reuse `lightMesh`/`lightShader` sized to the chunk, or a
+    second mesh); `chunkLightRT`/`litRT` per chunk in `groundChunks`.
 - **D1b.1c**: fold the object layer into the same bake (or keep per-frame if perf is
   fine — decide at the checkpoint).
 - **D2**: dirty-region queue (K hexes/frame, priority/aging) + the per-tile light index.
