@@ -21,6 +21,15 @@ const TILE = 16; // small but >1×1 so setSize math has a real `orig`
  *  packed below it in the shared atlas. */
 const BAKE_PADDING = 2;
 
+/** Inset (px) of the painted hexagon inside its full-cell bake box. Tiles are
+ *  placed at full-cell spacing, so a hex baked FLUSH to its box (inset 0) puts
+ *  every neighbour's antialiased edge flush against ours — the summed coverage
+ *  at that joint is partial, the lighting multiply under-dims it, and it reads
+ *  as a bright hairline around every tile. Pulling the polygon in a px or two
+ *  retracts the AA edge into a transparent margin so joints no longer touch.
+ *  Tune live: raise it if the bright line persists; 0 = flush (the old bake). */
+const HEX_INSET = 0;
+
 const whiteCache = new WeakMap<TextureManager, Texture>();
 const hexCache = new WeakMap<TextureManager, Texture>();
 
@@ -70,7 +79,9 @@ export function atlasHex(textures: TextureManager, renderer: Renderer): Texture 
   const r = worldHexRadius();
   const w = Math.ceil(Math.sqrt(3) * r);
   const h = Math.ceil(2 * r);
-  const g = new Graphics().poly(hexPoints(w / 2, h / 2, r)).fill({ color: 0xffffff });
+  // Box stays full-cell (w/h from r); the polygon is baked at r - HEX_INSET so
+  // it sits inside its box with a transparent margin — see HEX_INSET.
+  const g = new Graphics().poly(hexPoints(w / 2, h / 2, r - HEX_INSET)).fill({ color: 0xffffff });
   const packed = renderAndPack(g, w, h, textures, renderer);
   hexCache.set(textures, packed);
   return packed;

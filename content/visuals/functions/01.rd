@@ -47,19 +47,25 @@
     @define>
       $globals::card_height $globals::cell_margin 2 mul add &value set
 
-  ; world hex cell — pointy-top, fixed display radius of 87 (up from the
+  ; world hex cell — pointy-top, fixed display radius of 88 (up from the
   ; card-inscribed ≈80.78). The hex runs slightly larger than the 72×120 card it
-  ; hosts, so cards sit comfortably inside it. width = √3·r, height = 2·r
-  ; (matches the client WORLD_HEX_RADIUS in hexSize.ts — keep synced).
+  ; hosts, so cards sit comfortably inside it. width = √3·r, height = 2·r — then a
+  ; +1% display overscale (×101÷100): the SPACING (client `HexMath`, from
+  ; `hex_radius`) steps by exactly √3·r per column, so tiles drawn at exactly √3·r
+  ; meet edge-to-edge and their antialiased edges leave a sub-pixel rounding seam.
+  ; Overscaling the body (NOT the radius/spacing) fattens each hex ~0.75px per side
+  ; so neighbours overlap and the seam closes, with card/pick/selection alignment
+  ; unchanged (those read `hex_radius`). Tune via the 101. Keep synced with the
+  ; client WORLD_HEX_RADIUS in hexSize.ts (radius) — width/height carry the overlap.
   ::hex_radius>
     @define>
-      87 &value set
+      88 &value set
   ::hex_width>
     @define>
-      $globals::hex_radius 3 sqrt mul &value set
+      $globals::hex_radius 3 sqrt mul 101 mul 100 div &value set
   ::hex_height>
     @define>
-      $globals::hex_radius 2 mul &value set
+      $globals::hex_radius 2 mul 101 mul 100 div &value set
 
 ; Shared functions a card calls from its `:visuals` hooks. All output the
 ; engine-owned `prims` draw list (see CONVENTIONS "VISUAL PRIMITIVES"): a card

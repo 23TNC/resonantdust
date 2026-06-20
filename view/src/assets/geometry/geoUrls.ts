@@ -1,17 +1,17 @@
 /**
  * Geometry-sidecar URL construction — the JSON analog of `channelUrl` in
- * `lodUrls.ts`. A sprite stem (from the wasm `^r2` resolver, possibly carrying a
- * `?v=<hash>` version suffix) maps to `/textures/geo/<stem>.json[?v=<hash>]`. The
- * version is split off the path and re-attached as the query, so it keys the
- * browser/CDN cache (re-master → new hash → clean bust) while the path stays the
- * stable R2 object key — exactly as the LOD URLs do.
+ * `lodUrls.ts`. A sprite stem (from the wasm `^r2` resolver, carrying a `?v=<hash>`
+ * version) maps to `/textures/geo/<dir>/<version>/<variation>.json`. The version
+ * is a PATH SEGMENT at the object boundary (not a `?v=` query), so a re-mastered
+ * object is a distinct R2 key — clean 404 → gate-regenerate — exactly as the LOD
+ * URLs do (see {@link splitStem}).
  */
+
+import { splitStem } from "../lodUrls";
 
 /** Build the sidecar fetch URL for a resolved sprite stem (root-relative; the
  *  caller prefixes the R2 or gate origin). */
 export function geoUrl(stem: string): string {
-  const q = stem.indexOf("?");
-  const base = q < 0 ? stem : stem.slice(0, q);
-  const query = q < 0 ? "" : stem.slice(q);
-  return `/textures/geo/${base}.json${query}`;
+  const { dir, variation, version } = splitStem(stem);
+  return `/textures/geo/${dir}/${version}/${variation}.json`;
 }

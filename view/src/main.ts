@@ -14,6 +14,7 @@ import { UiEditMode } from "./ui/dom/UiEditMode";
 import { PanelSettingsPopup } from "./ui/dom/PanelSettingsPopup";
 import { DomPanel } from "./ui/dom/DomPanel";
 import { DrawCallCounter } from "./debug/DrawCallCounter";
+import { mountEnvOverlay } from "./debug/EnvOverlay";
 import { SettingsMenu } from "./game/panels/titlebar/SettingsMenu";
 import { DebugPanel } from "./game/panels/titlebar/DebugPanel";
 import type { SyncStats } from "./game/panels/titlebar/DebugPanel";
@@ -52,6 +53,10 @@ async function main(): Promise<void> {
   const host = document.getElementById("app");
   if (!host) throw new Error("#app element not found");
   host.appendChild(app.canvas);
+
+  // Always-on env badge (top-left) so it's never ambiguous which gate this
+  // session is talking to — dev/claude/test/alpha, color-coded.
+  mountEnvOverlay();
 
   // Texture asset origin. LOD textures are served from a Cloudflare R2 bucket —
   // the only `Assets.load` consumer is LodTextureManager, and the relative

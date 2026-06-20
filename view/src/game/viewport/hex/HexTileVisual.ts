@@ -2,6 +2,7 @@ import type { Texture } from "pixi.js";
 import type { CardDefinition } from "../../definitions/DefinitionManager";
 import type { DeferredLighting } from "../../lighting/DeferredLighting";
 import { LitSprite } from "../../lighting/LitSprite";
+import { worldHexWidth, worldHexHeight } from "./hexSize";
 
 const FALLBACK_STYLE = ["#3a3a4a", "#7a7a8a", "#0b1426"] as const;
 
@@ -28,12 +29,16 @@ export function hexPoints(cx: number, cy: number, radius: number): number[] {
  * causing the directional "lit on one side" shading.)
  */
 export class HexTileVisual extends LitSprite {
-  constructor(radius: number, deferred: DeferredLighting, hexTexture: Texture) {
+  constructor(deferred: DeferredLighting, hexTexture: Texture) {
     super(deferred, hexTexture);
-    // null normal → flat-up in the pass; anchor (0,0) = tile corner; size to box.
+    this.groundLayer = true; // the tessellating ground — deferred ground layer.
+    // null normal → flat-up in the pass; anchor (0,0) = tile corner. Size to the
+    // (overscaled) cell globals — NOT √3·r/2·r — so this underlay matches the
+    // overscaled DSL hex body above it (see hex_width/hex_height in 01.rd) and
+    // can't peek out as a smaller hex behind it.
     this.setTextures(hexTexture, null);
-    this.width = Math.sqrt(3) * radius;
-    this.height = 2 * radius;
+    this.width = worldHexWidth();
+    this.height = worldHexHeight();
   }
 
   /** Tint to the definition's primary style colour. Safe to call every frame. */

@@ -1,7 +1,8 @@
 # Shadow lighting + geometry sidecars
 
-Status: **in progress** — Phase A underway. This is the source of truth for the
-build; it supersedes the earlier per-light-RT sketch.
+Status: **in progress** — Phases A, B, C done; **Phase D starting** (D1 two-layer
+split). This is the source of truth for the build; it supersedes the earlier
+per-light-RT sketch.
 
 ## Goal
 
@@ -204,40 +205,48 @@ is **done** (and improved over this sketch).
 
 ---
 
-## Handoff — 2026-06-18 (continue in a fresh chat; this one is exhausted)
+## Handoff — 2026-06-19
 
-### RESOLVED: the bright edge-rim / "ambient line" on tiles & sprites
-The bright line tracing hex seams and cutting through trees was **not** layering,
-**not** normal-map content, **not** a z-order bug. It was the deferred light
-overlay using the albedo's **anti-aliased alpha ramp** as its coverage/opacity:
-every silhouette edge faded the multiply-dim from the `0.12` ambient floor back up
-to full-bright albedo over the ~1px AA edge → a scale-invariant bright rim on every
-tile and sprite edge.
+### RESOLVED (for real): the bright "ambient line" tracing every hex
+**The line was a literal stroked outline, not a lighting artifact.** `buildTile`
+drew a per-tile hex `Graphics().poly(…, worldHexRadius()).stroke({ color:
+TILE_OUTLINE_COLOR /* 0x2a3038 */, width: 1, alpha: 0.6 })` at full cell radius —
+"viewport chrome" so the empty grid read as cells. `0x2a3038` is *lighter* than the
+tile fills once the ambient multiply crushes those toward the `0.12` floor, so it
+popped as a light hairline on near-black tiles. It tracked every hex regardless of
+tile size and survived a 10px mask inset (it's drawn at full radius, independent of
+the mask) — which is what finally identified it.
 
-Fix (already applied, **uncommitted**):
-- `view/src/game/lighting/deferredLightShader.ts` — `coverage = ceil(texture(uAlbedo, vUV).a)`
-  so any non-zero coverage snaps to full dim (the albedo's own alpha still fades the
-  edge into the dark background). **This is the actual fix.**
-- `content/visuals/functions/01.rd` — `hex_radius` 86 → 87 (tiles overlap ~1px so
-  adjacent hexes meet with no sub-pixel seam). Keep synced with `WORLD_HEX_RADIUS`.
-- `content/visuals/asset/01.rd` — grass `&fill` overscale 1.08 → 2.
+**Fix (applied this session):** delete the outline in `buildTile`
+(`view/src/game/viewport/WorldRenderer.ts`) → `root.addChild(bg)` only.
+`TILE_OUTLINE_COLOR` is now unused.
+
+### Misdiagnoses from the 2026-06-18 chat — REVERTED, do not re-add
+The previous handoff claimed the line was the deferred overlay using the albedo's
+**AA alpha ramp** as coverage, "fixed" by `coverage = ceil(...)`. That was wrong;
+all of it has been reverted:
+- `deferredLightShader.ts` — `ceil` coverage **reverted** to `coverage = texture(uAlbedo, vUV).a`. The `ceil` did not fix the line (it was the outline) and broke tile lighting.
+- `TextureManager.ts` + `DeferredLighting.ts` — **NEAREST** normal-page / G-buffer
+  filtering **reverted** to linear. It fixed nothing and introduced visible jaggies
+  on lit sprites. (If normal-map bilinear bleed is ever a *real* problem, revisit
+  deliberately — but it was not the cause here.)
+- `content/visuals/functions/01.rd` — `hex_radius` 86 → 87 is **committed** (`7a6f192`)
+  and **kept** as an independent ~1px tile-overlap anti-seam measure. Keep synced with
+  `WORLD_HEX_RADIUS` in `hexSize.ts`. Not related to the outline line.
+
+Lesson for the next session: when a "lighting line" tracks geometry exactly and is
+scale-invariant, **rule out a literal drawn stroke/outline before theorizing about
+the shader.** Grep the tile build path for `.stroke(`/`Graphics` first.
 
 ### Working-tree state at handoff
-Committed this session (branch `0.7`):
+Committed (branch `0.7`):
+- `7a6f192` — NEAREST normal sampling (now reverted in-tree) + `hex_radius` 87 +
+  doc/version bumps. (The NEAREST part is superseded by the revert above.)
 - `cfedc06` — stable-frame LOD placeholders (geo→preview→real in one shared-atlas
-  slot, rewritten in place; the `erase`-blend-to-RenderTexture gotcha is in §First-
-  frame placeholder).
-- `3a0906b` — hex-clip re-bakes on content-tier advance (tiles were frozen at the
-  blurry preview LOD because the stable frame's texture identity never changes).
+  slot; the `erase`-blend-to-RenderTexture gotcha is in §First-frame placeholder).
+- `3a0906b` — hex-clip re-bakes on content-tier advance.
 
-Uncommitted, NOT the fix — decide whether to keep:
-- `view/src/assets/textures/TextureManager.ts` + `DeferredLighting.ts` — set the
-  normal page + normal G-buffer to **NEAREST** filtering. Defensible on its own
-  (normal maps should never be bilinear-filtered) but it did **not** fix the rim;
-  keep or drop independently.
-- `versions.json`, `gateway` (submodule) — generated / other in-flight work; leave.
-
-### Agreed forward design (the one useful thing from this chat — don't relose it)
+### Agreed forward design (the one useful thing from the prior chat — don't relose it)
 For Phase D (incremental, scalable lighting), we converged on:
 
 1. **Two layers, not one combined G-buffer.** Tile layer and object layer get
@@ -263,11 +272,31 @@ For Phase D (incremental, scalable lighting), we converged on:
    live pass over the baked zones; everything else bakes.
 
 ### Next steps
-- **D1**: implement the per-zone incremental bake of the static layer (two-layer
-  composite, hex-clipped, world-space @ zoom 1, composite-by-transform). Recommended
-  to first prove the two-layer split in screen-space/per-frame before wiring the zone
-  machinery.
+- **D1a — two-layer split in screen-space/per-frame. IMPLEMENTED 2026-06-19,
+  in-tree, NOT yet browser-verified.** `LitSprite.groundLayer` tags hex-clipped
+  grounds (`HexTileVisual` + `TexPrim` `clippedHex`) vs standing objects;
+  `DeferredLighting` now renders GROUND and OBJECT normals + albedos into separate
+  buffers, lights each, and `WorldRenderer` stacks two multiply overlays. Coverage
+  is disjoint: object overlay = `objA`; ground overlay = `groundA × (1 − objA)`
+  (new `uOther`/`uSuppress` in `deferredLightShader`), so nothing double-dims. The
+  live `panLayer` display path is unchanged. **Verification target: looks identical
+  to single-layer** (the split's payoff is clean object/ground normal edges, not a
+  visible change). Cost: 6 screen passes/frame vs 3 — acceptable pre-bake; D1b
+  removes the per-frame cost.
+- **D1b.1a — per-zone ground containers. IMPLEMENTED 2026-06-19, in-tree, NOT yet
+  browser-verified.** Each world tile's GROUND (its `bg` fill + `clippedHex` art
+  prims) now routes into a per-macro_zone `Container` (`WorldRenderer.zoneContainers`,
+  keyed `chunkQ,chunkR` via `zoneKey`, parented under `tileLayer` so it sorts below
+  objects); OBJECT prims stay in the shared `sortLayer`. `PrimitiveLayer` gained an
+  optional `groundTarget` and routes per-prim by `LitSprite.groundLayer`; the
+  per-tile `root` Container is gone (`bg` carries absolute world px). This gives the
+  bake a clean per-zone unit to render with no registry-hiding. **Verification: looks
+  identical** (pure reparent — grounds tessellate, render below objects as before).
+- **D1b.1b**: bake each zone container into a world-space RT (albedo + stored
+  normal), light it zone-locally, composite the lit result by the pan transform;
+  ground leaves the screen-space overlay path. Checkpoint: looks identical + panning
+  triggers zero re-bakes.
+- **D1b.1c**: fold the object layer into the same bake (or keep per-frame if perf is
+  fine — decide at the checkpoint).
 - **D2**: dirty-region queue (K hexes/frame, priority/aging) + the per-tile light index.
 - **E**: projected-billboard shadows from the geometry sidecars, masked into D's regions.
-- Decide the fate of the uncommitted NEAREST normal-filter change; commit the ambient
-  fix (`ceil` coverage + hex_radius 87 + fill) once verified.

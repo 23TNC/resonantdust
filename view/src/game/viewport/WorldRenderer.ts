@@ -145,8 +145,12 @@ export class WorldRenderer extends LayoutNode {
    *  later phases. Fed the cursor each pointer move. */
   private readonly deferred = new DeferredLighting();
   private readonly onCursorMove: (e: FederatedPointerEvent) => void;
-  /** Phase 3: the light accumulation buffer, multiplied over the albedo. */
+  /** Per-layer light buffers, each multiplied over the albedo. `lightOverlay` is
+   *  the GROUND layer (tessellating floors); `objectLightOverlay` is the OBJECT
+   *  layer (standing art/cards). Coverage is disjoint between them, so stacking
+   *  the two multiplies never double-dims a pixel. */
   private readonly lightOverlay = new Sprite();
+  private readonly objectLightOverlay = new Sprite();
   /** The emissive accumulation buffer, ADDED over the lit result so glows read
    *  even where light is ~0. Hidden whenever no on-screen sprite emits. */
   private readonly emissiveOverlay = new Sprite();
@@ -216,9 +220,11 @@ export class WorldRenderer extends LayoutNode {
     // alignment, but BlendMode multiply so it shades rather than replaces.
     this.lightOverlay.blendMode = "multiply";
     this.lightOverlay.visible = false;
-    this.container.addChild(this.lightOverlay);
+    this.objectLightOverlay.blendMode = "multiply";
+    this.objectLightOverlay.visible = false;
+    this.container.addChild(this.lightOverlay, this.objectLightOverlay);
     // Emissive ADDED on top of the multiply — `albedo×light + emissive`. Added
-    // after lightOverlay so it composites last.
+    // after the light overlays so it composites last.
     this.emissiveOverlay.blendMode = "add";
     this.emissiveOverlay.visible = false;
     this.container.addChild(this.emissiveOverlay);
@@ -611,10 +617,15 @@ export class WorldRenderer extends LayoutNode {
     this.deferred.renderNormals(renderer, this.panLayer);
     const lit = this.deferred.renderLights(renderer, this.panLayer);
     if (lit) {
-      this.lightOverlay.texture = lit;
-      this.lightOverlay.width = this.width;
-      this.lightOverlay.height = this.height;
-      this.lightOverlay.visible = true;
+      for (const [overlay, tex] of [
+        [this.lightOverlay, lit.ground],
+        [this.objectLightOverlay, lit.object],
+      ] as const) {
+        overlay.texture = tex;
+        overlay.width = this.width;
+        overlay.height = this.height;
+        overlay.visible = true;
+      }
     }
     // Emissive pass (after lights, which captured the albedo) — null when no
     // on-screen sprite emits, so the additive overlay simply stays hidden.
@@ -678,14 +689,10 @@ export class WorldRenderer extends LayoutNode {
       const root = new Container();
       root.position.set(cornerX, cornerY);
       const bg = new HexTileVisual(
-        worldHexRadius(),
         this.deferred,
         this.deps.hexTexture ?? this.deps.whiteTexture,
       );
-      const outline = new Graphics()
-        .poly(hexPoints(hexW / 2, hexH / 2, worldHexRadius()))
-        .stroke({ color: TILE_OUTLINE_COLOR, width: 1, alpha: 0.6 });
-      root.addChild(bg, outline);
+      root.addChild(bg);
       this.tileLayer.addChild(root);
       const prims = new PrimitiveLayer(
         cardBox(hexW, hexH, { x: cornerX, y: cornerY }),

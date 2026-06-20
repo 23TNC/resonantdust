@@ -56,9 +56,20 @@ export function httpBaseFor(env: Environment, host = hostFor(env)): string {
  *  debug HUD so it's always unambiguous which gate's data you're looking at —
  *  dev / claude / test / alpha. `null` until the first login. */
 let _current: Environment | null = null;
+const _listeners = new Set<(env: Environment | null) => void>();
 export function setCurrentEnvironment(env: Environment): void {
   _current = env;
+  for (const cb of _listeners) cb(env);
 }
 export function currentEnvironment(): Environment | null {
   return _current;
+}
+
+/** Subscribe to environment changes (login / server switch). Fires immediately
+ *  with the current value so a freshly-mounted consumer (e.g. the env overlay)
+ *  renders correctly before the first login. Returns an unsubscribe fn. */
+export function onEnvironmentChange(cb: (env: Environment | null) => void): () => void {
+  _listeners.add(cb);
+  cb(_current);
+  return () => _listeners.delete(cb);
 }

@@ -299,41 +299,44 @@ export class LodTextureManager {
     this.schedule(() => this.loadPreview(stem), "low");
   }
 
-  /** Allocate a stable frame at `ideal` (master aspect from the preview's dims) and
-   *  fill it by scaling the preview triple up into the slot. */
+  /** Allocate a stable SQUARE frame at the LOD bucket size and fill it by scaling
+   *  the preview triple up into the slot. The master is square, so the preview
+   *  (and every later tier) is square — slot, frame, and source all match. */
   private allocateFromPreview(key: string, ideal: number, preview: PackedPair): LodEntry {
-    const pw = preview.albedo.frame.width;
-    const ph = preview.albedo.frame.height;
-    const entry = this.allocateFrame(key, fitTo(ideal, pw, ph), FrameLevel.Preview);
+    const entry = this.allocateFrame(key, ideal, FrameLevel.Preview);
     entry.rewrite!(preview.albedo, preview.normal ?? this.flatNormal, preview.emissive);
     return entry;
   }
 
-  /** Allocate a stable frame at `ideal` (master aspect from the sidecar bbox) and
-   *  fill it with the geo triangulation (flat-up normal so it lights flat). */
+  /** Allocate a stable SQUARE frame at the LOD bucket size and fill it with the geo
+   *  triangulation (flat-up normal so it lights flat). The sidecar coords are
+   *  normalized by the (square) master, so they map straight into the square. */
   private allocateFromGeo(key: string, ideal: number, sidecar: Sidecar): LodEntry {
-    const [w, h] = fitTo(ideal, sidecar.bbox[0], sidecar.bbox[1]);
-    const entry = this.allocateFrame(key, [w, h], FrameLevel.Geo);
-    const geoRT = this.renderGeo(sidecar, w, h);
+    const entry = this.allocateFrame(key, ideal, FrameLevel.Geo);
+    const geoRT = this.renderGeo(sidecar, ideal);
     entry.rewrite!(geoRT, this.flatNormal, null);
     geoRT.destroy(true);
     return entry;
   }
 
-  /** Allocate the stable atlas frame for `key` at `w×h`, store + return the entry.
-   *  Inset like every other packed frame so bilinear sampling can't bleed from a
-   *  neighbouring atlas slot. */
-  private allocateFrame(key: string, [w, h]: [number, number], level: FrameLevel): LodEntry {
-    const { pair, handle, rewrite } = this.textures.packResizable(w, h);
+  /** Allocate the stable SQUARE atlas frame for `key` at `size×size`, store + return
+   *  the entry. Every streamed-art frame is a pow2 square — the master is square, so
+   *  geo/preview/real all share one square slot (slot == frame, no waste, no
+   *  cross-tier aspect mismatch). Inset like every other packed frame so bilinear
+   *  sampling can't bleed from a neighbouring atlas slot. */
+  private allocateFrame(key: string, size: number, level: FrameLevel): LodEntry {
+    const { pair, handle, rewrite } = this.textures.packResizable(size, size);
     const entry: LodEntry = { pair: insetPair(pair), handle, rewrite, level };
     this.byKey.set(key, entry);
     return entry;
   }
 
   /** Render the sidecar's earcut triangles (flat dominant colour) into a fresh
-   *  `w×h` RenderTexture — the geo placeholder source the frame is filled from. */
-  private renderGeo(sidecar: Sidecar, w: number, h: number): RenderTexture {
-    const rt = RenderTexture.create({ width: w, height: h });
+   *  `size×size` RenderTexture — the geo placeholder source the frame is filled
+   *  from. Coords are normalized by the square master, so `× size` reproduces the
+   *  silhouette's master framing (centered, padded) inside the square. */
+  private renderGeo(sidecar: Sidecar, size: number): RenderTexture {
+    const rt = RenderTexture.create({ width: size, height: size });
     const g = new Graphics();
     for (const poly of sidecar.polygons) {
       const verts = poly.contour.concat(...poly.holes);
@@ -343,7 +346,10 @@ export class LodTextureManager {
         const b = verts[t[i + 1]];
         const c = verts[t[i + 2]];
         if (!a || !b || !c) continue;
-        g.moveTo(a[0] * w, a[1] * h).lineTo(b[0] * w, b[1] * h).lineTo(c[0] * w, c[1] * h).closePath();
+        g.moveTo(a[0] * size, a[1] * size)
+          .lineTo(b[0] * size, b[1] * size)
+          .lineTo(c[0] * size, c[1] * size)
+          .closePath();
       }
     }
     g.fill({ color: parseHexColor(sidecar.color) });
@@ -463,8 +469,8 @@ export class LodTextureManager {
    *  rewrite the slot in place if a geo/preview frame already exists (so bound
    *  sprites upgrade with no swap), else allocate a fresh frame from the real dims.
    *  The gate clamps a request above the master's native resolution, so a too-large
-   *  `ideal` returns a smaller image — harmless, the slot is sized from the source's
-   *  own dims. `key` is released from `loading` regardless so a later reference can
+   *  `ideal` returns a smaller image — harmless, it's scaled into the square LOD-bucket
+   *  slot. `key` is released from `loading` regardless so a later reference can
    *  retry. */
   private async load(stem: string, ideal: number, key: string): Promise<void> {
     let landed = false;
@@ -476,9 +482,7 @@ export class LodTextureManager {
         // Reuse the stem's existing stable frame (geo/preview) so every bound
         // sprite follows the upgrade in place; otherwise stand a fresh one up at
         // the real source's aspect.
-        const entry =
-          this.byKey.get(key) ??
-          this.allocateFrame(key, fitTo(ideal, albedoSrc.width, albedoSrc.height), FrameLevel.Real);
+        const entry = this.byKey.get(key) ?? this.allocateFrame(key, ideal, FrameLevel.Real);
         entry.rewrite?.(albedoSrc, normalSrc ?? this.flatNormal, emissiveSrc);
         entry.level = FrameLevel.Real;
         if (ideal > (this.maxSize.get(stem) ?? 0)) this.maxSize.set(stem, ideal);
@@ -627,16 +631,6 @@ function insetFrame(tex: Texture, inset: number): Texture {
     source: tex.source,
     frame: new Rectangle(x + inset, y + inset, width - inset * 2, height - inset * 2),
   });
-}
-
-/** Fit `w×h` into a box whose longest side is `ideal`, preserving aspect — the
- *  slot dimensions for a stem's stable frame. The master's own aspect (preview
- *  downscale / sidecar bbox / real LOD) drives it, so geo→preview→real all target
- *  the same slot shape. Guards against zero/degenerate dims. */
-function fitTo(ideal: number, w: number, h: number): [number, number] {
-  if (w <= 0 || h <= 0) return [ideal, ideal];
-  const s = ideal / Math.max(w, h);
-  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
 }
 
 /** A 1×1 flat-up (+Z) normal (`#8080ff`), scaled into the normal frame whenever a

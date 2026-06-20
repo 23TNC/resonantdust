@@ -14,6 +14,13 @@ import type { DeferredLighting } from "./DeferredLighting";
  * the normal pass can find it, and unregisters on destroy.
  */
 export class LitSprite extends Sprite {
+  /** Lighting layer (deferred two-layer split): `true` for a hex-clipped GROUND
+   *  (tile fill / `clippedHex` art), which tessellates and never overlaps;
+   *  `false` for a standing OBJECT (tree, card) that sorts by world-Y and may
+   *  overlap. Read by `DeferredLighting` to render ground/object normals into
+   *  separate G-buffers so an object silhouette can't contaminate ground normals.
+   *  Defaults to object — only grounds opt in. */
+  groundLayer = false;
   /** Normal frame at this sprite's atlas slot, or null → flat-up fallback. */
   normalTexture: Texture | null = null;
   /** Emissive frame at this sprite's atlas slot, or null → no self-illumination.

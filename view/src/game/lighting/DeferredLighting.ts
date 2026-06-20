@@ -80,6 +80,24 @@ function makeFlatNormal(): Texture {
  * light state and reverts the sprites to plain batched `Sprite`s (so draw count
  * drops). The world renders UNLIT albedo until the composite pass lands.
  */
+/** One lighting layer's three screen-resolution buffers. */
+interface LayerBuf {
+  /** Normal G-buffer: this layer's sprites' normals (flat-up where none). */
+  normalRT: RenderTexture | null;
+  /** Albedo capture: this layer's on-screen colour; its ALPHA is the coverage. */
+  albedoRT: RenderTexture | null;
+  /** Light accumulation: `ambient + Σ lights` for this layer, multiplied over the
+   *  albedo by this layer's overlay. */
+  lightRT: RenderTexture | null;
+}
+
+/** The light buffers returned by {@link DeferredLighting.renderLights}, one per
+ *  layer — each its own multiply overlay. */
+export interface LayerLight {
+  ground: Texture;
+  object: Texture;
+}
+
 export class DeferredLighting {
   readonly flatNormal: Texture = makeFlatNormal();
   /** Live lit sprites in this viewport — the normal-pass input set. */
@@ -90,16 +108,12 @@ export class DeferredLighting {
    *  `LightPrim`, which mutates each entry's world position as the card moves).
    *  Summed alongside the cursor light. */
   private readonly cardLights = new Set<Light>();
-  /** The normal G-buffer (content-local, screen resolution). Sized to the
-   *  viewport by `resize`; the normal pass renders the registry's normals into
-   *  it; the light pass samples it. */
-  private normalRT: RenderTexture | null = null;
-  /** The light accumulation buffer — `ambient + Σ lights`, output of the light
-   *  pass, shown multiplied over the albedo. */
-  private lightRT: RenderTexture | null = null;
-  /** The albedo capture — the light pass reads its ALPHA as the coverage mask
-   *  so the multiply overlay only shades real geometry (no black on empty). */
-  private albedoRT: RenderTexture | null = null;
+  /** Per-layer G-buffers + light accumulation (content-local, screen resolution),
+   *  sized by `resize`. GROUND (tessellating hex-clipped floors) and OBJECT
+   *  (standing art/cards) render into separate normal/albedo buffers so an object
+   *  silhouette's normals can't bleed into the ground's; each is lit on its own. */
+  private readonly ground: LayerBuf = { normalRT: null, albedoRT: null, lightRT: null };
+  private readonly object: LayerBuf = { normalRT: null, albedoRT: null, lightRT: null };
   /** The emissive accumulation buffer — `Σ emissive` from every sprite that
    *  carries an emissive frame, ADDED over the lit composite (so glows survive
    *  in the dark). Null until sized; the pass is skipped entirely when no
@@ -112,6 +126,7 @@ export class DeferredLighting {
     uLightCount: { value: 0, type: "f32" },
     uAmbient: { value: LIT_AMBIENT, type: "f32" },
     uNormalYSign: { value: -1, type: "f32" },
+    uSuppress: { value: 0, type: "f32" },
   });
   private readonly lightShader = makeDeferredLightShader(this.lightUniforms);
   /** The viewport-covering quad the light pass draws (geometry sized to the
@@ -165,19 +180,19 @@ export class DeferredLighting {
     return this.lights;
   }
 
-  /** (Re)allocate both buffers to the viewport size (CSS px) at `resolution`
-   *  (dpr), and size the light quad to match. No-op for a degenerate size. */
+  /** (Re)allocate every per-layer buffer to the viewport size (CSS px) at
+   *  `resolution` (dpr), and size the light quad to match. No-op for a degenerate
+   *  size. */
   resize(width: number, height: number, resolution: number): void {
     if (width <= 0 || height <= 0) return;
-    this.normalRT?.destroy(true);
-    // NEAREST: the light pass samples this G-buffer; linear filtering would blend
-    // adjacent normals (e.g. across a tree/tile silhouette) into a skewed vector
-    // that flares under the light. Point-sample so each pixel keeps its own normal.
-    this.normalRT = RenderTexture.create({ width, height, resolution, scaleMode: "nearest" });
-    this.lightRT?.destroy(true);
-    this.lightRT = RenderTexture.create({ width, height, resolution });
-    this.albedoRT?.destroy(true);
-    this.albedoRT = RenderTexture.create({ width, height, resolution });
+    for (const layer of [this.ground, this.object]) {
+      layer.normalRT?.destroy(true);
+      layer.normalRT = RenderTexture.create({ width, height, resolution });
+      layer.albedoRT?.destroy(true);
+      layer.albedoRT = RenderTexture.create({ width, height, resolution });
+      layer.lightRT?.destroy(true);
+      layer.lightRT = RenderTexture.create({ width, height, resolution });
+    }
     this.emissiveRT?.destroy(true);
     this.emissiveRT = RenderTexture.create({ width, height, resolution });
     const pos = this.lightMesh.geometry.positions;
@@ -188,46 +203,45 @@ export class DeferredLighting {
     this.lightMesh.geometry.positions = pos;
   }
 
-  /** The G-buffer texture, for the light pass / debug view. Null until sized. */
+  /** A G-buffer texture (the ground layer), for the debug view. Null until sized. */
   get normalTexture(): Texture | null {
-    return this.normalRT;
+    return this.ground.normalRT;
   }
 
   /**
-   * Render the registry's NORMALS into the G-buffer. Swaps each lit sprite's
-   * `texture` to its normal frame (flat-up fallback), renders `world` (the pan
-   * container — captures the camera offset in its local transform) into the
-   * target, then restores the albedo. Cleared to flat-up so empty space reads
-   * as facing the viewer. Synchronous, so the on-screen albedo render that
-   * follows sees the restored textures.
+   * Render the registry's NORMALS into the GROUND and OBJECT G-buffers (separate
+   * buffers so an object silhouette's normals can't bleed into the ground's).
+   * Swaps each sprite's `texture` to its normal frame, renders `world` (the pan
+   * container — its local transform carries the camera offset), restores the
+   * albedo. Synchronous, so the on-screen albedo render that follows sees the
+   * restored textures.
    */
   renderNormals(renderer: Renderer, world: Container): void {
-    const rt = this.normalRT;
-    if (!rt) return;
-    // Sprites WITH a real normal map render it; sprites WITHOUT one (solid
-    // fills, the hex-tile ground) are hidden for the pass so they fall through
-    // to the flat-up clear instead of writing their albedo COLOUR as a bogus
-    // normal — that colour-as-normal was the directional "lit on one side"
-    // artifact. Empty space is flat-up from the clear too.
-    // The tint is the ALBEDO's colour (e.g. a tile's ground tint). It must NOT
-    // apply to the normal — multiplying the normal's RGB by a coloured tint skews
-    // the encoded vector (a low-blue tint crushes the +Z component, so flat ground
-    // reads as facing sideways: black under a top-down light, glowing edges). Force
-    // white for the normal render and restore the real tint after.
+    if (this.ground.normalRT) this.renderLayerNormals(renderer, world, true, this.ground.normalRT);
+    if (this.object.normalRT) this.renderLayerNormals(renderer, world, false, this.object.normalRT);
+  }
+
+  /** Render one layer's normals into `rt`. This layer's sprites with a real normal
+   *  map draw it WHITE-tinted (the albedo tint would skew the encoded vector — a
+   *  low-blue tint crushes +Z, so flat ground reads as facing sideways); sprites
+   *  with no normal AND every OTHER-layer sprite are hidden so they fall through to
+   *  the flat-up clear. Restores textures/tints/visibility after. */
+  private renderLayerNormals(renderer: Renderer, world: Container, ground: boolean, rt: RenderTexture): void {
     const restore: { sp: LitSprite; tint: number }[] = [];
+    const hidden: LitSprite[] = [];
     for (const sp of this.sprites) {
-      if (sp.normalTexture) {
+      if (sp.groundLayer !== ground || !sp.normalTexture) {
+        // Only hide (and later restore) sprites we actually flip, so a sprite kept
+        // renderable=false elsewhere (e.g. a `mask` prim) stays hidden.
+        if (sp.renderable) { sp.renderable = false; hidden.push(sp); }
+      } else {
         restore.push({ sp, tint: sp.tint });
         sp.texture = sp.normalTexture;
         sp.tint = 0xffffff;
-      } else {
-        sp.renderable = false;
       }
     }
     renderer.render({ container: world, target: rt, clear: true, clearColor: [0.5, 0.5, 1, 1] });
-    for (const sp of this.sprites) {
-      if (!sp.normalTexture) sp.renderable = true;
-    }
+    for (const sp of hidden) sp.renderable = true;
     for (const { sp, tint } of restore) {
       sp.texture = sp.albedoTexture;
       sp.tint = tint;
@@ -235,20 +249,50 @@ export class DeferredLighting {
   }
 
   /**
-   * Sum the active lights into the light buffer (one quad sampling the G-buffer)
-   * and return it for the multiply overlay. Light world positions are projected
-   * into content space via `panLayer`'s transform (so they track the camera);
-   * `null` until the buffers are sized.
+   * Light each layer into its own buffer and return both for the two multiply
+   * overlays. Light world positions are projected into content space via
+   * `panLayer`'s transform (so they track the camera). The OBJECT pass shades the
+   * object albedo's silhouette; the GROUND pass suppresses pixels the object
+   * covers (`coverage = groundA × (1 − objA)`) so the object overlay owns those
+   * and nothing double-dims. `null` until the buffers are sized.
    */
-  renderLights(renderer: Renderer, panLayer: Container): Texture | null {
-    const rt = this.lightRT;
-    if (!rt || !this.normalRT || !this.albedoRT) return null;
+  renderLights(renderer: Renderer, panLayer: Container): LayerLight | null {
+    const g = this.ground;
+    const o = this.object;
+    if (!g.normalRT || !g.albedoRT || !g.lightRT) return null;
+    if (!o.normalRT || !o.albedoRT || !o.lightRT) return null;
 
-    // Capture the albedo (no swap) — the light pass samples its alpha as the
-    // coverage mask. panLayer's textures are the albedo here (renderNormals
-    // restored them before this runs).
-    renderer.render({ container: panLayer, target: this.albedoRT, clear: true });
+    // Capture each layer's albedo (the other layer hidden) — the light pass reads
+    // its alpha as coverage. Textures are the albedo here (renderNormals restored
+    // them before this runs).
+    this.renderLayerAlbedo(renderer, panLayer, true, g.albedoRT);
+    this.renderLayerAlbedo(renderer, panLayer, false, o.albedoRT);
 
+    this.packLightUniforms(panLayer); // positions/colours, shared by both passes
+
+    // OBJECT first: coverage = object alpha, no suppression. Then GROUND: suppress
+    // by the object albedo so the ground overlay skips object-covered pixels.
+    this.renderLayerLight(renderer, o, 0, o.albedoRT);
+    this.renderLayerLight(renderer, g, 1, o.albedoRT);
+    return { ground: g.lightRT, object: o.lightRT };
+  }
+
+  /** Render `panLayer`'s albedo for one layer (the other layer hidden) into `rt`. */
+  private renderLayerAlbedo(renderer: Renderer, panLayer: Container, ground: boolean, rt: RenderTexture): void {
+    const hidden: LitSprite[] = [];
+    for (const sp of this.sprites) {
+      if (sp.groundLayer !== ground && sp.renderable) {
+        sp.renderable = false;
+        hidden.push(sp);
+      }
+    }
+    renderer.render({ container: panLayer, target: rt, clear: true });
+    for (const sp of hidden) sp.renderable = true;
+  }
+
+  /** Fill the shared light uniforms (positions in content space, colours) from the
+   *  active lights — done once per frame; both layer passes reuse them. */
+  private packLightUniforms(panLayer: Container): void {
     const lights = this.activeLights();
     const u = this.lightUniforms.uniforms;
     const data = u.uLightData as Float32Array;
@@ -270,12 +314,19 @@ export class DeferredLighting {
     }
     u.uLightCount = count;
     this.lightUniforms.update();
+  }
 
-    this.lightShader.texture = this.normalRT;
-    this.lightShader.resources.uAlbedo = this.albedoRT.source;
-    this.lightShader.resources.uAlbedoSampler = this.albedoRT.source.style;
-    renderer.render({ container: this.lightMesh, target: rt, clear: true });
-    return rt;
+  /** Run the light quad over one layer's normal G-buffer into its light buffer.
+   *  `suppress` (0/1) gates whether `other`'s coverage is subtracted (ground=1). */
+  private renderLayerLight(renderer: Renderer, layer: LayerBuf, suppress: number, other: RenderTexture): void {
+    this.lightUniforms.uniforms.uSuppress = suppress;
+    this.lightUniforms.update();
+    this.lightShader.texture = layer.normalRT!; // sampled as the normal
+    this.lightShader.resources.uAlbedo = layer.albedoRT!.source;
+    this.lightShader.resources.uAlbedoSampler = layer.albedoRT!.source.style;
+    this.lightShader.resources.uOther = other.source;
+    this.lightShader.resources.uOtherSampler = other.source.style;
+    renderer.render({ container: this.lightMesh, target: layer.lightRT!, clear: true });
   }
 
   /**
@@ -322,9 +373,11 @@ export class DeferredLighting {
 
   destroy(): void {
     this.sprites.clear();
-    this.normalRT?.destroy(true);
-    this.lightRT?.destroy(true);
-    this.albedoRT?.destroy(true);
+    for (const layer of [this.ground, this.object]) {
+      layer.normalRT?.destroy(true);
+      layer.albedoRT?.destroy(true);
+      layer.lightRT?.destroy(true);
+    }
     this.emissiveRT?.destroy(true);
     this.lightMesh.destroy();
     this.flatNormal.destroy(true);

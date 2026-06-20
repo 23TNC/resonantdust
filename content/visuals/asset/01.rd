@@ -136,7 +136,9 @@
       "tiles &category set
       "grass_hex &object set
       256 &size set
-      1.08 &fill set                 ; cover overscale: fill the hex cell, clip the inset
+      1.12 &fill set                 ; cover overscale: extend past the hex mask on every
+                                     ; side so the clip always cuts a full hex — at 1.08 the
+                                     ; texture fell a hair short on one edge, revealing black
 
   ::symbols>
     @define>

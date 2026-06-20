@@ -42,15 +42,27 @@ export function lodsDescendingFrom(start: number): LodSize[] {
   return LOD_SIZES.filter(lod => lod <= start).slice().reverse() as LodSize[];
 }
 
-/** Build the fetch URL for a resolved stem at a LOD size + channel:
- *  `/textures/lod/<size>/<stem>.<channel>.png[?v=<hash>]`. The stem may carry a
- *  `?v=<hash>` version suffix (from the `^r2` resolver) — it's split off the path
- *  and re-attached as the query, so the version keys the browser/CDN cache (a
- *  re-mastered object → new hash → new URL → clean bust) while the path stays the
- *  stable R2 object key. An un-versioned stem yields the bare URL, as before. */
-export function channelUrl(stem: string, size: number, channel: Channel): string {
+/** Split a resolved `^r2` stem `<dir>/<variation>?v=<hash>` into its object
+ *  directory (`<cat>.<biome>/<obj>.<faction>`), variation leaf (`<id>.<count>.
+ *  <part>`), and version hash. The version becomes a PATH SEGMENT at the object
+ *  boundary (not a `?v=` query) so a re-mastered object is a DISTINCT R2 object
+ *  key — a clean 404 → gate-regenerate, not a query-string cache-bust that r2.dev
+ *  ignores at the origin. `"0"` for un-versioned content (the manifest always
+ *  emits `&hash`, so this is just a defensive sentinel) — keeps the gate's path
+ *  parse uniform (version is always the segment before the size). */
+export function splitStem(stem: string): { dir: string; variation: string; version: string } {
   const q = stem.indexOf("?");
-  const base = q < 0 ? stem : stem.slice(0, q);
-  const query = q < 0 ? "" : stem.slice(q);
-  return `/textures/lod/${size}/${base}.${channel}.png${query}`;
+  const path = q < 0 ? stem : stem.slice(0, q);
+  const version = (q < 0 ? "" : /(?:^|&)v=([^&]*)/.exec(stem.slice(q + 1))?.[1]) || "0";
+  const slash = path.lastIndexOf("/");
+  return { dir: path.slice(0, slash), variation: path.slice(slash + 1), version };
+}
+
+/** Build the fetch URL for a resolved stem at a LOD size + channel:
+ *  `/textures/lod/<dir>/<version>/<size>/<variation>.<channel>.png`. The version
+ *  sits in the path at the object boundary, above the size, so every per-object /
+ *  per-version cleanup is a single R2 prefix (see {@link splitStem}). */
+export function channelUrl(stem: string, size: number, channel: Channel): string {
+  const { dir, variation, version } = splitStem(stem);
+  return `/textures/lod/${dir}/${version}/${size}/${variation}.${channel}.png`;
 }

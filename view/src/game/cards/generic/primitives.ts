@@ -232,6 +232,9 @@ export class TexPrim extends BasePrim {
       else this.node.setTextures(this.deps.whiteTexture, null);
       this.mode = { kind: "fill" };
     }
+    // Deferred two-layer split: a hex-clipped ground is the GROUND layer; every
+    // other prim (standing art, solid fill) is an OBJECT. See LitSprite.groundLayer.
+    this.node.groundLayer = this.mode.kind === "clippedHex";
     setAnchor(this.node, n);
   }
 
