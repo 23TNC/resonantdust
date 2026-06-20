@@ -1,9 +1,7 @@
 import { Container, Graphics, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import { DeferredLighting, LIT_AMBIENT } from "../lighting/DeferredLighting";
+import { DeferredLighting } from "../lighting/DeferredLighting";
 import { LitSprite } from "../lighting/LitSprite";
-import { G4, G4_AMBIENT } from "../render/g4";
-import { StaticCache } from "../render/StaticCache";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
 import { worldHexRadius, worldHexWidth, worldHexHeight } from "./hex/hexSize";
@@ -179,11 +177,6 @@ export class WorldRenderer extends LayoutNode {
   /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
    *  whole baked ground sorts below the object `sortLayer`. */
   private readonly bakedGroundLayer = new Container();
-  /** G4 (docs/g4_renderer.md), built only under the `?g4` flag: the world-space
-   *  static ground cache (replaces the deferred ground display) + a global ambient
-   *  multiply overlay (Phase 1 stand-in for real lighting). */
-  private readonly g4Static: StaticCache | null = G4 ? new StaticCache(this.tileLayer) : null;
-  private readonly g4Ambient = new Sprite();
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
   /** This viewport's deferred lighting (world-space, scoped here). Owns the
@@ -191,15 +184,11 @@ export class WorldRenderer extends LayoutNode {
    *  later phases. Fed the cursor each pointer move. */
   private readonly deferred = new DeferredLighting();
   private readonly onCursorMove: (e: FederatedPointerEvent) => void;
-  /** Per-layer light buffers, each multiplied over the albedo. `lightOverlay` is
-   *  the GROUND layer (tessellating floors); `objectLightOverlay` is the OBJECT
-   *  layer (standing art/cards). Coverage is disjoint between them, so stacking
-   *  the two multiplies never double-dims a pixel. */
-  private readonly lightOverlay = new Sprite();
-  private readonly objectLightOverlay = new Sprite();
-  /** The emissive accumulation buffer, ADDED over the lit result so glows read
-   *  even where light is ~0. Hidden whenever no on-screen sprite emits. */
-  private readonly emissiveOverlay = new Sprite();
+  /** G4 (docs/g4_renderer.md): a full-viewport multiply that dims the scene to the
+   *  ambient floor. Phase-1 stand-in for the per-chunk lightmap — the static ground
+   *  (per-chunk albedo) and the live objects render at `albedo×ambient`. Replaced by
+   *  the baked lightmap + dynamic-light recompute in Phases 2–3. */
+  private readonly ambientOverlay = new Sprite();
   /** Set when any LOD texture finishes loading; the next `tick` re-resolves
    *  present tiles/cards so substitutes (64px) swap up to the ideal LOD. Many
    *  load events coalesce into one re-resolve per frame. */
@@ -261,20 +250,6 @@ export class WorldRenderer extends LayoutNode {
     this.tileLayer.addChild(this.bakedGroundLayer); // baked per-chunk ground (D1b.1b)
     this.panLayer.addChild(this.tileLayer, this.sortLayer, this.cardLayer, this.selectionGfx);
     this.container.addChild(this.panLayer);
-    // Phase 3: the light buffer, multiplied over the albedo. A sibling of
-    // panLayer (not captured by the normal/albedo passes), in content-local
-    // space — same setup as the (now-removed) phase-2 debug overlay that proved
-    // alignment, but BlendMode multiply so it shades rather than replaces.
-    this.lightOverlay.blendMode = "multiply";
-    this.lightOverlay.visible = false;
-    this.objectLightOverlay.blendMode = "multiply";
-    this.objectLightOverlay.visible = false;
-    this.container.addChild(this.lightOverlay, this.objectLightOverlay);
-    // Emissive ADDED on top of the multiply — `albedo×light + emissive`. Added
-    // after the light overlays so it composites last.
-    this.emissiveOverlay.blendMode = "add";
-    this.emissiveOverlay.visible = false;
-    this.container.addChild(this.emissiveOverlay);
 
     this.deps = {
       lod: gctx.lodTextures,
@@ -286,19 +261,17 @@ export class WorldRenderer extends LayoutNode {
       queue: () => -1,
     };
 
-    // G4 ambient: a full-screen multiply that dims the whole scene to the ambient
-    // floor (Phase-1 stand-in for the lightmap). Composites last (top of container);
-    // only shown under the `?g4` flag. White × ambient-grey = the 0.12 floor.
-    if (G4) {
-      const amb = G4_AMBIENT >= 0 ? G4_AMBIENT : LIT_AMBIENT;
-      const a8 = Math.max(0, Math.min(255, Math.round(amb * 255)));
-      this.g4Ambient.texture = this.deps.whiteTexture;
-      this.g4Ambient.tint = (a8 << 16) | (a8 << 8) | a8;
-      this.g4Ambient.blendMode = "multiply";
-      this.g4Ambient.visible = false;
-      this.g4Ambient.eventMode = "none"; // pure visual — never capture pointer (pan) events
-      this.container.addChild(this.g4Ambient);
-    }
+    // G4 ambient overlay: a full-viewport multiply (white × ambient-grey) over the
+    // whole scene, composited last. eventMode:none so it never captures pan input.
+    // TODO(G4 Phase 2): drop G4_BUILD_AMBIENT → the real floor (0.12) once the static
+    // lightmap lands; the brighter floor only keeps the lightless build visible.
+    const G4_BUILD_AMBIENT = 0.7;
+    const a8 = Math.max(0, Math.min(255, Math.round(G4_BUILD_AMBIENT * 255)));
+    this.ambientOverlay.texture = this.deps.whiteTexture;
+    this.ambientOverlay.tint = (a8 << 16) | (a8 << 8) | a8;
+    this.ambientOverlay.blendMode = "multiply";
+    this.ambientOverlay.eventMode = "none";
+    this.container.addChild(this.ambientOverlay);
 
     // Drive the cursor light: project the screen position straight into
     // `container` (content) space — the space the light buffer + mesh live in,
@@ -679,68 +652,14 @@ export class WorldRenderer extends LayoutNode {
       for (const c of this.cards.values()) c.layer?.refreshTextures();
     }
 
-    // Deferred lighting: render the normal G-buffer (flat-up everywhere except
-    // real-normal art), sum the lights into the light buffer sampling it, then
-    // show that buffer multiplied over the albedo.
+    // G4 (Phase 1): re-bake any ground chunks whose content changed (never on pan
+    // alone) into their per-chunk world-space albedo+normal maps, then dim the whole
+    // viewport to the ambient floor. Real per-cell lighting (lightmap + dynamic
+    // lights) replaces the flat ambient in Phases 2–3.
     const renderer = this.gctx.app.renderer;
-    if (G4 && this.g4Static) {
-      this.renderG4(renderer);
-      return;
-    }
-    // Re-bake any ground chunks whose content changed (never on pan alone), so the
-    // deferred passes below light the baked world-space ground (D1b.1b).
     this.bakeDirtyChunks(renderer);
-    this.deferred.renderNormals(renderer, this.panLayer);
-    const lit = this.deferred.renderLights(renderer, this.panLayer);
-    if (lit) {
-      for (const [overlay, tex] of [
-        [this.lightOverlay, lit.ground],
-        [this.objectLightOverlay, lit.object],
-      ] as const) {
-        overlay.texture = tex;
-        overlay.width = this.width;
-        overlay.height = this.height;
-        overlay.visible = true;
-      }
-    }
-    // Emissive pass (after lights, which captured the albedo) — null when no
-    // on-screen sprite emits, so the additive overlay simply stays hidden.
-    const emis = this.deferred.renderEmissive(renderer, this.panLayer);
-    if (emis) {
-      this.emissiveOverlay.texture = emis;
-      this.emissiveOverlay.width = this.width;
-      this.emissiveOverlay.height = this.height;
-      this.emissiveOverlay.visible = true;
-    } else {
-      this.emissiveOverlay.visible = false;
-    }
-  }
-
-  /** Iterate the detached per-chunk ground containers — the G4 static bake's prim
-   *  source (D1b.1a grouping reused; no separate cell→prim index yet). */
-  private *groundChunkContainers(): Iterable<Container> {
-    for (const e of this.groundChunks.values()) yield e.container;
-  }
-
-  /** G4 render (Phase 1, docs/g4_renderer.md): bake the ground albedo into the static
-   *  world-space cache + display it; dim the whole viewport by the ambient floor.
-   *  Hides the deferred ground display + overlays. Ground renders at `albedo×ambient`
-   *  (matches the un-lit scene); real per-cell lighting lands in Phases 2–3. */
-  private renderG4(renderer: Renderer): void {
-    const tl = this.panLayer.toLocal(new Point(0, 0), this.container);
-    const br = this.panLayer.toLocal(new Point(this.width, this.height), this.container);
-    this.g4Static!.ensureCovers(
-      renderer,
-      { x: tl.x, y: tl.y, w: br.x - tl.x, h: br.y - tl.y },
-      this.groundChunkContainers(),
-    );
-    this.bakedGroundLayer.visible = false;
-    this.lightOverlay.visible = false;
-    this.objectLightOverlay.visible = false;
-    this.emissiveOverlay.visible = false;
-    this.g4Ambient.width = this.width;
-    this.g4Ambient.height = this.height;
-    this.g4Ambient.visible = true;
+    this.ambientOverlay.width = this.width;
+    this.ambientOverlay.height = this.height;
   }
 
   override setBounds(x: number, y: number, width: number, height: number): void {
@@ -890,7 +809,6 @@ export class WorldRenderer extends LayoutNode {
     this.deps.seed = cellHash(spec.q, spec.r);
     node.prims.draw(tilePrims(spec.packed, spec.stock0, spec.stock1, this.deps.seed));
     this.markChunkDirty(node.chunk); // ground content changed → re-bake the chunk
-    this.g4Static?.markDirty(); // G4: ground content changed → re-bake the static cache
     this.animating = true;
   }
 
