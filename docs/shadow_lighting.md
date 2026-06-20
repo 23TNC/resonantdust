@@ -318,25 +318,38 @@ For Phase D (incremental, scalable lighting), we converged on:
     albedo×(ambient+cursor)` — algebraically IDENTICAL to today's single multiply
     pass. So the refactor is verifiable as "looks identical" with NO fixture; a
     bakeable light later just moves a term from the live overlay into the baked term.
-  - **ii-a (verifiable-identical refactor):** chunk display shows
-    `albedo × (ambient + Σbaked)` (baked; starts as just `albedo×ambient` since no
-    bakeable lights yet — a 0.12 sprite tint). Change the GROUND light pass to
-    output `albedo.rgb × Σlive` (live lights only, NO ambient) and composite it
-    ADDITIVELY instead of multiply. `deferredLightShader` already samples `uAlbedo`
-    (for coverage) — multiply `lightSum` by `texture(uAlbedo,vUV).rgb` and keep the
-    `coverage` alpha so it only adds on ground pixels (the `uSuppress` object-cutout
-    still applies). OBJECT overlay is UNCHANGED (stays multiply `ambient + all`).
-    Checkpoint: looks identical to now.
-  - **ii-b (the win + fixture):** per chunk, run the light shader over the chunk's
-    baked normalRT with the BAKED lights in chunk-local coords → `chunkLightRT`;
-    composite `litRT = albedoRT × chunkLightRT`; display sprite shows `litRT`.
-    Re-light a chunk only when a bakeable light overlapping it changes (or content
-    changes) — NOT on pan. Add a temporary static `canBake:true` light (or author a
-    `^light` card) as the fixture. Checkpoint: the static light shows on the ground,
-    the cursor still lights live on top, and panning/idle triggers zero re-light.
-  - Needs: split `DeferredLighting.activeLights()` into `bakedLights()`/`liveLights()`;
-    a per-chunk light pass (reuse `lightMesh`/`lightShader` sized to the chunk, or a
-    second mesh); `chunkLightRT`/`litRT` per chunk in `groundChunks`.
+  - **ii-a (ATTEMPTED 2026-06-20, REVERTED — additive decomposition fights the
+    architecture).** Tried: chunk display tinted `×ambient`, GROUND pass outputs
+    premultiplied `albedo×Σlive` (uPremul shader branch + `renderLayerAlbedo` raw
+    capture via `albedoTexture`+white), ground overlay blend MULTIPLY→ADD, object
+    pass unchanged. Typechecked, but the lit pool rendered visibly BRIGHTER/more
+    saturated than the multiply baseline — a premultiplied-alpha mismatch in how the
+    ADD-blend overlay composites the (premultiplied) light RT. Not worth chasing:
+    the additive split is the wrong shape for a pipeline that derives albedo by
+    CAPTURING the displayed scene (display-vs-capture must diverge, forcing the
+    untint/swap hack, and the ADD composite is premultiply-fragile). All reverted to
+    the D1b.1b-i checkpoint.
+  - **ii (DO THIS INSTEAD — scheme C, keeps MULTIPLY):** the clean fit for this
+    architecture is to replace the light pass's CONSTANT `uAmbient` with a sampled
+    per-pixel BAKED-LIGHT buffer, and keep the existing multiply overlay over RAW
+    albedo (no display tint, no additive, no premultiply pitfalls):
+    1. Per chunk, run the light shader over the chunk's baked normalRT with the
+       BAKED lights (+ambient) in chunk-local coords → `chunkLightRT`. Re-run only
+       when a bakeable light overlapping the chunk changes (or content changes).
+    2. Composite all chunks' `chunkLightRT` into a screen-space ground baked-light
+       buffer (draw per-chunk light sprites positioned in world, same transform as
+       the albedo capture).
+    3. GROUND light pass: `lightSum = sample(bakedLightBuffer) + Σlive` (live = the
+       cursor; NO constant ambient — it's in the baked buffer). Keep MULTIPLY over
+       the raw-albedo ground display. = `albedo×(ambient+Σbaked+Σlive)`, exact, and
+       identical when no bakeable lights exist (buffer = constant ambient).
+    There is no clean "looks-identical" sub-milestone (with no baked lights it's a
+    no-op), so build it whole against a fixture: a temporary static `canBake:true`
+    light (or author a `^light` card). Checkpoint: the static light lights the
+    ground, the cursor still lights live on top, panning/idle triggers zero re-light.
+  - Needs: split `activeLights()` into baked/live; a per-chunk light pass (reuse
+    `lightMesh`/`lightShader` sized to the chunk); `chunkLightRT` per chunk +
+    the screen-space baked-light buffer; the ground pass samples it.
 - **D1b.1c**: fold the object layer into the same bake (or keep per-frame if perf is
   fine — decide at the checkpoint).
 - **D2**: dirty-region queue (K hexes/frame, priority/aging) + the per-tile light index.
