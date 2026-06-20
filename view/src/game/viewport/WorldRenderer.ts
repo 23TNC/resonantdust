@@ -1,6 +1,6 @@
 import { Container, Graphics, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import { DeferredLighting } from "../lighting/DeferredLighting";
+import { DeferredLighting, LIT_AMBIENT, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
 import { LitSprite } from "../lighting/LitSprite";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
@@ -171,7 +171,9 @@ export class WorldRenderer extends LayoutNode {
       dirty: boolean;
       albedoRT: RenderTexture | null;
       normalRT: RenderTexture | null;
-      sprite: LitSprite | null;
+      /** The LIT map (`albedo×(ambient+Σ static lights)`) the display sprite shows. */
+      litRT: RenderTexture | null;
+      sprite: Sprite | null;
     }
   >();
   /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
@@ -184,11 +186,10 @@ export class WorldRenderer extends LayoutNode {
    *  later phases. Fed the cursor each pointer move. */
   private readonly deferred = new DeferredLighting();
   private readonly onCursorMove: (e: FederatedPointerEvent) => void;
-  /** G4 (docs/g4_renderer.md): a full-viewport multiply that dims the scene to the
-   *  ambient floor. Phase-1 stand-in for the per-chunk lightmap — the static ground
-   *  (per-chunk albedo) and the live objects render at `albedo×ambient`. Replaced by
-   *  the baked lightmap + dynamic-light recompute in Phases 2–3. */
-  private readonly ambientOverlay = new Sprite();
+  /** G4 Phase 2 verification fixture: one static (`canBake`) light, placed at the
+   *  view centre on the first frame, so we can see the per-chunk lightmap working
+   *  before `^light` cards exist. Replaced by real authored lights later. */
+  private g4Fixture: Light | null = null;
   /** Set when any LOD texture finishes loading; the next `tick` re-resolves
    *  present tiles/cards so substitutes (64px) swap up to the ideal LOD. Many
    *  load events coalesce into one re-resolve per frame. */
@@ -261,17 +262,11 @@ export class WorldRenderer extends LayoutNode {
       queue: () => -1,
     };
 
-    // G4 ambient overlay: a full-viewport multiply (white × ambient-grey) over the
-    // whole scene, composited last. eventMode:none so it never captures pan input.
-    // TODO(G4 Phase 2): drop G4_BUILD_AMBIENT → the real floor (0.12) once the static
-    // lightmap lands; the brighter floor only keeps the lightless build visible.
-    const G4_BUILD_AMBIENT = 0.7;
-    const a8 = Math.max(0, Math.min(255, Math.round(G4_BUILD_AMBIENT * 255)));
-    this.ambientOverlay.texture = this.deps.whiteTexture;
-    this.ambientOverlay.tint = (a8 << 16) | (a8 << 8) | a8;
-    this.ambientOverlay.blendMode = "multiply";
-    this.ambientOverlay.eventMode = "none";
-    this.container.addChild(this.ambientOverlay);
+    // G4 (Phase 2): the ground bakes its own lit map (with the ambient floor); only
+    // the OBJECT layer is still unlit, so flat-dim it to the ambient floor via a
+    // container tint until per-object lighting lands (Phase 4).
+    const a8 = Math.max(0, Math.min(255, Math.round(LIT_AMBIENT * 255)));
+    this.sortLayer.tint = (a8 << 16) | (a8 << 8) | a8;
 
     // Drive the cursor light: project the screen position straight into
     // `container` (content) space — the space the light buffer + mesh live in,
@@ -328,6 +323,7 @@ export class WorldRenderer extends LayoutNode {
       e.container.destroy({ children: true });
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
+      e.litRT?.destroy(true);
     }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
@@ -652,19 +648,25 @@ export class WorldRenderer extends LayoutNode {
       for (const c of this.cards.values()) c.layer?.refreshTextures();
     }
 
-    // G4 (Phase 1): re-bake any ground chunks whose content changed (never on pan
-    // alone) into their per-chunk world-space albedo+normal maps, then dim the whole
-    // viewport to the ambient floor. Real per-cell lighting (lightmap + dynamic
-    // lights) replaces the flat ambient in Phases 2–3.
+    // G4 (Phase 2): re-bake any ground chunks whose content changed (never on pan
+    // alone) into their per-chunk LIT maps (albedo × ambient + static lights). The
+    // display shows those directly. Objects (sortLayer) aren't lit yet — Phase 4 —
+    // so they're flat-dimmed to the ambient floor for now.
     const renderer = this.gctx.app.renderer;
+    // Phase-2 fixture: once tiles exist, drop one static light at the anchor's world
+    // position (the view centre) and re-bake the chunks with it.
+    if (!this.g4Fixture && this.groundChunks.size > 0) {
+      const a = this.anchor();
+      const c = this.grid.cellToPixel(a.q, a.r);
+      this.g4Fixture = { ...CURSOR_LIGHT, x: c.x, y: c.y, canBake: true, brightness: 2.2, radius: 6 };
+      this.deferred.registerLight(this.g4Fixture);
+      for (const e of this.groundChunks.values()) e.dirty = true; // re-light with it
+    }
     this.bakeDirtyChunks(renderer);
-    this.ambientOverlay.width = this.width;
-    this.ambientOverlay.height = this.height;
   }
 
   override setBounds(x: number, y: number, width: number, height: number): void {
     super.setBounds(x, y, width, height);
-    this.deferred.resize(width, height, this.gctx.app.renderer.resolution);
   }
 
   /** Redraw the selection outline over the selected card's footprint (it pans
@@ -708,7 +710,7 @@ export class WorldRenderer extends LayoutNode {
     if (!entry) {
       const container = new Container();
       container.sortableChildren = true;
-      entry = { container, count: 0, dirty: true, albedoRT: null, normalRT: null, sprite: null };
+      entry = { container, count: 0, dirty: true, albedoRT: null, normalRT: null, litRT: null, sprite: null };
       this.groundChunks.set(chunkKey, entry);
     }
     entry.count++;
@@ -733,6 +735,7 @@ export class WorldRenderer extends LayoutNode {
       entry.container.destroy({ children: true });
       entry.albedoRT?.destroy(true);
       entry.normalRT?.destroy(true);
+        entry.litRT?.destroy(true);
       this.groundChunks.delete(chunkKey);
     } else {
       entry.dirty = true; // a tile left → re-bake the remaining ground
@@ -757,18 +760,23 @@ export class WorldRenderer extends LayoutNode {
       if (!entry.albedoRT || entry.albedoRT.width !== w || entry.albedoRT.height !== h) {
         entry.albedoRT?.destroy(true);
         entry.normalRT?.destroy(true);
+        entry.litRT?.destroy(true);
         entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
         entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
+        entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
       }
       const albedoRT = entry.albedoRT;
       const normalRT = entry.normalRT!;
+      const litRT = entry.litRT!;
+      // Bake albedo + normal from the prims, then light them into the lit map the
+      // display shows: albedo × (ambient + Σ static lights), in chunk-local space.
       this.deferred.bakeGround(renderer, entry.container, albedoRT, normalRT, b.x, b.y);
+      this.deferred.bakeChunkLit(renderer, normalRT, albedoRT, litRT, b.x, b.y);
       if (!entry.sprite) {
-        entry.sprite = new LitSprite(this.deferred, albedoRT);
-        entry.sprite.groundLayer = true;
+        entry.sprite = new Sprite(litRT);
         this.bakedGroundLayer.addChild(entry.sprite);
       }
-      entry.sprite.setTextures(albedoRT, normalRT);
+      entry.sprite.texture = litRT;
       entry.sprite.position.set(b.x, b.y);
     }
   }
@@ -915,6 +923,7 @@ export class WorldRenderer extends LayoutNode {
       e.container.destroy({ children: true });
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
+      e.litRT?.destroy(true);
     }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });

@@ -38,21 +38,20 @@ const deferredLightBitGl = {
   },
   fragment: {
     header: /* glsl */ `
-      uniform sampler2D uAlbedo;                // THIS layer's albedo — for COVERAGE
-      uniform sampler2D uOther;                 // the OTHER layer's albedo (object, for the ground pass)
-      uniform vec4 uLightData[${MAX_LIGHTS}];   // xy content pos, z height, w radius (content px)
+      uniform sampler2D uAlbedo;                // the surface albedo (premultiplied)
+      uniform vec4 uLightData[${MAX_LIGHTS}];   // xy local pos, z height, w radius (px)
       uniform vec4 uLightColor[${MAX_LIGHTS}];  // rgb colour, a brightness
       uniform float uLightCount;
       uniform float uAmbient;
       uniform float uNormalYSign;
-      uniform float uSuppress;                  // 1 = subtract uOther's coverage (ground pass); 0 = off
       in vec2 vContentPos;
     `,
-    // `outColor` is THIS layer's G-buffer normal (textureBit). Light it, then write
-    // the light as the colour and the layer coverage as our alpha. Coverage =
-    // this layer's albedo alpha, minus (on the ground pass) the OTHER layer's
-    // coverage — so the ground multiply overlay leaves pixels an object stands on
-    // untouched (the object overlay shades those), and no pixel is double-dimmed.
+    // G4 per-chunk LIT bake: `outColor` is the chunk's normal G-buffer (textureBit).
+    // Reinterpret it as a normal, sum ambient + every light (Lambert × distance
+    // falloff) at the fragment's chunk-local position, and write the LIT albedo
+    // (`albedo × (ambient + Σ lights)`). The chunk's display sprite shows the result
+    // directly — no overlay. Albedo is premultiplied, so `albedo.rgb × lightSum`
+    // stays premultiplied; alpha is the albedo's coverage.
     main: /* glsl */ `
       vec3 nrm = outColor.rgb * 2.0 - 1.0;
       vec3 N = normalize(vec3(nrm.x, nrm.y * uNormalYSign, nrm.z));
@@ -67,10 +66,8 @@ const deferredLightBitGl = {
         float ndotl = max(dot(N, normalize(toLight)), 0.0);
         lightSum += uLightColor[i].rgb * uLightColor[i].a * ndotl * atten;
       }
-      float thisA = texture(uAlbedo, vUV).a;
-      float otherA = texture(uOther, vUV).a;
-      float coverage = thisA * (1.0 - otherA * uSuppress);
-      outColor = vec4(lightSum, coverage);
+      vec4 alb = texture(uAlbedo, vUV);
+      outColor = vec4(alb.rgb * lightSum, alb.a);
     `,
   },
 };
@@ -112,8 +109,6 @@ export function makeDeferredLightShader(lightUniforms: UniformGroup): DeferredLi
       textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
       uAlbedo: empty.source,
       uAlbedoSampler: empty.source.style,
-      uOther: empty.source,
-      uOtherSampler: empty.source.style,
       lightUniforms,
     },
   });
