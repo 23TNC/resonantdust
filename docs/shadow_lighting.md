@@ -294,10 +294,22 @@ For Phase D (incremental, scalable lighting), we converged on:
   is destroyed on pan-out. Fixed render chunk, independent of the server macro_zone
   (the bake doesn't need it). Verified: looks identical, panning streams tiles with
   no gaps/errors, correct layering. Gives the bake a clean per-zone unit.
-- **D1b.1b**: bake each zone container into a world-space RT (albedo + stored
-  normal), light it zone-locally, composite the lit result by the pan transform;
-  ground leaves the screen-space overlay path. Checkpoint: looks identical + panning
-  triggers zero re-bakes.
+- **D1b.1b-i — bake ground to world-space RTs (albedo + normal). IMPLEMENTED +
+  BROWSER-VERIFIED 2026-06-20 (claude env).** Each per-chunk ground container is now
+  DETACHED (bake source only); on a content change (`dirty`) it bakes into world-space
+  `albedoRT`/`normalRT` (`DeferredLighting.bakeGround`, offset by the chunk's world
+  bounds, normals white-tinted, baked at renderer resolution), displayed by one
+  `LitSprite` per chunk in `bakedGroundLayer`. The SCREEN-SPACE light pass still
+  lights it (the display sprite carries the normal), so ground is now ~1 lit sprite
+  per chunk instead of N per tile. Re-bake fires only on tile build/drop in a chunk —
+  panning over built chunks bakes nothing. Verified: identical render, seamless chunk
+  tiling, clean pan streaming, no console errors. NOTE: the per-tile ground sprites
+  stay in the `deferred` registry (harmless — detached, never drawn); unregister them
+  in a cleanup pass if the per-frame swap cost matters.
+- **D1b.1b-ii**: light each chunk into a baked per-chunk light RT (lights in
+  chunk-local coords), composite `albedo × light` into the display sprite, and drop
+  GROUND from the per-frame screen-space pass entirely — the actual per-frame win.
+  Checkpoint: looks identical + panning/idle triggers zero ground re-light.
 - **D1b.1c**: fold the object layer into the same bake (or keep per-frame if perf is
   fine — decide at the checkpoint).
 - **D2**: dirty-region queue (K hexes/frame, priority/aging) + the per-tile light index.

@@ -1,5 +1,5 @@
-import { Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
-import type { LitSprite } from "./LitSprite";
+import { Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
+import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 
@@ -241,6 +241,51 @@ export class DeferredLighting {
       }
     }
     renderer.render({ container: world, target: rt, clear: true, clearColor: [0.5, 0.5, 1, 1] });
+    for (const sp of hidden) sp.renderable = true;
+    for (const { sp, tint } of restore) {
+      sp.texture = sp.albedoTexture;
+      sp.tint = tint;
+    }
+  }
+
+  /**
+   * Bake one DETACHED ground container (a D1b.1a per-chunk container, not in the
+   * scene) into world-space albedo + normal RTs, offset so the container's world
+   * bounds origin `(offsetX, offsetY)` maps to the RT origin. The chunk's display
+   * `LitSprite` then samples these (D1b.1b), so the ground is lit from a baked
+   * world-space surface instead of re-captured in screen space every frame.
+   *
+   * Albedo = the container exactly as it draws (its own intra-chunk sort order).
+   * Normal = each child `LitSprite`'s normal frame (white-tinted so the albedo
+   * tint can't skew the vector); a child with no normal (the flat `bg`) is hidden
+   * so it falls through to the flat-up clear. Restores textures/tints/visibility.
+   */
+  bakeGround(
+    renderer: Renderer,
+    container: Container,
+    albedoRT: RenderTexture,
+    normalRT: RenderTexture,
+    offsetX: number,
+    offsetY: number,
+  ): void {
+    const transform = new Matrix().translate(-offsetX, -offsetY);
+    renderer.render({ container, target: albedoRT, clear: true, transform });
+    const restore: { sp: LitSprite; tint: number }[] = [];
+    const hidden: LitSprite[] = [];
+    for (const child of container.children) {
+      if (!(child instanceof LitSprite)) continue;
+      if (!child.normalTexture) {
+        if (child.renderable) {
+          child.renderable = false;
+          hidden.push(child);
+        }
+      } else {
+        restore.push({ sp: child, tint: child.tint });
+        child.texture = child.normalTexture;
+        child.tint = 0xffffff;
+      }
+    }
+    renderer.render({ container, target: normalRT, clear: true, clearColor: [0.5, 0.5, 1, 1], transform });
     for (const sp of hidden) sp.renderable = true;
     for (const { sp, tint } of restore) {
       sp.texture = sp.albedoTexture;

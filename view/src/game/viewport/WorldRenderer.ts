@@ -1,6 +1,7 @@
-import { Container, Graphics, Point, Sprite, Text, type FederatedPointerEvent } from "pixi.js";
+import { Container, Graphics, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting } from "../lighting/DeferredLighting";
+import { LitSprite } from "../lighting/LitSprite";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
 import { worldHexRadius, worldHexWidth, worldHexHeight } from "./hex/hexSize";
@@ -156,11 +157,26 @@ export class WorldRenderer extends LayoutNode {
   private readonly tileLayer = new Container();
   private readonly sortLayer = new Container();
   private readonly cardLayer = new Container();
-  /** Per-chunk GROUND containers (D1b.1a): each holds the `bg` + `clippedHex`/fill
-   *  prims of every tile in a `GROUND_CHUNK`² block, parented under `tileLayer` so
-   *  it sorts below objects. Keyed by {@link groundChunkKey}; `count` refcounts the
-   *  tiles in it so an emptied chunk's container is destroyed. The bake unit. */
-  private readonly groundChunks = new Map<string, { node: Container; count: number }>();
+  /** Per-chunk GROUND state (D1b.1a + D1b.1b). `container` holds the `bg` +
+   *  `clippedHex`/fill prims of every tile in a `GROUND_CHUNK`² block, but is
+   *  DETACHED (a bake source, never in the scene). On a content change (`dirty`)
+   *  the container is baked into world-space `albedoRT`/`normalRT`, displayed by a
+   *  single `sprite` (a `LitSprite` in {@link bakedGroundLayer}); panning never
+   *  re-bakes. `count` refcounts the tiles so an emptied chunk frees everything. */
+  private readonly groundChunks = new Map<
+    string,
+    {
+      container: Container;
+      count: number;
+      dirty: boolean;
+      albedoRT: RenderTexture | null;
+      normalRT: RenderTexture | null;
+      sprite: LitSprite | null;
+    }
+  >();
+  /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
+   *  whole baked ground sorts below the object `sortLayer`. */
+  private readonly bakedGroundLayer = new Container();
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
   /** This viewport's deferred lighting (world-space, scoped here). Owns the
@@ -235,6 +251,7 @@ export class WorldRenderer extends LayoutNode {
 
     this.sortLayer.sortableChildren = true;
     this.cardLayer.sortableChildren = true;
+    this.tileLayer.addChild(this.bakedGroundLayer); // baked per-chunk ground (D1b.1b)
     this.panLayer.addChild(this.tileLayer, this.sortLayer, this.cardLayer, this.selectionGfx);
     this.container.addChild(this.panLayer);
     // Phase 3: the light buffer, multiplied over the albedo. A sibling of
@@ -312,7 +329,12 @@ export class WorldRenderer extends LayoutNode {
       t.prims.destroy();
       t.bg.destroy();
     }
-    for (const e of this.groundChunks.values()) e.node.destroy({ children: true });
+    for (const e of this.groundChunks.values()) {
+      e.sprite?.destroy();
+      e.container.destroy({ children: true });
+      e.albedoRT?.destroy(true);
+      e.normalRT?.destroy(true);
+    }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
@@ -640,6 +662,9 @@ export class WorldRenderer extends LayoutNode {
     // real-normal art), sum the lights into the light buffer sampling it, then
     // show that buffer multiplied over the albedo.
     const renderer = this.gctx.app.renderer;
+    // Re-bake any ground chunks whose content changed (never on pan alone), so the
+    // deferred passes below light the baked world-space ground (D1b.1b).
+    this.bakeDirtyChunks(renderer);
     this.deferred.renderNormals(renderer, this.panLayer);
     const lit = this.deferred.renderLights(renderer, this.panLayer);
     if (lit) {
@@ -702,31 +727,78 @@ export class WorldRenderer extends LayoutNode {
     }
   }
 
-  /** Get (creating if needed) the ground container for `chunkKey` and bump its
-   *  tile refcount. New containers sort their children by world-Y (the fills
-   *  overlap ~1px via the hex overscale, so draw order matters) and parent under
-   *  `tileLayer` so the whole chunk sits below the object `sortLayer`. */
+  /** Get (creating if needed) the DETACHED ground container for `chunkKey` and bump
+   *  its tile refcount. The container sorts its children by world-Y (the fills
+   *  overlap ~1px via the hex overscale, so draw order matters) but is never in the
+   *  scene — it's a bake source; {@link bakeDirtyChunks} renders it into the chunk's
+   *  RTs and the display `sprite` shows the result. A new tile dirties the chunk. */
   private acquireGroundChunk(chunkKey: string): Container {
     let entry = this.groundChunks.get(chunkKey);
     if (!entry) {
-      const node = new Container();
-      node.sortableChildren = true;
-      this.tileLayer.addChild(node);
-      entry = { node, count: 0 };
+      const container = new Container();
+      container.sortableChildren = true;
+      entry = { container, count: 0, dirty: true, albedoRT: null, normalRT: null, sprite: null };
       this.groundChunks.set(chunkKey, entry);
     }
     entry.count++;
-    return entry.node;
+    entry.dirty = true;
+    return entry.container;
   }
 
-  /** Drop one tile's hold on its ground chunk; destroy the (now-empty) container
-   *  when the last tile in it leaves. */
+  /** Mark a chunk's baked ground stale (a tile in it built/changed) so the next
+   *  {@link bakeDirtyChunks} re-renders it. No-op if the chunk is already gone. */
+  private markChunkDirty(chunkKey: string): void {
+    const entry = this.groundChunks.get(chunkKey);
+    if (entry) entry.dirty = true;
+  }
+
+  /** Drop one tile's hold on its ground chunk; destroy the container, its RTs and
+   *  its display sprite when the last tile in it leaves. */
   private releaseGroundChunk(chunkKey: string): void {
     const entry = this.groundChunks.get(chunkKey);
     if (!entry) return;
     if (--entry.count <= 0) {
-      entry.node.destroy({ children: true });
+      entry.sprite?.destroy();
+      entry.container.destroy({ children: true });
+      entry.albedoRT?.destroy(true);
+      entry.normalRT?.destroy(true);
       this.groundChunks.delete(chunkKey);
+    } else {
+      entry.dirty = true; // a tile left → re-bake the remaining ground
+    }
+  }
+
+  /** Re-bake every dirty chunk's ground into its world-space RTs and (re)point its
+   *  display `LitSprite` at them. Runs once per render frame BEFORE the deferred
+   *  passes; a chunk is dirty only on a content change (tile build/drop), so panning
+   *  over already-built chunks bakes nothing. RTs are (re)sized to the chunk's world
+   *  content bounds at the renderer resolution; the bake offsets by that origin and
+   *  the sprite is positioned there, so the lit ground lands exactly in world space. */
+  private bakeDirtyChunks(renderer: Renderer): void {
+    const res = renderer.resolution;
+    for (const entry of this.groundChunks.values()) {
+      if (!entry.dirty) continue;
+      entry.dirty = false;
+      if (entry.container.children.length === 0) continue;
+      const b = entry.container.getLocalBounds();
+      const w = Math.max(1, Math.ceil(b.width));
+      const h = Math.max(1, Math.ceil(b.height));
+      if (!entry.albedoRT || entry.albedoRT.width !== w || entry.albedoRT.height !== h) {
+        entry.albedoRT?.destroy(true);
+        entry.normalRT?.destroy(true);
+        entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
+        entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
+      }
+      const albedoRT = entry.albedoRT;
+      const normalRT = entry.normalRT!;
+      this.deferred.bakeGround(renderer, entry.container, albedoRT, normalRT, b.x, b.y);
+      if (!entry.sprite) {
+        entry.sprite = new LitSprite(this.deferred, albedoRT);
+        entry.sprite.groundLayer = true;
+        this.bakedGroundLayer.addChild(entry.sprite);
+      }
+      entry.sprite.setTextures(albedoRT, normalRT);
+      entry.sprite.position.set(b.x, b.y);
     }
   }
 
@@ -765,6 +837,7 @@ export class WorldRenderer extends LayoutNode {
     node.bg.draw(def);
     this.deps.seed = cellHash(spec.q, spec.r);
     node.prims.draw(tilePrims(spec.packed, spec.stock0, spec.stock1, this.deps.seed));
+    this.markChunkDirty(node.chunk); // ground content changed → re-bake the chunk
     this.animating = true;
   }
 
@@ -866,7 +939,12 @@ export class WorldRenderer extends LayoutNode {
       t.prims.destroy();
       t.bg.destroy();
     }
-    for (const e of this.groundChunks.values()) e.node.destroy({ children: true });
+    for (const e of this.groundChunks.values()) {
+      e.sprite?.destroy();
+      e.container.destroy({ children: true });
+      e.albedoRT?.destroy(true);
+      e.normalRT?.destroy(true);
+    }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
