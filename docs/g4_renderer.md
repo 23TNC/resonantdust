@@ -279,13 +279,22 @@ discard shader → movers lit live + discard. New over Phases 1–3: a depth RT 
 screen-depth resolve pass, the discard composite shader.
 
 ### Build cuts (verifiable)
-- **4·A — depth plumbing, ground only (correctness-neutral).** Add the per-chunk `r16float`
-  depth bake (ground sort-Y), the max-blend screen-depth resolve, and swap the chunk display
-  to the depth-tested composite. Ground is coplanar so output must look **identical** to
-  today — this proves the composite machinery doesn't regress anything.
-- **4·B — bake standing objects in.** Move object-prims from the live `sortLayer` into the
-  per-chunk bake (albedo+normal+depth, depth under the alpha cutoff). Drop the
-  `sortLayer.tint` stopgap. Checkpoint: trees are lit + correctly ordered across seams.
+- **4·A — per-chunk depth bake (`r16float`), ground only. LANDED `905654f`,** browser-
+  verified on claude. Correctness-neutral: the depth target is baked but consumed by nothing
+  yet; the only display change is `?depthview` (greyscale sort-Y). Depth source = albedo
+  coverage (exact for coplanar ground; 4B swaps in per-object sort-Y). `?depthview` showed a
+  correct world-Y gradient (dark top → light bottom), `r16float` created with no GL error,
+  and the normal lit path is unchanged without the flag. NB: the max-blend screen resolve +
+  discard composite moved to 4B — they can't be exercised until standing objects actually
+  overlap, so building+verifying them there (where occlusion is visible) is the real test.
+- **4·B — bake standing objects in + the depth-tested composite.** Move object-prims from
+  the live `sortLayer` into the per-chunk bake (albedo+normal+depth); swap the depth source
+  to **per-object sort-Y** (a standing object's pixels all carry its base-Y, not their own
+  Y — the 4A albedo-coverage source would give a tall object a vertical depth gradient,
+  wrongly self-occluding its top). Add the **max-blend screen-depth resolve** + the **discard
+  composite** (chunk colour drawn through a shader that samples screen-depth via `gl_FragCoord`
+  and discards where its own chunk depth is behind). Drop the `sortLayer.tint` stopgap.
+  Checkpoint: trees are lit + correctly ordered across chunk seams.
 - **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
   where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
