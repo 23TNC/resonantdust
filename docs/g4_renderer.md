@@ -355,24 +355,28 @@ screen-depth resolve pass, the discard composite shader.
 - **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
   where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
-## CURRENT STATE — 4B-ii depth value-transport saga (read this first)
+## CURRENT STATE — 4B-ii depth LANDED (read this first)
 
-**Status (commit `a70eae7`, branch 0.7): textures + lighting WORK; per-object depth value
-finally REACHES the depth RT (verified); but the display is still flat — the variation is
-lost downstream, suspected in the resolve Sprite.** This section is the running record of a
-long, hard fight to get a per-primitive depth value through PIXI's shader system.
+**Status (commit `fa7d770`, branch 0.7): per-object depth WORKS — verified live.** The depth is
+a per-chunk **`rgba8`** target keyed on **hex row**: `R = floor(worldY/rowStep) + ROW_BIAS` (128),
+`G = frac × 255` (sub-row). A per-channel `max`-blend is then correct by construction — R resolves
+row-first (souther wins), G tiebreaks only when rows are equal. B+A free (spare u16 for later).
 
 ### Where we are
 - **Working + verified:** texture streaming, the per-chunk albedo/normal/lit bake, static +
-  dynamic (cursor) lighting, the screen-space composite display. The visible scene (ground +
-  lit trees + souls) renders correctly.
-- **Depth value transport — JUST LANDED (`a70eae7`):** each primitive's depth is encoded
-  into its mesh **tint** and decoded in the bake shader. A pixel readback (`renderer.extract`
-  on the chunk depth RT) shows `maxR=255, nonzeroPx=344620/510252` — the value now lands and
-  **varies per primitive**. First time it's worked in the whole saga.
-- **STILL BROKEN:** the on-screen depthview is **flat** (one Y across the screen; pans
-  white↔black). Since the chunk depth RT provably varies, the variation dies **downstream** —
-  between the bake and the screen.
+  dynamic lighting, the screen-space composite, AND per-object depth.
+- **Depth — LANDED (`fa7d770`):** probe `R=60..63` (4 visible rows, biased; rows −68..−65 north
+  of origin — the bias handles negatives, no wrap) · `maxG=217` (sub-row spans) · both vary.
+  Silhouettes render crisp (inventory hex-flower, world terrain, tree shapes); **pan no longer
+  flips white/black** (absolute row-key, not viewport-relative — the original bug); the lit scene
+  composites correctly (discard doesn't over-cull). The narrow grey band in `?depthview` is
+  cosmetic (4 rows compressed into the absolute u16) — the data is correct.
+- **Next:** 4C movers (souls/dragged cards depth-test vs screen depth — "soul walks behind tree").
+
+### How it got here — the value-transport saga (kept for the hard-won findings)
+The long fight was getting a per-primitive value *into* the shader at all (custom attrs/uniforms
+don't bind; only the tint does) and *out* of a float target without colour-mangling (→ `rgba8`).
+The row/sub-row scheme above is the resolution; the findings below are why the obvious paths failed.
 
 ### The pipeline (6 passes, per chunk unless noted) — see the seam
 | # | Pass | Object(s) | Type | Shader | → |
