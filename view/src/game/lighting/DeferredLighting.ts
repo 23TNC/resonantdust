@@ -1,7 +1,7 @@
-import { Container, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
+import { Container, Geometry, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeObjectDepthShader, DEPTH_EMPTY } from "./depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, DEPTH_EMPTY, type ObjectDepthShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor — the lit base every cell starts from (the lightmap's clear
@@ -104,7 +104,7 @@ export class DeferredLighting {
    *  carries its own ObjectDepthShader (a container render uses per-mesh shaders, so
    *  the per-mesh sort-Y uniform rides along). */
   private readonly depthBakeContainer = new Container();
-  private readonly depthQuadPool: Mesh[] = [];
+  private readonly depthQuadPool: Mesh<Geometry, ObjectDepthShader>[] = [];
 
   /** Shared, never-rendered instance for offline/preview renders (drag ghost,
    *  card-face bakes) — they draw plain albedo and never bake. */
@@ -235,23 +235,21 @@ export class DeferredLighting {
       const y0 = child.y - child.anchor.y * h - originY;
       let quad = this.depthQuadPool[i];
       if (!quad) {
-        quad = new Mesh({
-          geometry: new MeshGeometry({
-            positions: new Float32Array(8),
-            uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-            indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
-          }),
-          shader: makeObjectDepthShader(),
-        });
+        quad = new Mesh({ geometry: makeDepthQuadGeometry(), shader: makeObjectDepthShader() });
         quad.blendMode = "max";
         this.depthQuadPool[i] = quad;
       }
-      const pos = quad.geometry.positions;
-      pos[0] = x0; pos[1] = y0; pos[2] = x0 + w; pos[3] = y0; pos[4] = x0 + w; pos[5] = y0 + h; pos[6] = x0; pos[7] = y0 + h;
-      quad.geometry.positions = pos;
-      const sh = quad.shader as ReturnType<typeof makeObjectDepthShader>;
-      sh.texture = child.albedoTexture;
-      sh.sortY = child.y;
+      // aPosition = the primitive's world bounds (RT-local).
+      const pBuf = quad.geometry.attributes.aPosition.buffer;
+      const p = pBuf.data as Float32Array;
+      p[0] = x0; p[1] = y0; p[2] = x0 + w; p[3] = y0; p[4] = x0 + w; p[5] = y0 + h; p[6] = x0; p[7] = y0 + h;
+      pBuf.update();
+      // aSortY = the primitive's base sort-Y, flat across all 4 verts (→ varying).
+      const sBuf = quad.geometry.attributes.aSortY.buffer;
+      const s = sBuf.data as Float32Array;
+      s[0] = child.y; s[1] = child.y; s[2] = child.y; s[3] = child.y;
+      sBuf.update();
+      (quad.shader as ObjectDepthShader).texture = child.albedoTexture;
       this.depthBakeContainer.addChild(quad);
       i++;
     }

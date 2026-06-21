@@ -8,6 +8,9 @@ import {
   Texture,
   Matrix,
   UniformGroup,
+  Geometry,
+  Buffer,
+  BufferUsage,
 } from "pixi.js";
 
 /**
@@ -113,26 +116,32 @@ export function makeDepthBakeShader(): DepthBakeShader {
   });
 }
 
-// ── OBJECT depth: per-object base sort-Y across its silhouette ───────────────
-// A standing object's depth must be its BASE sort-Y (its anchor world-Y) flat
-// across its whole silhouette, so the canopy carries the trunk's key. A batched
-// container render can't do that (it only sees each fragment's own world-Y), so
-// each object is drawn individually: sample its albedo (textureBit → the atlas
-// frame via the sprite's texture matrix), output `uSortY` where opaque, else the
-// empty sentinel. Drawn with `max` blend over the ground coverage depth: opaque
-// pixels max their base-Y in (frontmost wins by value), transparent pixels keep
-// what's behind. Feet-anchored objects sit entirely above their base, so the
-// coverage world-Y there is ≤ base-Y → max yields a clean flat base-Y.
+// ── OBJECT depth: per-primitive base sort-Y across its silhouette ────────────
+// Each primitive (tile or object) writes its BASE sort-Y flat across its silhouette
+// so a tall object's canopy carries its feet's key. The sort-Y travels as a PER-
+// VERTEX ATTRIBUTE → varying (`aSortY` → `vSortY`), NOT a uniform: in this codebase's
+// HighShader setup, custom float uniforms read 0 at draw time while varyings bind
+// (the old coverage pass only "worked" because it used a varying). The threshold and
+// empty sentinel are inlined as GLSL literals for the same reason. `textureBit` gives
+// the albedo silhouette (its alpha); drawn `max`-blended so the frontmost sort-Y wins.
 const objectDepthBitGl = {
   name: "object-depth-bit",
-  fragment: {
+  vertex: {
     header: /* glsl */ `
-      uniform float uSortY;
-      uniform float uThreshold;
-      uniform float uEmpty;
+      in float aSortY;
+      out float vSortY;
     `,
     main: /* glsl */ `
-      outColor = vec4(outColor.a > uThreshold ? uSortY : uEmpty, 0.0, 0.0, 1.0);
+      vSortY = aSortY;
+    `,
+  },
+  fragment: {
+    header: /* glsl */ `
+      in float vSortY;
+    `,
+    // 0.5 = DEPTH_ALPHA_THRESHOLD, -1000000.0 = DEPTH_EMPTY (inlined — see above).
+    main: /* glsl */ `
+      outColor = vec4(outColor.a > 0.5 ? vSortY : -1000000.0, 0.0, 0.0, 1.0);
     `,
   },
 };
@@ -148,8 +157,9 @@ function objectDepthProgram(): GlProgram {
   return objectProgram;
 }
 
-/** Per-object silhouette depth shader. `texture` = the object's albedo (its frame
- *  UVs come from the texture matrix); `sortY` = its base sort-Y constant. */
+/** Per-primitive silhouette depth shader. `texture` = the primitive's albedo (its
+ *  frame UVs come from the texture matrix). Sort-Y is NOT a shader uniform — it's a
+ *  per-vertex `aSortY` attribute on the geometry (see {@link makeDepthQuadGeometry}). */
 export class ObjectDepthShader extends Shader {
   private _texture: Texture = Texture.EMPTY;
   get texture(): Texture {
@@ -162,10 +172,6 @@ export class ObjectDepthShader extends Shader {
     this.resources.textureUniforms.uniforms.uTextureMatrix = value.textureMatrix.mapCoord;
     this.resources.textureUniforms.update();
   }
-  set sortY(y: number) {
-    this.resources.objUniforms.uniforms.uSortY = y;
-    this.resources.objUniforms.update();
-  }
 }
 
 export function makeObjectDepthShader(): ObjectDepthShader {
@@ -176,12 +182,21 @@ export function makeObjectDepthShader(): ObjectDepthShader {
       uTexture: empty.source,
       uSampler: empty.source.style,
       textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
-      objUniforms: new UniformGroup({
-        uSortY: { value: 0, type: "f32" },
-        uThreshold: { value: DEPTH_ALPHA_THRESHOLD, type: "f32" },
-        uEmpty: { value: DEPTH_EMPTY, type: "f32" },
-      }),
     },
+  });
+}
+
+/** Geometry for one depth quad: a unit-quad with `aPosition` (set per primitive to
+ *  its world bounds), `aUV` (fixed), and a custom `aSortY` (all 4 verts = the
+ *  primitive's base sort-Y) carried to the fragment as a varying. */
+export function makeDepthQuadGeometry(): Geometry {
+  return new Geometry({
+    attributes: {
+      aPosition: { buffer: new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
+      aUV: { buffer: new Buffer({ data: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
+      aSortY: { buffer: new Buffer({ data: new Float32Array(4), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32", stride: 4, offset: 0 },
+    },
+    indexBuffer: new Buffer({ data: new Uint32Array([0, 1, 2, 0, 2, 3]), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
   });
 }
 
