@@ -239,11 +239,19 @@ by that one bake-time threshold. (The exact fix — order-independent transparen
 depth lists — is far more than 2D sprites warrant; the threshold is the standard call.)
 
 ### Two stages
-1. **Bake — establish ownership by paint order.** Any static with `alpha > threshold` at a
-   pixel is a candidate to own it; the **frontmost wins**. No explicit sort: bake statics in
-   their existing back-to-front y-order, each writing its sort-Y where it passes the
-   threshold, and the frontmost simply **overwrites** last — the depth sort falls out of
-   paint order, exactly like the albedo bake. One more render target in `bakeGround`.
+1. **Bake — establish ownership, frontmost wins.** Each pixel's depth is the **base sort-Y
+   of the frontmost** static with `alpha > threshold` there. The **mechanism splits by source**
+   (discovered building 4B-ii — a batched container render can't emit a per-object constant,
+   because PIXI pre-transforms sprite verts to world space, so the shader only sees each
+   fragment's own world-Y, and the lone per-sprite channel — tint — can't be a constant
+   output):
+   - **Ground (coplanar):** a single coverage post-pass — `world-Y` where the chunk albedo is
+     opaque (4A). Per-fragment world-Y IS the ground's sort-Y, so one full-quad pass suffices.
+   - **Standing objects:** **per-object silhouette draws** — each object's quad through a
+     depth shader that writes the object's *base* sort-Y (flat across its silhouette, so the
+     canopy carries the trunk's key) where opaque, `discard` elsewhere, drawn in zIndex order
+     so the frontmost overwrites. Bake-time only (amortized), so per-object draws are fine.
+   The "frontmost-by-paint-order" principle holds; it just isn't a single `bakeGround` pass.
 2. **Run — single compare.** The dynamic prim's lit shader samples `static.depth` at the
    fragment's world position, discards where occluded, and lights the survivors live.
 
@@ -382,9 +390,14 @@ drain the dirty-region queue up to the frame budget, by priority+age:
 | **Dynamic light moves** | recompute its disk (sample lightmap + add the few dynamic) |
 | **Dynamic prim moves** | live draw + depth + live light over its footprint |
 | **Transition (start/stop)** | re-bake the disk/footprint into/out of the static cache |
-| **Content edit** | re-bake affected cells from `cell→[prims]` (coalesced) |
+| **Content edit** | re-bake affected cells from `cell→[prims]` (coalesced); object **depth** = one draw per standing object in the chunk (see below) |
 | **Pan** | scroll-copy `static.*` + bake the revealed band |
 | **Overload** | low-priority dynamics go stale (budget), framerate held |
+| **Screen composite (every frame)** | resolve chunk depths (`max`-blend) + composite chunk lits (discard) — bounded by visible-chunk count, NOT object/light count |
+
+Object **depth bake** is per-object draws (the [Depth occlusion](#two-stages) finding), so a
+chunk re-bake costs ∝ its standing-object count — **bake-time only and amortized** (per
+content change), never per frame. The per-frame screen composite is unaffected by it.
 
 Dominant cost is **draw-call / RT-switch overhead**, not fill → **coalesce dirty cells
 into bounding rects**; budget = draw-batches/frame. Nothing is computed viewport-wide; the
