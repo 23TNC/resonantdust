@@ -34,6 +34,13 @@ export const DEPTH_ALPHA_THRESHOLD = 0.5;
  *  mover over empty space is never occluded. */
 export const DEPTH_EMPTY = -1.0e6;
 
+/** The world-Y window the 8-bit tint encodes (`encodeDepthTint` ↔ shader decode).
+ *  Sort-Y outside `[MIN, MIN+SPAN]` clamps (flat). 8 bits over the span = the
+ *  granularity (SPAN/256 px); a span comfortably covering the near-origin play area
+ *  with tile-scale resolution. Widen / make viewport-relative once it's verified. */
+export const DEPTH_TINT_MIN = -4000;
+export const DEPTH_TINT_SPAN = 8000;
+
 // ── depth BAKE: chunk albedo → sort-Y target ─────────────────────────────────
 // 4A placeholder source: coplanar ground's sort-Y IS its world-Y, so derive depth
 // from the already-baked albedo's coverage — a full-quad post-pass writing
@@ -117,31 +124,20 @@ export function makeDepthBakeShader(): DepthBakeShader {
 }
 
 // ── OBJECT depth: per-primitive base sort-Y across its silhouette ────────────
-// Each primitive (tile or object) writes its BASE sort-Y flat across its silhouette
-// so a tall object's canopy carries its feet's key. The sort-Y travels as a PER-
-// VERTEX ATTRIBUTE → varying (`aSortY` → `vSortY`), NOT a uniform: in this codebase's
-// HighShader setup, custom float uniforms read 0 at draw time while varyings bind
-// (the old coverage pass only "worked" because it used a varying). The threshold and
-// empty sentinel are inlined as GLSL literals for the same reason. `textureBit` gives
-// the albedo silhouette (its alpha); drawn `max`-blended so the frontmost sort-Y wins.
+// Carries each primitive's depth via the MESH TINT (`uColor` → `vColor`), the one
+// per-object channel that BINDS here: readbacks proved that compileHighShaderGlProgram
+// drops custom attributes/uniforms AND that a hand-written GlProgram's transform UBO
+// doesn't bind — only built-ins (position, tint, gl_FragCoord) work. Tint is 8-bit per
+// channel, which is the "we don't need precision" range. So we encode the primitive's
+// depth as a grey tint and DECODE it here: `vColor.r` (0..1) → the depth window. The
+// alpha (silhouette) is the sampled albedo; drawn `max`-blended so frontmost wins.
 const objectDepthBitGl = {
   name: "object-depth-bit",
-  vertex: {
-    header: /* glsl */ `
-      in float aSortY;
-      out float vSortY;
-    `,
-    main: /* glsl */ `
-      vSortY = aSortY;
-    `,
-  },
   fragment: {
-    header: /* glsl */ `
-      in float vSortY;
-    `,
-    // 0.5 = DEPTH_ALPHA_THRESHOLD, -1000000.0 = DEPTH_EMPTY (inlined — see above).
+    // outColor = sampled albedo (textureBit). vColor = the per-mesh tint (the encoded
+    // depth). DEPTH_TINT_MIN/SPAN map the 8-bit [0,1] back to a world-Y window.
     main: /* glsl */ `
-      outColor = vec4(outColor.a > 0.5 ? vSortY : -1000000.0, 0.0, 0.0, 1.0);
+      outColor = vec4(outColor.a > 0.5 ? (vColor.r * ${DEPTH_TINT_SPAN.toFixed(1)} + (${DEPTH_TINT_MIN.toFixed(1)})) : -1000000.0, 0.0, 0.0, 1.0);
     `,
   },
 };
@@ -157,9 +153,9 @@ function objectDepthProgram(): GlProgram {
   return objectProgram;
 }
 
-/** Per-primitive silhouette depth shader. `texture` = the primitive's albedo (its
- *  frame UVs come from the texture matrix). Sort-Y is NOT a shader uniform — it's a
- *  per-vertex `aSortY` attribute on the geometry (see {@link makeDepthQuadGeometry}). */
+/** Per-primitive silhouette depth shader. `texture` = the primitive's albedo; the
+ *  depth value is carried by the MESH TINT (set per primitive in the bake), not a
+ *  shader uniform. `setTint(sortY)` encodes a world-Y into the 8-bit grey tint. */
 export class ObjectDepthShader extends Shader {
   private _texture: Texture = Texture.EMPTY;
   get texture(): Texture {
@@ -174,6 +170,13 @@ export class ObjectDepthShader extends Shader {
   }
 }
 
+/** Encode a world-Y into a grey tint int (0xRRGGBB) over the depth window — the
+ *  inverse of the shader's decode. Clamped to [0,1] (out-of-window → flat). */
+export function encodeDepthTint(sortY: number): number {
+  const n = Math.max(0, Math.min(255, Math.round(((sortY - DEPTH_TINT_MIN) / DEPTH_TINT_SPAN) * 255)));
+  return (n << 16) | (n << 8) | n;
+}
+
 export function makeObjectDepthShader(): ObjectDepthShader {
   const empty = Texture.EMPTY;
   return new ObjectDepthShader({
@@ -186,15 +189,13 @@ export function makeObjectDepthShader(): ObjectDepthShader {
   });
 }
 
-/** Geometry for one depth quad: a unit-quad with `aPosition` (set per primitive to
- *  its world bounds), `aUV` (fixed), and a custom `aSortY` (all 4 verts = the
- *  primitive's base sort-Y) carried to the fragment as a varying. */
+/** Geometry for one depth quad. `aPosition` is set per primitive to its world bounds;
+ *  `aUV` is fixed (the texture matrix maps the frame). Depth rides the mesh tint. */
 export function makeDepthQuadGeometry(): Geometry {
   return new Geometry({
     attributes: {
       aPosition: { buffer: new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
       aUV: { buffer: new Buffer({ data: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
-      aSortY: { buffer: new Buffer({ data: new Float32Array(4), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32", stride: 4, offset: 0 },
     },
     indexBuffer: new Buffer({ data: new Uint32Array([0, 1, 2, 0, 2, 3]), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
   });

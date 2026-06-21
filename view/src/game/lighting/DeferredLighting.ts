@@ -1,8 +1,9 @@
 import { Container, Geometry, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeObjectDepthShader, makeDepthQuadGeometry, DEPTH_EMPTY, type ObjectDepthShader } from "./depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, DEPTH_EMPTY, type ObjectDepthShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
+import { debug } from "../../debug";
 
 /** Ambient floor — the lit base every cell starts from (the lightmap's clear
  *  value); a low floor so a light reads as casting rather than just brightening. */
@@ -105,6 +106,8 @@ export class DeferredLighting {
    *  the per-mesh sort-Y uniform rides along). */
   private readonly depthBakeContainer = new Container();
   private readonly depthQuadPool: Mesh<Geometry, ObjectDepthShader>[] = [];
+  /** Dev: one depth-RT pixel readback after the first bake (raw-GlProgram verify). */
+  private depthProbed = false;
 
   /** Shared, never-rendered instance for offline/preview renders (drag ghost,
    *  card-face bakes) — they draw plain albedo and never bake. */
@@ -239,21 +242,33 @@ export class DeferredLighting {
         quad.blendMode = "max";
         this.depthQuadPool[i] = quad;
       }
-      // aPosition = the primitive's world bounds (RT-local).
+      // aPosition = the primitive's world bounds (RT-local). aUV stays the unit quad;
+      // the shader's texture matrix maps it to the atlas frame.
       const pBuf = quad.geometry.attributes.aPosition.buffer;
       const p = pBuf.data as Float32Array;
       p[0] = x0; p[1] = y0; p[2] = x0 + w; p[3] = y0; p[4] = x0 + w; p[5] = y0 + h; p[6] = x0; p[7] = y0 + h;
       pBuf.update();
-      // aSortY = the primitive's base sort-Y, flat across all 4 verts (→ varying).
-      const sBuf = quad.geometry.attributes.aSortY.buffer;
-      const s = sBuf.data as Float32Array;
-      s[0] = child.y; s[1] = child.y; s[2] = child.y; s[3] = child.y;
-      sBuf.update();
+      // Depth rides the mesh TINT (the per-object channel that binds) — base sort-Y.
+      quad.tint = encodeDepthTint(child.y);
       (quad.shader as ObjectDepthShader).texture = child.albedoTexture;
       this.depthBakeContainer.addChild(quad);
       i++;
     }
     renderer.render({ container: this.depthBakeContainer, target: depthRT, clear: true, clearColor: [DEPTH_EMPTY, 0, 0, 1] });
+    if (!this.depthProbed && i > 0) {
+      this.depthProbed = true;
+      try {
+        const px = renderer.extract.pixels(depthRT);
+        let maxR = 0, nonzero = 0;
+        for (let j = 0; j < px.pixels.length; j += 4) {
+          if (px.pixels[j] > maxR) maxR = px.pixels[j];
+          if (px.pixels[j] !== 0) nonzero++;
+        }
+        debug.log(["objects"], `[depthProbe] maxR=${maxR} nonzeroPx=${nonzero}/${px.pixels.length / 4} quads=${i} rt=${px.width}x${px.height}`, 5);
+      } catch (e) {
+        debug.log(["objects"], `[depthProbe] extract threw: ${String(e)}`, 5);
+      }
+    }
   }
 
   /** The cursor's world position + radius, for the chunk-overlap dirty test
