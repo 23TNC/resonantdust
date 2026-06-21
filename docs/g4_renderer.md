@@ -307,7 +307,19 @@ screen-depth resolve pass, the discard composite shader.
   need. Verified: normal mode renders identically (nothing wrongly discarded); `?depthview`
   (composite debug mode) shows the screen-resolved depth bounded exactly to the chunk
   footprint with trees aligned in both viewports, gradient matching 4A (Y-flip correct).
-- **4·B-ii — bake standing objects in (REMAINING).** Move object-prims from the live
+- **4·B-ii — bake standing objects in. LIGHTING done (`d989a60`, verified); object DEPTH
+  BLOCKED.** Object-prims now route into the per-chunk bake → baked + lit (trees lit, tint
+  stopgap dropped, browser-verified). The per-object depth pass (`makeObjectDepthShader` +
+  `bakeChunkObjectDepth`, per-object base sort-Y `max`-blended) is written but **DISABLED** —
+  its `objectDepthMesh` render is a **verified no-op** with no found cause. RULED OUT: vite
+  HMR staleness (clean restart + cleared `.vite`), shader compile/link (no console errors),
+  `blendMode "max"` (no-op with default blend too), `clear:false` (a forced full-RT
+  `clear:true` write also left `depthRT` untouched — the mesh render has *zero* effect, while
+  the identically-built `depthMesh` works). **Next session:** instrument the bake (log object
+  count/dims) or test `objectDepthMesh` in isolation; the `f16` overflow trap (sort-Y must be
+  ≤ 65504) bit an earlier diagnostic. Until depth lands, cross-seam overhang + 4C aren't
+  correct. The OLD plan text below is the original intent:
+  Move object-prims from the live
   `sortLayer` into the per-chunk bake (albedo+normal+depth) and drop the `sortLayer.tint`
   stopgap. **Lighting** is easy (the chunk's lit bake just includes them once routed in —
   PrimitiveLayer's `target` becomes the chunk for objects too). **Depth is the crux:**
