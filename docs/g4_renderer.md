@@ -300,12 +300,28 @@ screen-depth resolve pass, the discard composite shader.
   (composite debug mode) shows the screen-resolved depth bounded exactly to the chunk
   footprint with trees aligned in both viewports, gradient matching 4A (Y-flip correct).
 - **4·B-ii — bake standing objects in (REMAINING).** Move object-prims from the live
-  `sortLayer` into the per-chunk bake (albedo+normal+depth); swap the depth source to
-  **per-object sort-Y** (a standing object's pixels all carry its base-Y, not their own Y —
-  the 4A albedo-coverage source would give a tall object a vertical depth gradient, wrongly
-  self-occluding its top). Drop the `sortLayer.tint` stopgap. This is where the discard
-  composite gets its real test (actual overlap). Checkpoint: trees lit + correctly ordered
-  across chunk seams.
+  `sortLayer` into the per-chunk bake (albedo+normal+depth) and drop the `sortLayer.tint`
+  stopgap. **Lighting** is easy (the chunk's lit bake just includes them once routed in —
+  PrimitiveLayer's `target` becomes the chunk for objects too). **Depth is the crux:**
+  - A standing object's depth must be its **base sort-Y written flat across its whole
+    silhouette** (so the canopy — high on screen — carries the trunk's sort key and occludes
+    correctly). The 4A albedo-coverage source gives each fragment its *own* world-Y → a tall
+    object self-occludes its top.
+  - A **batched container render can't produce per-object constants:** PIXI pre-transforms
+    sprite vertices to world space on the CPU, so the shader only sees each fragment's own
+    world-Y; the one per-sprite channel (tint) can't be emitted as a constant by the default
+    shader. (Confirmed by reading PrimitiveLayer + the batch path.)
+  - **Plan: per-object silhouette draws at bake time** (amortized, so per-sprite draws are
+    fine). Iterate the chunk's object sprites in zIndex order; for each, render its quad
+    (world corners + atlas UVs from `sprite.texture`) through a depth shader that samples the
+    sprite's albedo for the alpha test and writes that sprite's **base sort-Y** (its
+    zIndex-derived world-Y) where opaque, `discard` elsewhere (preserving the ground depth
+    behind). Frontmost overwrites by draw order. Ground keeps the 4A coverage→world-Y source
+    (correct, coplanar); objects use this per-object pass on top. The fiddly part is
+    reconstructing each sprite's world quad + atlas UVs + anchor — do it with in-browser
+    iteration. This is where the discard composite finally gets actual overlap to test.
+  - Checkpoint: trees lit + correctly ordered across chunk seams (and the per-object depth
+    sets up 4C's soul-behind-tree).
 - **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
   where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
