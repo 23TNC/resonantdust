@@ -116,12 +116,16 @@ export function makeObjectDepthShader(): ObjectDepthShader {
 }
 
 /** Geometry for one depth quad. `aPosition` is set per primitive to its world bounds;
- *  `aUV` is fixed (the texture matrix maps the frame). Depth rides the mesh tint. */
+ *  `aUV` is fixed (the texture matrix maps the frame). Depth rides the mesh tint.
+ *  The V is flipped (top verts → V=1) because this quad samples the object's ATLAS
+ *  FRAME directly, whereas the lit pass samples a RenderTexture (PIXI stores those
+ *  Y-flipped) — without this, every silhouette bakes upside-down and the discard cuts
+ *  inverted-object holes (asymmetric prims like pines reveal it; symmetric hexes hide it). */
 export function makeDepthQuadGeometry(): Geometry {
   return new Geometry({
     attributes: {
       aPosition: { buffer: new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
-      aUV: { buffer: new Buffer({ data: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
+      aUV: { buffer: new Buffer({ data: new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
     },
     indexBuffer: new Buffer({ data: new Uint32Array([0, 1, 2, 0, 2, 3]), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
   });
