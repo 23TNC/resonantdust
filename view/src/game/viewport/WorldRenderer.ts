@@ -47,6 +47,11 @@ function groundChunkKey(q: number, r: number): string {
   return `${Math.floor(q / GROUND_CHUNK)},${Math.floor(r / GROUND_CHUNK)}`;
 }
 
+/** Dev: `?depthview` shows each chunk's baked sort-Y depth (greyscale, top-dark to
+ *  bottom-light, panning continuously) instead of its lit colour — to eyeball the
+ *  Phase-4 depth bake before any consumer (the composite/movers) exists. */
+const DEPTHVIEW = typeof location !== "undefined" && location.search.includes("depthview");
+
 /** zIndex of a tile's `bg` underlay within its ground chunk — below every fill
  *  prim (which `PrimitiveLayer` floors at ≈ −1e7 + worldY), so the textured
  *  clippedHex ground always draws over the flat tint. */
@@ -177,6 +182,9 @@ export class WorldRenderer extends LayoutNode {
       normalRT: RenderTexture | null;
       /** The LIT map (`albedo×(ambient+Σ lights)`) the display sprite shows. */
       litRT: RenderTexture | null;
+      /** Per-chunk SORT-Y depth (`r16float`, Phase 4) — world-Y where the ground is
+       *  opaque, else the empty sentinel. Resolved across chunks for occlusion. */
+      depthRT: RenderTexture | null;
       sprite: Sprite | null;
       /** Chunk world origin (its baked bounds' top-left) — for re-light + the
        *  cursor-disk overlap test. */
@@ -337,6 +345,7 @@ export class WorldRenderer extends LayoutNode {
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
       e.litRT?.destroy(true);
+      e.depthRT?.destroy(true);
     }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
@@ -726,7 +735,7 @@ export class WorldRenderer extends LayoutNode {
       container.sortableChildren = true;
       entry = {
         container, count: 0, dirty: true, lightDirty: false,
-        albedoRT: null, normalRT: null, litRT: null, sprite: null, originX: 0, originY: 0,
+        albedoRT: null, normalRT: null, litRT: null, depthRT: null, sprite: null, originX: 0, originY: 0,
       };
       this.groundChunks.set(chunkKey, entry);
     }
@@ -752,7 +761,8 @@ export class WorldRenderer extends LayoutNode {
       entry.container.destroy({ children: true });
       entry.albedoRT?.destroy(true);
       entry.normalRT?.destroy(true);
-        entry.litRT?.destroy(true);
+      entry.litRT?.destroy(true);
+      entry.depthRT?.destroy(true);
       this.groundChunks.delete(chunkKey);
     } else {
       entry.dirty = true; // a tile left → re-bake the remaining ground
@@ -783,19 +793,33 @@ export class WorldRenderer extends LayoutNode {
           entry.albedoRT?.destroy(true);
           entry.normalRT?.destroy(true);
           entry.litRT?.destroy(true);
+          entry.depthRT?.destroy(true);
           entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
           entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
           entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
+          // Single-channel float so sort-Y is exact (no 8-bit coarseness) and the
+          // cross-chunk `max`-blend resolve operates on one value, not packed bytes.
+          entry.depthRT = RenderTexture.create({ width: w, height: h, resolution: res, format: "r16float" });
         }
         entry.originX = b.x;
         entry.originY = b.y;
         this.deferred.bakeGround(renderer, entry.container, entry.albedoRT, entry.normalRT!, b.x, b.y);
+        // Sort-Y depth follows the albedo (its coverage is the silhouette). Only on a
+        // geometry re-bake — a light change (lightDirty) leaves depth untouched.
+        this.deferred.bakeChunkDepth(renderer, entry.albedoRT, entry.depthRT!, entry.originY);
       }
       // Re-light (always when dirty; on lightDirty without a geometry re-bake). The
       // albedo + normal are cached, so a light change is just the light pass.
       this.deferred.bakeChunkLit(
         renderer, entry.normalRT!, entry.albedoRT!, entry.litRT!, entry.originX, entry.originY,
       );
+      if (DEPTHVIEW) {
+        // Dev: replace the lit colour with the normalized sort-Y over the viewport's
+        // world-Y window, so the ground sprite shows the depth gradient.
+        const top = this.panLayer.toLocal(new Point(0, 0)).y;
+        const bottom = this.panLayer.toLocal(new Point(0, this.height)).y;
+        this.deferred.bakeChunkDepthView(renderer, entry.depthRT!, entry.litRT!, top, bottom);
+      }
       if (!entry.sprite) {
         entry.sprite = new Sprite(entry.litRT!);
         this.bakedGroundLayer.addChild(entry.sprite);
@@ -984,6 +1008,7 @@ export class WorldRenderer extends LayoutNode {
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
       e.litRT?.destroy(true);
+      e.depthRT?.destroy(true);
     }
     this.groundChunks.clear();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
