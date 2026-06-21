@@ -113,6 +113,78 @@ export function makeDepthBakeShader(): DepthBakeShader {
   });
 }
 
+// ── OBJECT depth: per-object base sort-Y across its silhouette ───────────────
+// A standing object's depth must be its BASE sort-Y (its anchor world-Y) flat
+// across its whole silhouette, so the canopy carries the trunk's key. A batched
+// container render can't do that (it only sees each fragment's own world-Y), so
+// each object is drawn individually: sample its albedo (textureBit → the atlas
+// frame via the sprite's texture matrix), output `uSortY` where opaque, else the
+// empty sentinel. Drawn with `max` blend over the ground coverage depth: opaque
+// pixels max their base-Y in (frontmost wins by value), transparent pixels keep
+// what's behind. Feet-anchored objects sit entirely above their base, so the
+// coverage world-Y there is ≤ base-Y → max yields a clean flat base-Y.
+const objectDepthBitGl = {
+  name: "object-depth-bit",
+  fragment: {
+    header: /* glsl */ `
+      uniform float uSortY;
+      uniform float uThreshold;
+      uniform float uEmpty;
+    `,
+    main: /* glsl */ `
+      outColor = vec4(outColor.a > uThreshold ? uSortY : uEmpty, 0.0, 0.0, 1.0);
+    `,
+  },
+};
+
+let objectProgram: GlProgram | null = null;
+function objectDepthProgram(): GlProgram {
+  if (!objectProgram) {
+    objectProgram = compileHighShaderGlProgram({
+      name: "object-depth",
+      bits: [localUniformBitGl, textureBitGl, objectDepthBitGl, roundPixelsBitGl],
+    });
+  }
+  return objectProgram;
+}
+
+/** Per-object silhouette depth shader. `texture` = the object's albedo (its frame
+ *  UVs come from the texture matrix); `sortY` = its base sort-Y constant. */
+export class ObjectDepthShader extends Shader {
+  private _texture: Texture = Texture.EMPTY;
+  get texture(): Texture {
+    return this._texture;
+  }
+  set texture(value: Texture) {
+    this._texture = value;
+    this.resources.uTexture = value.source;
+    this.resources.uSampler = value.source.style;
+    this.resources.textureUniforms.uniforms.uTextureMatrix = value.textureMatrix.mapCoord;
+    this.resources.textureUniforms.update();
+  }
+  set sortY(y: number) {
+    this.resources.objUniforms.uniforms.uSortY = y;
+    this.resources.objUniforms.update();
+  }
+}
+
+export function makeObjectDepthShader(): ObjectDepthShader {
+  const empty = Texture.EMPTY;
+  return new ObjectDepthShader({
+    glProgram: objectDepthProgram(),
+    resources: {
+      uTexture: empty.source,
+      uSampler: empty.source.style,
+      textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
+      objUniforms: new UniformGroup({
+        uSortY: { value: 0, type: "f32" },
+        uThreshold: { value: DEPTH_ALPHA_THRESHOLD, type: "f32" },
+        uEmpty: { value: DEPTH_EMPTY, type: "f32" },
+      }),
+    },
+  });
+}
+
 // ── COMPOSITE: display a chunk's lit colour, occluded by the screen depth ─────
 // One per chunk (binds its own lit + depth). `uTexture` = the chunk's lit colour
 // (sampled into outColor at vUV); `uOwnDepth` = the chunk's sort-Y at vUV;

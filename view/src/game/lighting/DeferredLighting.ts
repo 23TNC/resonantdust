@@ -1,7 +1,7 @@
 import { Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeDepthBakeShader } from "./depthShaders";
+import { makeDepthBakeShader, makeObjectDepthShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor — the lit base every cell starts from (the lightmap's clear
@@ -106,6 +106,17 @@ export class DeferredLighting {
       indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
     }),
     shader: this.depthShader,
+  });
+  /** Object depth (Phase 4B-ii): per-object base sort-Y, drawn `max`-blended over
+   *  the ground coverage depth. Reused for every object in a chunk. */
+  private readonly objectDepthShader = makeObjectDepthShader();
+  private readonly objectDepthMesh = new Mesh({
+    geometry: new MeshGeometry({
+      positions: new Float32Array(8),
+      uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+      indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+    }),
+    shader: this.objectDepthShader,
   });
 
   /** Shared, never-rendered instance for offline/preview renders (drag ghost,
@@ -235,6 +246,33 @@ export class DeferredLighting {
     renderer.render({ container: this.depthMesh, target: depthRT, clear: true, clearColor: [0, 0, 0, 0] });
   }
 
+  /**
+   * Overlay per-object base sort-Y onto a chunk's depth (after {@link bakeChunkDepth}).
+   * Each OBJECT sprite (`!groundLayer`) in the chunk container is drawn individually —
+   * its world quad (offset by the chunk origin), its albedo for the silhouette, its
+   * base world-Y as the constant — `max`-blended into `depthRT`. Frontmost base-Y wins
+   * by value; feet-anchored objects (above their base) yield a flat base-Y over the
+   * ground coverage. No clear — this composes onto the ground depth already there.
+   */
+  bakeChunkObjectDepth(renderer: Renderer, container: Container, depthRT: RenderTexture, originX: number, originY: number): void {
+    this.objectDepthMesh.blendMode = "max";
+    const pos = this.objectDepthMesh.geometry.positions;
+    for (const child of container.children) {
+      if (!(child instanceof LitSprite) || child.groundLayer) continue;
+      const w = child.width;
+      const h = child.height;
+      const x0 = child.x - child.anchor.x * w - originX;
+      const y0 = child.y - child.anchor.y * h - originY;
+      const x1 = x0 + w;
+      const y1 = y0 + h;
+      pos[0] = x0; pos[1] = y0; pos[2] = x1; pos[3] = y0; pos[4] = x1; pos[5] = y1; pos[6] = x0; pos[7] = y1;
+      this.objectDepthMesh.geometry.positions = pos;
+      this.objectDepthShader.texture = child.albedoTexture;
+      this.objectDepthShader.sortY = child.y;
+      renderer.render({ container: this.objectDepthMesh, target: depthRT, clear: false });
+    }
+  }
+
   /** The cursor's world position + radius, for the chunk-overlap dirty test
    *  (which chunks the live cursor light touches). Null when the cursor is off. */
   cursorDisk(): { x: number; y: number; r: number } | null {
@@ -277,6 +315,7 @@ export class DeferredLighting {
     this.sprites.clear();
     this.lightMesh.destroy();
     this.depthMesh.destroy();
+    this.objectDepthMesh.destroy();
     this.flatNormal.destroy(true);
   }
 }

@@ -1,6 +1,6 @@
 import { Container, Graphics, Mesh, MeshGeometry, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import { DeferredLighting, LIT_AMBIENT, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
+import { DeferredLighting, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
 import { makeDepthCompositeShader, type DepthCompositeShader, DEPTH_EMPTY } from "../lighting/depthShaders";
 import { LitSprite } from "../lighting/LitSprite";
 import { LayoutNode } from "../layout/LayoutNode";
@@ -303,12 +303,6 @@ export class WorldRenderer extends LayoutNode {
       progress: () => -1,
       queue: () => -1,
     };
-
-    // G4 (Phase 2): the ground bakes its own lit map (with the ambient floor); only
-    // the OBJECT layer is still unlit, so flat-dim it to the ambient floor via a
-    // container tint until per-object lighting lands (Phase 4).
-    const a8 = Math.max(0, Math.min(255, Math.round(LIT_AMBIENT * 255)));
-    this.sortLayer.tint = (a8 << 16) | (a8 << 8) | a8;
 
     // Drive the cursor light: project the screen position straight into
     // `container` (content) space — the space the light buffer + mesh live in,
@@ -829,9 +823,15 @@ export class WorldRenderer extends LayoutNode {
         entry.originX = b.x;
         entry.originY = b.y;
         this.deferred.bakeGround(renderer, entry.container, entry.albedoRT, entry.normalRT!, b.x, b.y);
-        // Sort-Y depth follows the albedo (its coverage is the silhouette). Only on a
-        // geometry re-bake — a light change (lightDirty) leaves depth untouched.
+        // Sort-Y depth: ground coverage (per-fragment world-Y). Only on a geometry
+        // re-bake — lightDirty leaves depth untouched.
         this.deferred.bakeChunkDepth(renderer, entry.albedoRT, entry.depthRT!, entry.originY);
+        // TODO(4B-ii): per-object base sort-Y on top. DISABLED — the objectDepthMesh
+        // render is a verified no-op (not HMR/shader-compile/blendMode/clear; even a
+        // forced full-RT clear:true write leaves depthRT untouched). Objects are baked
+        // + lit, but their depth is ground-coverage only until this is root-caused, so
+        // cross-seam tree overhang + 4C soul-behind-tree depth aren't correct yet.
+        // this.deferred.bakeChunkObjectDepth(renderer, entry.container, entry.depthRT!, entry.originX, entry.originY);
       }
       // Re-light (always when dirty; on lightDirty without a geometry re-bake). The
       // albedo + normal are cached, so a light change is just the light pass.
@@ -973,7 +973,9 @@ export class WorldRenderer extends LayoutNode {
       const prims = new PrimitiveLayer(
         cardBox(hexW, hexH, { x: cornerX, y: cornerY }),
         this.deps,
-        { target: this.sortLayer, groundTarget: ground },
+        // G4 4B-ii: object prims bake into the chunk too (lit + depth), not the live
+        // sortLayer — both targets are the chunk container now.
+        { target: ground, groundTarget: ground },
       );
       node = { chunk, bg, prims, sig: spec.sig };
       this.tiles.set(key, node);
