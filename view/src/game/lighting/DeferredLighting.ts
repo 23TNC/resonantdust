@@ -1,7 +1,7 @@
 import { Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeDepthBakeShader, makeDepthViewShader } from "./depthShaders";
+import { makeDepthBakeShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor — the lit base every cell starts from (the lightmap's clear
@@ -107,9 +107,6 @@ export class DeferredLighting {
     }),
     shader: this.depthShader,
   });
-  /** Dev `?depthview` only — normalize a depth RT to greyscale into the lit RT. */
-  private depthViewShader: ReturnType<typeof makeDepthViewShader> | null = null;
-  private depthViewMesh: Mesh | null = null;
 
   /** Shared, never-rendered instance for offline/preview renders (drag ghost,
    *  card-face bakes) — they draw plain albedo and never bake. */
@@ -238,36 +235,6 @@ export class DeferredLighting {
     renderer.render({ container: this.depthMesh, target: depthRT, clear: true, clearColor: [0, 0, 0, 0] });
   }
 
-  /** Dev `?depthview`: overwrite `litRT` with the normalized greyscale of `depthRT`
-   *  (world-Y window `[min,max]` → black→white), so the existing ground sprite shows
-   *  the sort-Y instead of the lit colour. Lazily builds its mesh. */
-  bakeChunkDepthView(
-    renderer: Renderer, depthRT: RenderTexture, litRT: RenderTexture, min: number, max: number,
-  ): void {
-    if (!this.depthViewShader) {
-      this.depthViewShader = makeDepthViewShader();
-      this.depthViewMesh = new Mesh({
-        geometry: new MeshGeometry({
-          positions: new Float32Array(8),
-          uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-          indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
-        }),
-        shader: this.depthViewShader,
-      });
-    }
-    const w = litRT.width;
-    const h = litRT.height;
-    const pos = this.depthViewMesh!.geometry.positions;
-    pos[0] = 0; pos[1] = 0;
-    pos[2] = w; pos[3] = 0;
-    pos[4] = w; pos[5] = h;
-    pos[6] = 0; pos[7] = h;
-    this.depthViewMesh!.geometry.positions = pos;
-    this.depthViewShader.texture = depthRT;
-    this.depthViewShader.setRange(min, max);
-    renderer.render({ container: this.depthViewMesh!, target: litRT, clear: true });
-  }
-
   /** The cursor's world position + radius, for the chunk-overlap dirty test
    *  (which chunks the live cursor light touches). Null when the cursor is off. */
   cursorDisk(): { x: number; y: number; r: number } | null {
@@ -310,7 +277,6 @@ export class DeferredLighting {
     this.sprites.clear();
     this.lightMesh.destroy();
     this.depthMesh.destroy();
-    this.depthViewMesh?.destroy();
     this.flatNormal.destroy(true);
   }
 }
