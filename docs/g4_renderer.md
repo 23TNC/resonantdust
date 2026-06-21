@@ -355,6 +355,82 @@ screen-depth resolve pass, the discard composite shader.
 - **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
   where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
+## CURRENT STATE — 4B-ii depth value-transport saga (read this first)
+
+**Status (commit `a70eae7`, branch 0.7): textures + lighting WORK; per-object depth value
+finally REACHES the depth RT (verified); but the display is still flat — the variation is
+lost downstream, suspected in the resolve Sprite.** This section is the running record of a
+long, hard fight to get a per-primitive depth value through PIXI's shader system.
+
+### Where we are
+- **Working + verified:** texture streaming, the per-chunk albedo/normal/lit bake, static +
+  dynamic (cursor) lighting, the screen-space composite display. The visible scene (ground +
+  lit trees + souls) renders correctly.
+- **Depth value transport — JUST LANDED (`a70eae7`):** each primitive's depth is encoded
+  into its mesh **tint** and decoded in the bake shader. A pixel readback (`renderer.extract`
+  on the chunk depth RT) shows `maxR=255, nonzeroPx=344620/510252` — the value now lands and
+  **varies per primitive**. First time it's worked in the whole saga.
+- **STILL BROKEN:** the on-screen depthview is **flat** (one Y across the screen; pans
+  white↔black). Since the chunk depth RT provably varies, the variation dies **downstream** —
+  between the bake and the screen.
+
+### The pipeline (6 passes, per chunk unless noted) — see the seam
+| # | Pass | Object(s) | Type | Shader | → |
+|---|---|---|---|---|---|
+| 1 | albedo+normal bake | real tile/tree `LitSprite`s | Sprites | default | `albedoRT`,`normalRT` |
+| 2 | lit bake | 1 shared `lightMesh` | Mesh | `deferredLightShader` ✅ | `litRT` |
+| 3 | **depth bake** | N quads, 1/primitive (`depthQuadPool`) | **Meshes** | `ObjectDepthShader` | `depthRT` ✅ varies |
+| 4 | **resolve** | 1 `depthSprite`/chunk (`depthLayer`) | **Sprite** ⚠ | default, max-blend | `screenDepthRT` |
+| 5 | composite | 1 `display`/chunk (`compositeLayer`) | Mesh | `DepthCompositeShader` | `litScreenRT` |
+| 6 | display | 1 `groundSprite` | Sprite | default | screen |
+
+The depth value flows **Mesh(3) → Sprite(4) → Mesh(5)**. Pass 4 copies an `r16float` *data*
+texture through a plain **Sprite**, which applies *color* semantics (premultiplied-alpha ×
+tint) to raw numbers. **Prime suspect for flattening the value.** Principle: depth is DATA,
+not colour — it should travel through Meshes the whole way; the only legit Sprite is the
+final `groundSprite` (pass 6), where it genuinely is colour.
+
+### What we tried, and the hard findings (don't re-tread these)
+Per-primitive sort-Y could NOT be delivered through the obvious channels. Proven by pixel
+readback (NOT screenshots — those were lossy and produced several wrong conclusions):
+1. **High-shader (`compileHighShaderGlProgram`) drops custom attributes AND uniforms** — a
+   custom `uSortY` uniform and a custom `aSortY` attribute both read **0** at draw time
+   (PIXI even warns "aSortY not present in the shader"). Built-ins (`position`, `gl_FragCoord`,
+   tint) bind. Confirmed: `position.y` → `maxR=255`; `aSortY` → `maxR=0`.
+2. **A raw `GlProgram` doesn't rasterize** — its transform relies on PIXI's global-uniform
+   UBO, which doesn't auto-bind to a hand-written program → `gl_Position` collapses to origin
+   → `gl_FragCoord` test = **0 fragments**.
+3. **A second `renderer.render()` into one depth RT in a single bake silently no-ops** — found
+   by bisection (the known-working `depthMesh`, rendered a 2nd time, also drew nothing). This
+   is why the original two-pass (coverage + per-object loop) failed and why everything must be
+   **one container render**.
+4. **The mesh TINT binds** (it's how Sprites tint) and is the per-object channel that finally
+   carried the value — at 8 bits, which is fine ("don't need precision").
+Also burned: the `f16` overflow trap (a `99999` diagnostic > 65504 → Inf); the
+`0`-reads-as-mid-grey trap (negative world-Y clamps to 0 in an RGBA8 readback, masking
+whether a value was written); and a very long, expensive `?depthview` screenshot loop
+(login needs ~5 clicks/cycle) before switching to readbacks.
+
+### Storage / range decision (from the user)
+Keep `r16float` (save memory; "don't need precision"). Depth is **viewport-relative** so values
+stay small. Currently the tint maps a FIXED window `[DEPTH_TINT_MIN, +SPAN]` (±4000) — fine near
+origin; make it follow the viewport before far exploration. The occlusion *comparison* is
+reference-invariant (the offset cancels), so absolute-vs-relative only matters for range +
+the display normalize.
+
+### THE PLAN (next steps, in order)
+1. **Convert the resolve (pass 4) from a Sprite to a Mesh** with a trivial pass-through shader
+   (sample `depthRT.r` → write it, no premultiply, no tint). Re-read `screenDepthRT` after the
+   resolve — confirm the per-object variation survives. This directly tests the seam.
+2. **Get the depthview reading a clean gradient** (north-dark / south-light, pan-stable). The
+   value is world-Y; the normalize window is viewport world-Y — once the resolve preserves the
+   value, a fixed-screen gradient should appear.
+3. **Make the tint window viewport-relative** so depth works away from the origin.
+4. **Then 4C** — movers (souls/dragged cards) sample `screenDepth` and discard where behind.
+5. **Simplification pass** — 6 passes / 4 object types for "ground with depth" is a lot; once
+   correct, consider merging resolve+composite, or carrying depth alongside the lit bake, and
+   purge every Sprite hop from the depth-data path.
+
 ## Transitions (cold↔hot) — cost scales with churn, not the pool
 
 "May move" is free; only what's *actually moving now* costs.
