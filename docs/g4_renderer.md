@@ -196,6 +196,62 @@ A cell can be covered by **> `MAX_LIGHTS`** static lights; the **lightmap bake**
 light's disk re-bake) then accumulates in batches (sum 16, add the next 16…). Bake-time
 cost only, never per-frame.
 
+## Depth occlusion (Phase 4 design — resolved)
+
+Dynamic-vs-static occlusion ("a soul walks behind a tree") via a **per-pixel sort-Y depth
+channel baked into the chunk G-buffer.** Settled in design (2026-06-20); this section is
+the spec for Phase 4. Chosen *because we bake a ton of static objects* — flattening them
+into the chunk texture destroys the per-object y-sort within a chunk, so a live prim drawn
+on top would sit in front of *every* baked object in its chunk. The depth channel recovers
+that lost ordering without re-sorting the static set per frame.
+
+### It's a sort-Y buffer, not true 3D depth
+`static.depth` stores, per pixel, the **sort key of the frontmost static prim covering it**
+(our painter key = the prim's anchor/base-Y). A dynamic prim carries its own single sort-Y.
+Runtime test per fragment: **`draw if dynamic.sortY >= static.depth[pixel]`, else discard.**
+A soul south of (in front of) a tree draws over it; north of it, its overlapping fragments
+are clipped to the tree silhouette. Per-pixel ⇒ a prim straddling two statics at different
+depths resolves correctly with no extra work, and the static set is **never sorted at
+runtime** — that ordering is already encoded in the texture.
+
+### The discard is binary; surviving fragments still blend
+Where the prim is in front, it alpha-blends over the background normally — **soft edges
+intact**. The only hard edge is *at the occlusion seam* against the static silhouette. So
+soft-alpha only matters at the seam, not on the prim's free edges.
+
+### Root constraint: one depth buffer can't represent partial occlusion
+At a blended edge there is **one** pixel whose **color** is a weighted mix (`0.3·tree +
+0.7·tile` — correct, blending is fine for color) but whose **depth must be a single value**
+— one pixel, one owner. The buffer physically can't store "30% at the tree's depth, 70% at
+the tile's." Color compositing is "both, weighted"; depth is "exactly one." Wherever a soft
+edge overlaps something behind it, the two models disagree. If the soft tree fringe writes
+the *tree's* depth, those mostly-tile pixels claim the tree's front depth → a soul passing
+between tile-depth and tree-depth gets occluded there as if a solid tree were present, while
+the pixel is 70% tile-colored → a **false-occlusion halo** around the canopy.
+
+### Resolution: hard silhouette via an alpha-threshold depth write
+The tree claims depth **only where it's opaque enough to be the visual owner**: write
+`static.depth` only where `alpha > threshold` (≈0.5, tuned by eye against a real tree).
+Soft fringe doesn't write tree-depth, so it falls through to the tile's depth underneath, and
+occlusion lines up with the part of the tree you'd call solid. Trunks, tile bodies, dense
+canopy occlude correctly; the approximation shows only at the feathered silhouette, governed
+by that one bake-time threshold. (The exact fix — order-independent transparency / per-pixel
+depth lists — is far more than 2D sprites warrant; the threshold is the standard call.)
+
+### Two stages
+1. **Bake — establish ownership by paint order.** Any static with `alpha > threshold` at a
+   pixel is a candidate to own it; the **frontmost wins**. No explicit sort: bake statics in
+   their existing back-to-front y-order, each writing its sort-Y where it passes the
+   threshold, and the frontmost simply **overwrites** last — the depth sort falls out of
+   paint order, exactly like the albedo bake. One more render target in `bakeGround`.
+2. **Run — single compare.** The dynamic prim's lit shader samples `static.depth` at the
+   fragment's world position, discards where occluded, and lights the survivors live.
+
+New code over what's built (Phases 1–3): one **`depth` render target** in the per-chunk bake
+(write sort-Y under the alpha cutoff instead of color) + the **sample-and-discard** in the
+dynamic prim's shader. Build order: depth channel first (verify a real tree-over-tiles
+silhouette reads its sort-Y cleanly), then the dynamic-prim sample-and-discard.
+
 ## Transitions (cold↔hot) — cost scales with churn, not the pool
 
 "May move" is free; only what's *actually moving now* costs.
@@ -367,10 +423,17 @@ section above is the summary; this is the executable version.
   holds, `g4` can become the default (old path stays one more phase as a safety net).
 
 ### Phase 4 — dynamic prims + depth
-- Build: composite `static.depth` into a screen depth buffer at display; draw dynamic prims
-  (cards/souls) live, depth-tested, lit fully live, with damage rects.
+Design resolved — see [Depth occlusion](#depth-occlusion-phase-4-design--resolved) for the
+full spec (sort-Y channel, hard-silhouette alpha threshold, bake-by-paint-order, runtime
+sample-and-discard). Two cuts:
+- **4a — light objects live.** Draw dynamic prims (cards/souls/movers) with their own
+  albedo+normal, lit fully live (all in-range lights × the prim's normal). Drop the
+  `sortLayer.tint` ambient-dim stopgap. Independently verifiable: the cursor light falls
+  across a tree the way it falls across the ground.
+- **4b — depth occlusion.** Add the `depth` render target to the per-chunk bake (write
+  sort-Y where `alpha > threshold`); the dynamic prim samples it and discards where behind.
 - **Checkpoint:** a soul walks behind a tree correctly; dragging recomputes only damage
-  rects. (Resolve depth-vs-soft-alpha here.)
+  rects.
 
 ### Phase 5 — budgeted amortized queue
 - Build: `DirtyQueue` — one priority+aging queue for cold re-bakes AND dynamic recomputes,
@@ -404,8 +467,10 @@ raster per frame in the dirty recompute. Projected-billboard from the sidecars;
   hex" is approximate).
 - Whether `static.lit` and the final display can share a buffer, or need double-buffering
   for the in-place dirty recompute.
-- **Depth + soft sprite alpha:** alpha-test threshold for the depth write (hard silhouette)
-  vs blended edges — confirm occlusion looks right at tree/soul silhouettes.
+- ~~**Depth + soft sprite alpha**~~ — **RESOLVED** (see [Depth occlusion](#depth-occlusion-phase-4-design--resolved)):
+  hard-silhouette depth write (`alpha > ~0.5`), because one depth buffer can't represent
+  partial occlusion. Remaining sub-question is only the exact threshold value, tuned by eye
+  in Phase 4 against a real tree.
 - Skip-recompute-only vs skip-entirely as the default overload failure (stale-lighting
   smooth-motion is the lean, but confirm it reads acceptably).
 - The **overlap-redraw rule** (#3 of the queue) cost under pathological clustering of
