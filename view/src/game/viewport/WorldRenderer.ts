@@ -826,11 +826,10 @@ export class WorldRenderer extends LayoutNode {
         // Sort-Y depth: ground coverage (per-fragment world-Y). Only on a geometry
         // re-bake — lightDirty leaves depth untouched.
         this.deferred.bakeChunkDepth(renderer, entry.albedoRT, entry.depthRT!, entry.originY);
-        // TODO(4B-ii): per-object base sort-Y on top. DISABLED — the objectDepthMesh
-        // render is a verified no-op (not HMR/shader-compile/blendMode/clear; even a
-        // forced full-RT clear:true write leaves depthRT untouched). Objects are baked
-        // + lit, but their depth is ground-coverage only until this is root-caused, so
-        // cross-seam tree overhang + 4C soul-behind-tree depth aren't correct yet.
+        // TODO(4B-ii): per-object base sort-Y on top. DISABLED — objectDepthMesh render
+        // is a no-op (ruled out: HMR, uniforms, blendMode, clear, vertex-section; fresh-
+        // vite literal full-RT clear:true/false both leave depthRT untouched). Next:
+        // instrument bakeChunkObjectDepth (log object count + whether the draw executes).
         // this.deferred.bakeChunkObjectDepth(renderer, entry.container, entry.depthRT!, entry.originX, entry.originY);
       }
       // Re-light (always when dirty; on lightDirty without a geometry re-bake). The

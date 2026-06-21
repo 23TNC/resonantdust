@@ -311,14 +311,24 @@ screen-depth resolve pass, the discard composite shader.
   BLOCKED.** Object-prims now route into the per-chunk bake → baked + lit (trees lit, tint
   stopgap dropped, browser-verified). The per-object depth pass (`makeObjectDepthShader` +
   `bakeChunkObjectDepth`, per-object base sort-Y `max`-blended) is written but **DISABLED** —
-  its `objectDepthMesh` render is a **verified no-op** with no found cause. RULED OUT: vite
-  HMR staleness (clean restart + cleared `.vite`), shader compile/link (no console errors),
-  `blendMode "max"` (no-op with default blend too), `clear:false` (a forced full-RT
-  `clear:true` write also left `depthRT` untouched — the mesh render has *zero* effect, while
-  the identically-built `depthMesh` works). **Next session:** instrument the bake (log object
-  count/dims) or test `objectDepthMesh` in isolation; the `f16` overflow trap (sort-Y must be
-  ≤ 65504) bit an earlier diagnostic. Until depth lands, cross-seam overhang + 4C aren't
-  correct. The OLD plan text below is the original intent:
+  its `objectDepthMesh` render is a **verified no-op** with no found cause. RULED OUT (all on a
+  CLEAN vite — restarted + cleared `.vite`, since the dev server had run since Jun 19): HMR
+  staleness; shader compile/link (no console errors); `blendMode "max"` (no-op with default
+  blend too); `clear` (a literal full-RT write with **both** `clear:true` and `clear:false`
+  leaves `depthRT` untouched); the per-object loop (an *unconditional* full-RT render also
+  no-ops); custom-uniform binding (a hardcoded GLSL **literal** `40000.0` output, bypassing all
+  uniforms, still no-op — the `0`-reads-as-mid-grey trap had masked this); fragment-only vs
+  vertex bit (adding a dummy vertex section to match the working `depthBakeBit` didn't help).
+  So `objectDepthMesh` renders *nothing* despite being constructed identically to the working
+  `depthMesh` — only the shader differs, and that shader compiles. `f16` overflow trap: sort-Y
+  must be ≤ 65504 (a `99999` diagnostic overflowed → unreliable).
+  **Next session — stop the depthview screenshot loop (too lossy + the login needs ~5 clicks
+  per cycle); use INSTRUMENTATION instead:** (a) `debug.log` in `bakeChunkObjectDepth` — object
+  count, a sample quad's dims, and confirm the method is even reached; (b) render
+  `objectDepthMesh` to the SCREEN (visible without `?depthview`) in isolation at startup to see
+  if it draws at all; (c) inspect the actual GL draw call / program-link log via devtools. The
+  binary "does this mesh+shader draw" question needs unambiguous data, not pixel inference.
+  Until depth lands, cross-seam overhang + 4C aren't correct. The OLD plan text below is the original intent:
   Move object-prims from the live
   `sortLayer` into the per-chunk bake (albedo+normal+depth) and drop the `sortLayer.tint`
   stopgap. **Lighting** is easy (the chunk's lit bake just includes them once routed in —
