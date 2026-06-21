@@ -287,14 +287,25 @@ screen-depth resolve pass, the discard composite shader.
   and the normal lit path is unchanged without the flag. NB: the max-blend screen resolve +
   discard composite moved to 4B — they can't be exercised until standing objects actually
   overlap, so building+verifying them there (where occlusion is visible) is the real test.
-- **4·B — bake standing objects in + the depth-tested composite.** Move object-prims from
-  the live `sortLayer` into the per-chunk bake (albedo+normal+depth); swap the depth source
-  to **per-object sort-Y** (a standing object's pixels all carry its base-Y, not their own
-  Y — the 4A albedo-coverage source would give a tall object a vertical depth gradient,
-  wrongly self-occluding its top). Add the **max-blend screen-depth resolve** + the **discard
-  composite** (chunk colour drawn through a shader that samples screen-depth via `gl_FragCoord`
-  and discards where its own chunk depth is behind). Drop the `sortLayer.tint` stopgap.
-  Checkpoint: trees are lit + correctly ordered across chunk seams.
+- **4·B-i — screen-depth resolve + discard composite (ground). LANDED `0cd8401`,** browser-
+  verified on claude. The cross-chunk occlusion machinery, correctness-neutral on coplanar
+  ground. Ground display moved from retained per-chunk sprites in `panLayer` to a **per-frame
+  screen-space composite**: each frame (1) RESOLVE every chunk's depth sprite `max`-blended
+  into a panel-sized `r16float` `screenDepthRT` (frontmost sort-Y per pixel, order-
+  independent), (2) COMPOSITE every chunk's mesh into a panel-sized `litScreenRT`, each
+  sampling the screen depth and `discard`ing where behind, (3) DISPLAY `litScreenRT` via a
+  `groundSprite` below `panLayer`. **Compositing into a PANEL-sized RT makes `gl_FragCoord`
+  panel-local** — sidesteps the canvas-offset/flip math the retained-in-panLayer route would
+  need. Verified: normal mode renders identically (nothing wrongly discarded); `?depthview`
+  (composite debug mode) shows the screen-resolved depth bounded exactly to the chunk
+  footprint with trees aligned in both viewports, gradient matching 4A (Y-flip correct).
+- **4·B-ii — bake standing objects in (REMAINING).** Move object-prims from the live
+  `sortLayer` into the per-chunk bake (albedo+normal+depth); swap the depth source to
+  **per-object sort-Y** (a standing object's pixels all carry its base-Y, not their own Y —
+  the 4A albedo-coverage source would give a tall object a vertical depth gradient, wrongly
+  self-occluding its top). Drop the `sortLayer.tint` stopgap. This is where the discard
+  composite gets its real test (actual overlap). Checkpoint: trees lit + correctly ordered
+  across chunk seams.
 - **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
   where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
