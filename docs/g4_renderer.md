@@ -1,6 +1,10 @@
 # G4 — Baked-lightmap deferred renderer with dirty-rect amortization
 
-Status: **chosen design, iterating.** Supersedes **[G1](g1_renderer.md)** (the bespoke
+Status: **building — Phases 1–3 landed & browser-verified (branch 0.7).** G4 is now
+**the** renderer: the old screen-space deferred pipeline and the `?g4` flag are removed.
+See **[Build log](#build-log-as-built)** for what's actually shipped (and where it diverged
+from the plan below — notably **per-chunk storage, not the scrolled map**). Supersedes
+**[G1](g1_renderer.md)** (the bespoke
 cold/hot tiled *compositor*) and the D2/E baking approaches in
 [shadow_lighting.md](shadow_lighting.md). G4 keeps G1's good half — the rectangular
 cell grid, per-cell light/prim indexing, the static-light cache — and **drops G1's
@@ -9,6 +13,81 @@ depth-split, cold↔hot prim graph). Those are replaced by three established, si
 pieces: a **depth buffer** (for dynamic-vs-static occlusion), **dirty-rect recompute via
 multiply** (for the lit composite), and a **budgeted amortized work queue** (for graceful
 overload). G4 is a composition of standard techniques, not a bespoke engine.
+
+## Build log (as-built)
+
+What has actually shipped, and where it diverged from the [Implementation plan](#implementation-plan-from-the-d1b1b-i-checkpoint) below. The plan is the design intent; this section is the source of truth for the current code.
+
+### Decision reversal: per-chunk storage, NOT the scrolled map
+
+Phase-0 decision #2 (and the VRAM section) chose a **single viewport+overscan scrolled
+map per channel** (~40 MB) over **per-chunk RTs** (called out as "hundreds of MB"). **The
+build reversed this — storage is per-chunk.** Each loaded ground chunk (`GROUND_CHUNK = 8`
+tiles, the D1b.1a unit) owns its own detached container and its own `albedo / normal / lit`
+RTs, displayed via a plain `Sprite` at the chunk's world origin. Why the reversal:
+
+- **Pan is free.** Chunks are detached containers shown at their world origin, so pan just
+  moves the parent container — **no per-pan bake, no scroll-copy, no wrap/addressing math.**
+  A chunk bakes once on load and is untouched until its geometry or an in-range light
+  changes. The scrolled map's scroll-copy-overlap-+-bake-the-revealed-band was the plan's
+  *riskiest* item (P0/P1); per-chunk deletes that subsystem outright.
+- **Reuses a working lifecycle.** Build-on-enter / drop-on-exit + per-chunk containers
+  (D1b.1a) and the per-chunk albedo+normal bake (D1b.1b-i) already existed and were
+  verified. Per-chunk storage carries those forward instead of building new machinery.
+- **Dirty is naturally localized.** Each chunk owns its `dirty` (geometry → re-bake
+  albedo+normal+lit) and `lightDirty` (light only → re-bake lit from cached albedo+normal)
+  flags. "Re-light the chunks the cursor disk overlaps" is a clean per-chunk op — no
+  coalescing dirty cells inside one shared texture.
+- **One less premultiply trap.** The scrolled map blits premultiplied *lit* texels on every
+  pan — another place the scheme-C premultiply convention must be exact. Per-chunk never
+  moves lit pixels; each chunk's lit RT is computed in place and displayed directly.
+
+**Cost accepted: VRAM.** Per-chunk is 5 channels × N loaded chunks, each chunk rounding up
+to its own RT (partial-chunk padding waste) vs one tight viewport map. But it is **not** the
+worst-case "hundreds of MB": drop-on-exit bounds the live set to viewport + overscan chunks,
+so it's that bounded set × padding overhead. Mitigated by the same levers the [VRAM
+budget](#vram-budget) lists (dpr-cap, main-world-viewport-only, channel packing). With
+drop-on-exit already bounding memory, trading the VRAM gap for "delete the riskiest
+subsystem + reuse working code" was the better deal — and it matches the "implement whatever
+the final form is, don't retain legacy code" directive (keep the lifecycle that worked, no
+parallel scroll machinery).
+
+Other plan divergences: there is **no `CellGrid` / render-rect grid yet** — the chunk is
+currently the dirty unit, not sub-chunk cells. The cell grid + `cell→[lights]` culling
+(Phase-0 #1, the substrate) is deferred until it's needed (Phase 5 budgeting / many static
+lights); `packChunkLights` currently evaluates **all** lights per chunk (`TODO(perf)` in
+code). `static.depth` and per-map tight bounds are not built yet (Phase 4 / gate work).
+
+### Phases landed
+
+- **Phase 1 — per-chunk static ground** (`3b6bdc8`, browser-verified). Ground prims grouped
+  into per-chunk detached containers; baked to world-space `albedo` RTs at flat ambient and
+  displayed as plain sprites. Idle = no work; pan = container move.
+- **Phase 2 — per-chunk static lightmap** (`b19e8a2`, browser-verified). Each chunk's
+  displayed map is `albedo × (ambient + Σ static lights)`, baked once. `deferredLightShader`
+  repurposed to **output lit albedo** (was a screen-space light buffer); `DeferredLighting`
+  stripped of the dead screen-space passes (`renderNormals/renderLights/renderEmissive/
+  LayerBuf/resize/packLightUniforms`), gained `bakeChunkLit` + `packChunkLights` (lights
+  summed in **chunk-local** px, zoom 1). Verified: a fixture light casts a static radial
+  lit pool that costs zero per frame and survives pan.
+- **Phase 3 — dynamic cursor light** (`73bc267`, browser-verified). Chunk dirtiness split
+  into `dirty` vs `lightDirty`; `markCursorChunks()` flags the chunks the cursor's disk
+  (`cursorDisk()`) overlaps `lightDirty` **only on cursor move** (a still cursor re-bakes
+  nothing), plus the chunks it just *left* (restore). Verified: the cursor light tracks the
+  pointer, re-lighting only its disk of chunks, while a separate static fixture light stays
+  put and free — the static-baked + dynamic-live split working end to end.
+
+### Known temporaries / loose ends in the shipped code
+
+- **Temp fixture light** (`WorldRenderer.g4Fixture`, placed at the anchor) stands in until
+  real authored `^light` cards exist; it also lights the **inventory** viewport (the
+  renderer runs per-`WorldRenderer`). Both temporary.
+- **Objects are flat-dimmed** via `sortLayer.tint` (an ambient-gray stopgap) until Phase 4
+  lights them properly; restoring real object lighting is a Phase-4 task.
+- **Dev gotcha:** after large edits / file deletions, stale vite HMR once falsely broke pan
+  — cache-bust the reload (`?cb=N`) when behavior looks wrong post-edit.
+- Remaining dead code in `DeferredLighting` to finish extracting per the legacy-removal
+  directive; `>16` lights/cell accumulation and the `cell→[lights]` index still TODO.
 
 ## Why (unchanged from G1)
 
@@ -248,6 +327,9 @@ section above is the summary; this is the executable version.
    overlap + bake the revealed band on pan). What we reuse from D1b.1a/b-i is the **bake
    logic** (`bakeGround`-style render-prims-into-a-world-space-target-with-offset) and the
    build-on-enter/drop-on-exit *concept*, NOT the chunk RTs as storage.
+   > **REVERSED IN BUILD → per-chunk RTs.** drop-on-exit bounds the live set to viewport +
+   > overscan (so not "hundreds of MB"), and per-chunk makes pan a free container-move while
+   > deleting the riskiest subsystem (scroll-copy). See [Build log](#build-log-as-built).
 3. **Premultiply/blend convention**, written once for the whole chain (bake → cache →
    dirty-recompute → restore). The scheme-C killer — prove it with a ~30-line throwaway:
    bake one cell, recomposite it, assert pixel-identical, before anything depends on it.
