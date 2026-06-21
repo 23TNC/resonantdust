@@ -1,7 +1,7 @@
 import { Container, Geometry, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, DEPTH_EMPTY, type ObjectDepthShader } from "./depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, type ObjectDepthShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 import { debug } from "../../debug";
 
@@ -229,6 +229,7 @@ export class DeferredLighting {
    */
   bakeChunkDepth(renderer: Renderer, container: Container, depthRT: RenderTexture, originX: number, originY: number): void {
     this.depthBakeContainer.removeChildren();
+    const rowStep = 1.5 * worldHexRadius(); // px per hex row (Δr); worldY/rowStep = row
     let i = 0;
     for (const child of container.children) {
       if (!(child instanceof LitSprite)) continue;
@@ -248,23 +249,26 @@ export class DeferredLighting {
       const p = pBuf.data as Float32Array;
       p[0] = x0; p[1] = y0; p[2] = x0 + w; p[3] = y0; p[4] = x0 + w; p[5] = y0 + h; p[6] = x0; p[7] = y0 + h;
       pBuf.update();
-      // Depth rides the mesh TINT (the per-object channel that binds) — base sort-Y.
-      quad.tint = encodeDepthTint(child.y);
+      // Depth rides the mesh TINT (the per-object channel that binds) — the prim's
+      // base hex row (R) + sub-row offset (G), keyed on its feet's world-Y.
+      quad.tint = encodeDepthTint(child.y, rowStep);
       (quad.shader as ObjectDepthShader).texture = child.albedoTexture;
       this.depthBakeContainer.addChild(quad);
       i++;
     }
-    renderer.render({ container: this.depthBakeContainer, target: depthRT, clear: true, clearColor: [DEPTH_EMPTY, 0, 0, 1] });
+    renderer.render({ container: this.depthBakeContainer, target: depthRT, clear: true, clearColor: [0, 0, 0, 1] });
     if (!this.depthProbed && i > 0) {
       this.depthProbed = true;
       try {
         const px = renderer.extract.pixels(depthRT);
-        let maxR = 0, nonzero = 0;
+        let minR = 255, maxR = 0, maxG = 0, nonzero = 0;
         for (let j = 0; j < px.pixels.length; j += 4) {
-          if (px.pixels[j] > maxR) maxR = px.pixels[j];
-          if (px.pixels[j] !== 0) nonzero++;
+          const r = px.pixels[j], g = px.pixels[j + 1];
+          if (r || g) { nonzero++; if (r < minR) minR = r; }
+          if (r > maxR) maxR = r;
+          if (g > maxG) maxG = g;
         }
-        debug.log(["objects"], `[depthProbe] maxR=${maxR} nonzeroPx=${nonzero}/${px.pixels.length / 4} quads=${i} rt=${px.width}x${px.height}`, 5);
+        debug.log(["objects"], `[depthProbe] R=${minR}..${maxR} maxG=${maxG} nonzeroPx=${nonzero}/${px.pixels.length / 4} quads=${i} rt=${px.width}x${px.height}`, 5);
       } catch (e) {
         debug.log(["objects"], `[depthProbe] extract threw: ${String(e)}`, 5);
       }

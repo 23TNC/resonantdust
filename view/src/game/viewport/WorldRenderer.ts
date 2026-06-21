@@ -1,7 +1,7 @@
 import { Container, Graphics, Mesh, MeshGeometry, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
-import { makeDepthCompositeShader, type DepthCompositeShader, DEPTH_EMPTY } from "../lighting/depthShaders";
+import { makeDepthCompositeShader, type DepthCompositeShader } from "../lighting/depthShaders";
 import { LitSprite } from "../lighting/LitSprite";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
@@ -818,7 +818,7 @@ export class WorldRenderer extends LayoutNode {
           entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
           // Single-channel float so sort-Y is exact (no 8-bit coarseness) and the
           // cross-chunk `max`-blend resolve operates on one value, not packed bytes.
-          entry.depthRT = RenderTexture.create({ width: w, height: h, resolution: res, format: "r16float" });
+          entry.depthRT = RenderTexture.create({ width: w, height: h, resolution: res });
         }
         entry.originX = b.x;
         entry.originY = b.y;
@@ -886,22 +886,20 @@ export class WorldRenderer extends LayoutNode {
     if (!this.screenDepthRT || this.screenDepthRT.width !== this.width || this.screenDepthRT.height !== this.height) {
       this.screenDepthRT?.destroy(true);
       this.litScreenRT?.destroy(true);
-      this.screenDepthRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res, format: "r16float" });
+      this.screenDepthRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res });
       this.litScreenRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res });
     }
     const screenDepth = this.screenDepthRT!;
     const litScreen = this.litScreenRT!;
-    // (1) resolve frontmost sort-Y across chunks.
+    // (1) resolve frontmost sort key across chunks (empty = 0, loses every max).
     this.depthLayer.position.copyFrom(this.panLayer.position);
-    renderer.render({ container: this.depthLayer, target: screenDepth, clear: true, clearColor: [DEPTH_EMPTY, 0, 0, 1] });
+    renderer.render({ container: this.depthLayer, target: screenDepth, clear: true, clearColor: [0, 0, 0, 1] });
     // (2) composite: feed the screen depth to each chunk shader, then draw.
-    const top = this.panLayer.toLocal(new Point(0, 0)).y;
-    const bottom = this.panLayer.toLocal(new Point(0, this.height)).y;
     for (const e of this.groundChunks.values()) {
       if (!e.display) continue;
       const shader = e.display.shader as DepthCompositeShader;
       shader.setScreen(screenDepth, pw, ph, true);
-      shader.setDebug(DEPTHVIEW, top, bottom);
+      shader.setDebug(DEPTHVIEW);
     }
     this.compositeLayer.position.copyFrom(this.panLayer.position);
     renderer.render({ container: this.compositeLayer, target: litScreen, clear: true });
