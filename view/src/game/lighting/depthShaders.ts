@@ -180,3 +180,110 @@ export function makeDepthViewShader(): DepthViewShader {
     },
   });
 }
+
+// ── COMPOSITE: display a chunk's lit colour, occluded by the screen depth ─────
+// One per chunk (binds its own lit + depth). `uTexture` = the chunk's lit colour
+// (sampled into outColor at vUV); `uOwnDepth` = the chunk's sort-Y at vUV;
+// `uScreenDepth` = the resolved frontmost sort-Y across ALL chunks, sampled at the
+// fragment's screen position (`gl_FragCoord`). Discard where this chunk is behind
+// the screen winner (something else owns the pixel). `uDebug` paints the sampled
+// screen depth as greyscale instead — to confirm the resolve + screen sampling
+// align with the 4A per-chunk gradient.
+const depthCompositeBitGl = {
+  name: "depth-composite-bit",
+  fragment: {
+    header: /* glsl */ `
+      uniform sampler2D uOwnDepth;
+      uniform sampler2D uScreenDepth;
+      uniform vec2 uScreenSize;   // framebuffer px (CSS × resolution)
+      uniform float uFlipY;       // 1.0 → flip the screen sample's Y
+      uniform float uDebug;       // 1.0 → paint screen depth grey (alignment check)
+      uniform float uDbgMin;
+      uniform float uDbgMax;
+    `,
+    main: /* glsl */ `
+      vec2 suv = gl_FragCoord.xy / uScreenSize;
+      if (uFlipY > 0.5) suv.y = 1.0 - suv.y;
+      float screenD = texture(uScreenDepth, suv).r;
+      if (uDebug > 0.5) {
+        float g = clamp((screenD - uDbgMin) / max(uDbgMax - uDbgMin, 1.0), 0.0, 1.0);
+        outColor = vec4(vec3(g), 1.0);
+      } else {
+        float ownD = texture(uOwnDepth, vUV).r;
+        // Behind the pixel's owner (with a small bias for float slack) → drop it.
+        if (ownD < screenD - 1.0) discard;
+        // outColor is the lit colour (textureBit), premultiplied — show as-is.
+      }
+    `,
+  },
+};
+
+let compositeProgram: GlProgram | null = null;
+function depthCompositeProgram(): GlProgram {
+  if (!compositeProgram) {
+    compositeProgram = compileHighShaderGlProgram({
+      name: "depth-composite",
+      bits: [localUniformBitGl, textureBitGl, depthCompositeBitGl, roundPixelsBitGl],
+    });
+  }
+  return compositeProgram;
+}
+
+/** Per-chunk display shader: lit colour `discard`ed where the chunk is behind the
+ *  resolved screen depth. `texture` = the lit RT; `ownDepth` = this chunk's depth RT;
+ *  shared screen-depth + size set each frame. */
+export class DepthCompositeShader extends Shader {
+  private _texture: Texture = Texture.EMPTY;
+  get texture(): Texture {
+    return this._texture;
+  }
+  set texture(value: Texture) {
+    this._texture = value;
+    this.resources.uTexture = value.source;
+    this.resources.uSampler = value.source.style;
+    this.resources.textureUniforms.uniforms.uTextureMatrix = value.textureMatrix.mapCoord;
+    this.resources.textureUniforms.update();
+  }
+  set ownDepth(value: Texture) {
+    this.resources.uOwnDepth = value.source;
+    this.resources.uOwnDepthSampler = value.source.style;
+  }
+  setScreen(depth: Texture, sizeX: number, sizeY: number, flipY: boolean): void {
+    this.resources.uScreenDepth = depth.source;
+    this.resources.uScreenDepthSampler = depth.source.style;
+    const u = this.resources.compositeUniforms.uniforms;
+    u.uScreenSize = [sizeX, sizeY];
+    u.uFlipY = flipY ? 1 : 0;
+    this.resources.compositeUniforms.update();
+  }
+  setDebug(on: boolean, min: number, max: number): void {
+    const u = this.resources.compositeUniforms.uniforms;
+    u.uDebug = on ? 1 : 0;
+    u.uDbgMin = min;
+    u.uDbgMax = max;
+    this.resources.compositeUniforms.update();
+  }
+}
+
+export function makeDepthCompositeShader(): DepthCompositeShader {
+  const empty = Texture.EMPTY;
+  return new DepthCompositeShader({
+    glProgram: depthCompositeProgram(),
+    resources: {
+      uTexture: empty.source,
+      uSampler: empty.source.style,
+      textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
+      uOwnDepth: empty.source,
+      uOwnDepthSampler: empty.source.style,
+      uScreenDepth: empty.source,
+      uScreenDepthSampler: empty.source.style,
+      compositeUniforms: new UniformGroup({
+        uScreenSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
+        uFlipY: { value: 1, type: "f32" },
+        uDebug: { value: 0, type: "f32" },
+        uDbgMin: { value: 0, type: "f32" },
+        uDbgMax: { value: 1, type: "f32" },
+      }),
+    },
+  });
+}

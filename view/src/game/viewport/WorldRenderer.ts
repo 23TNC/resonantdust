@@ -1,6 +1,7 @@
-import { Container, Graphics, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
+import { Container, Graphics, Mesh, MeshGeometry, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting, LIT_AMBIENT, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
+import { makeDepthCompositeShader, type DepthCompositeShader, DEPTH_EMPTY } from "../lighting/depthShaders";
 import { LitSprite } from "../lighting/LitSprite";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
@@ -166,7 +167,7 @@ export class WorldRenderer extends LayoutNode {
    *  `clippedHex`/fill prims of every tile in a `GROUND_CHUNK`² block, but is
    *  DETACHED (a bake source, never in the scene). On a content change (`dirty`)
    *  the container is baked into world-space `albedoRT`/`normalRT`, displayed by a
-   *  single `sprite` (a `LitSprite` in {@link bakedGroundLayer}); panning never
+   *  composite mesh (in {@link compositeLayer}); panning never
    *  re-bakes. `count` refcounts the tiles so an emptied chunk frees everything. */
   private readonly groundChunks = new Map<
     string,
@@ -185,7 +186,13 @@ export class WorldRenderer extends LayoutNode {
       /** Per-chunk SORT-Y depth (`r16float`, Phase 4) — world-Y where the ground is
        *  opaque, else the empty sentinel. Resolved across chunks for occlusion. */
       depthRT: RenderTexture | null;
-      sprite: Sprite | null;
+      /** Display: a composite `Mesh` (not a plain Sprite) showing `litRT`, with
+       *  fragments `discard`ed where this chunk is behind the resolved screen depth
+       *  (the cross-chunk occlusion). Lives in {@link compositeLayer}. */
+      display: Mesh | null;
+      /** Depth sprite (shows `depthRT`, `max`-blended) in {@link depthLayer} — the
+       *  per-frame source for the screen-depth resolve. */
+      depthSprite: Sprite | null;
       /** Chunk world origin (its baked bounds' top-left) — for re-light + the
        *  cursor-disk overlap test. */
       originX: number;
@@ -197,9 +204,22 @@ export class WorldRenderer extends LayoutNode {
   private cursorChunks = new Set<string>();
   /** Last cursor disk centre, so `markCursorChunks` no-ops when it hasn't moved. */
   private lastCursor: { x: number; y: number } | null = null;
-  /** Holds the baked per-chunk ground `sprite`s (D1b.1b), under `tileLayer` so the
-   *  whole baked ground sorts below the object `sortLayer`. */
-  private readonly bakedGroundLayer = new Container();
+  /** Detached holders rendered into the panel-sized screen RTs each frame, both
+   *  mirroring `panLayer.position` so chunks land at their on-screen pixels:
+   *  `depthLayer` (chunk depth sprites, `max`-blended) → {@link screenDepthRT};
+   *  `compositeLayer` (chunk composite meshes) → {@link litScreenRT}. Rendering the
+   *  composite into a PANEL-sized RT (not the canvas) makes `gl_FragCoord` panel-
+   *  local, so it samples the (also panel-sized) screen depth with no canvas offset. */
+  private readonly depthLayer = new Container();
+  private readonly compositeLayer = new Container();
+  /** Screen-space resolved sort-Y (`r16float`), one frontmost value per pixel. */
+  private screenDepthRT: RenderTexture | null = null;
+  /** The composited ground colour (depth-occluded) for this frame; shown by
+   *  {@link groundSprite}. Panel-sized; rebuilt on resize. */
+  private litScreenRT: RenderTexture | null = null;
+  /** Displays {@link litScreenRT} at the panel origin (screen space — the composite
+   *  already baked in the pan), BELOW `panLayer` so objects/cards draw over it. */
+  private readonly groundSprite = new Sprite();
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
   /** This viewport's deferred lighting (world-space, scoped here). Owns the
@@ -269,9 +289,10 @@ export class WorldRenderer extends LayoutNode {
 
     this.sortLayer.sortableChildren = true;
     this.cardLayer.sortableChildren = true;
-    this.tileLayer.addChild(this.bakedGroundLayer); // baked per-chunk ground (D1b.1b)
     this.panLayer.addChild(this.tileLayer, this.sortLayer, this.cardLayer, this.selectionGfx);
-    this.container.addChild(this.panLayer);
+    // Ground is a screen-space composite (Phase 4): the per-frame `litScreenRT`
+    // shown at the panel origin, BELOW `panLayer` so objects/cards draw over it.
+    this.container.addChild(this.groundSprite, this.panLayer);
 
     this.deps = {
       lod: gctx.lodTextures,
@@ -340,7 +361,8 @@ export class WorldRenderer extends LayoutNode {
       t.bg.destroy();
     }
     for (const e of this.groundChunks.values()) {
-      e.sprite?.destroy();
+      e.display?.destroy();
+      e.depthSprite?.destroy();
       e.container.destroy({ children: true });
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
@@ -686,6 +708,7 @@ export class WorldRenderer extends LayoutNode {
     }
     this.markCursorChunks(); // dynamic cursor light → re-light the chunks it touches
     this.bakeDirtyChunks(renderer);
+    this.compositeGround(renderer); // resolve screen depth → composite + display ground
   }
 
   override setBounds(x: number, y: number, width: number, height: number): void {
@@ -735,7 +758,8 @@ export class WorldRenderer extends LayoutNode {
       container.sortableChildren = true;
       entry = {
         container, count: 0, dirty: true, lightDirty: false,
-        albedoRT: null, normalRT: null, litRT: null, depthRT: null, sprite: null, originX: 0, originY: 0,
+        albedoRT: null, normalRT: null, litRT: null, depthRT: null,
+        display: null, depthSprite: null, originX: 0, originY: 0,
       };
       this.groundChunks.set(chunkKey, entry);
     }
@@ -757,7 +781,8 @@ export class WorldRenderer extends LayoutNode {
     const entry = this.groundChunks.get(chunkKey);
     if (!entry) return;
     if (--entry.count <= 0) {
-      entry.sprite?.destroy();
+      entry.display?.destroy();
+      entry.depthSprite?.destroy();
       entry.container.destroy({ children: true });
       entry.albedoRT?.destroy(true);
       entry.normalRT?.destroy(true);
@@ -813,22 +838,81 @@ export class WorldRenderer extends LayoutNode {
       this.deferred.bakeChunkLit(
         renderer, entry.normalRT!, entry.albedoRT!, entry.litRT!, entry.originX, entry.originY,
       );
-      if (DEPTHVIEW) {
-        // Dev: replace the lit colour with the normalized sort-Y over the viewport's
-        // world-Y window, so the ground sprite shows the depth gradient.
-        const top = this.panLayer.toLocal(new Point(0, 0)).y;
-        const bottom = this.panLayer.toLocal(new Point(0, this.height)).y;
-        this.deferred.bakeChunkDepthView(renderer, entry.depthRT!, entry.litRT!, top, bottom);
-      }
-      if (!entry.sprite) {
-        entry.sprite = new Sprite(entry.litRT!);
-        this.bakedGroundLayer.addChild(entry.sprite);
-      }
-      entry.sprite.texture = entry.litRT!;
-      entry.sprite.position.set(entry.originX, entry.originY);
+      this.updateChunkDisplay(entry);
       entry.dirty = false;
       entry.lightDirty = false;
     }
+  }
+
+  /** (Re)build a chunk's display: the composite `Mesh` (shows `litRT`, occluded by
+   *  the screen depth) in {@link compositeLayer}, and the depth `Sprite` (shows
+   *  `depthRT`, `max`-blended) in {@link depthLayer} for the resolve. Both sit at
+   *  the chunk world origin; geometry/size track the (possibly resized) RTs. */
+  private updateChunkDisplay(entry: { litRT: RenderTexture | null; depthRT: RenderTexture | null; display: Mesh | null; depthSprite: Sprite | null; originX: number; originY: number }): void {
+    const lit = entry.litRT!;
+    const w = lit.width;
+    const h = lit.height;
+    if (!entry.display) {
+      const geometry = new MeshGeometry({
+        positions: new Float32Array(8),
+        uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+        indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+      });
+      entry.display = new Mesh({ geometry, shader: makeDepthCompositeShader() });
+      this.compositeLayer.addChild(entry.display);
+    }
+    const pos = entry.display.geometry.positions;
+    pos[0] = 0; pos[1] = 0; pos[2] = w; pos[3] = 0; pos[4] = w; pos[5] = h; pos[6] = 0; pos[7] = h;
+    entry.display.geometry.positions = pos;
+    entry.display.position.set(entry.originX, entry.originY);
+    const shader = entry.display.shader as DepthCompositeShader;
+    shader.texture = lit;
+    shader.ownDepth = entry.depthRT!;
+    if (!entry.depthSprite) {
+      entry.depthSprite = new Sprite(entry.depthRT!);
+      entry.depthSprite.blendMode = "max";
+      this.depthLayer.addChild(entry.depthSprite);
+    }
+    entry.depthSprite.texture = entry.depthRT!;
+    entry.depthSprite.position.set(entry.originX, entry.originY);
+  }
+
+  /** Phase-4 ground composite, once per frame. (1) RESOLVE: render every chunk's
+   *  depth sprite (`max`-blended) into {@link screenDepthRT} → the frontmost sort-Y
+   *  per panel pixel. (2) COMPOSITE: render every chunk's mesh into {@link litScreenRT},
+   *  each sampling the screen depth via `gl_FragCoord` (panel-local, since the target
+   *  is panel-sized) and `discard`ing where it's behind the winner. (3) DISPLAY: show
+   *  `litScreenRT` via {@link groundSprite}. Both layers mirror `panLayer`, so the pan
+   *  is baked into the composite — the display sprite stays at the panel origin. */
+  private compositeGround(renderer: Renderer): void {
+    if (this.width <= 0 || this.height <= 0 || this.compositeLayer.children.length === 0) return;
+    const res = renderer.resolution;
+    const pw = Math.max(1, Math.ceil(this.width * res));
+    const ph = Math.max(1, Math.ceil(this.height * res));
+    if (!this.screenDepthRT || this.screenDepthRT.width !== this.width || this.screenDepthRT.height !== this.height) {
+      this.screenDepthRT?.destroy(true);
+      this.litScreenRT?.destroy(true);
+      this.screenDepthRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res, format: "r16float" });
+      this.litScreenRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res });
+    }
+    const screenDepth = this.screenDepthRT!;
+    const litScreen = this.litScreenRT!;
+    // (1) resolve frontmost sort-Y across chunks.
+    this.depthLayer.position.copyFrom(this.panLayer.position);
+    renderer.render({ container: this.depthLayer, target: screenDepth, clear: true, clearColor: [DEPTH_EMPTY, 0, 0, 1] });
+    // (2) composite: feed the screen depth to each chunk shader, then draw.
+    const top = this.panLayer.toLocal(new Point(0, 0)).y;
+    const bottom = this.panLayer.toLocal(new Point(0, this.height)).y;
+    for (const e of this.groundChunks.values()) {
+      if (!e.display) continue;
+      const shader = e.display.shader as DepthCompositeShader;
+      shader.setScreen(screenDepth, pw, ph, true);
+      shader.setDebug(DEPTHVIEW, top, bottom);
+    }
+    this.compositeLayer.position.copyFrom(this.panLayer.position);
+    renderer.render({ container: this.compositeLayer, target: litScreen, clear: true });
+    // (3) display.
+    if (this.groundSprite.texture !== litScreen) this.groundSprite.texture = litScreen;
   }
 
   /** Mark the chunks the cursor light touches `lightDirty` (re-light only), plus the
@@ -1003,7 +1087,8 @@ export class WorldRenderer extends LayoutNode {
       t.bg.destroy();
     }
     for (const e of this.groundChunks.values()) {
-      e.sprite?.destroy();
+      e.display?.destroy();
+      e.depthSprite?.destroy();
       e.container.destroy({ children: true });
       e.albedoRT?.destroy(true);
       e.normalRT?.destroy(true);
@@ -1011,6 +1096,11 @@ export class WorldRenderer extends LayoutNode {
       e.depthRT?.destroy(true);
     }
     this.groundChunks.clear();
+    this.screenDepthRT?.destroy(true);
+    this.litScreenRT?.destroy(true);
+    this.depthLayer.destroy({ children: true });
+    this.compositeLayer.destroy({ children: true });
+    this.groundSprite.destroy();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
     this.cards.clear();
