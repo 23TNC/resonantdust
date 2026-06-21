@@ -823,14 +823,9 @@ export class WorldRenderer extends LayoutNode {
         entry.originX = b.x;
         entry.originY = b.y;
         this.deferred.bakeGround(renderer, entry.container, entry.albedoRT, entry.normalRT!, b.x, b.y);
-        // Sort-Y depth: ground coverage (per-fragment world-Y). Only on a geometry
-        // re-bake — lightDirty leaves depth untouched.
-        this.deferred.bakeChunkDepth(renderer, entry.albedoRT, entry.depthRT!, entry.originY);
-        // TODO(4B-ii): per-object base sort-Y on top. DISABLED — objectDepthMesh render
-        // is a no-op (ruled out: HMR, uniforms, blendMode, clear, vertex-section; fresh-
-        // vite literal full-RT clear:true/false both leave depthRT untouched). Next:
-        // instrument bakeChunkObjectDepth (log object count + whether the draw executes).
-        // this.deferred.bakeChunkObjectDepth(renderer, entry.container, entry.depthRT!, entry.originX, entry.originY);
+        // Sort-Y depth: ONE unified pass over every primitive (tiles + objects), each
+        // writing its base sort-Y. Only on a geometry re-bake — lightDirty leaves it.
+        this.deferred.bakeChunkDepth(renderer, entry.container, entry.depthRT!, entry.originX, entry.originY);
       }
       // Re-light (always when dirty; on lightDirty without a geometry re-bake). The
       // albedo + normal are cached, so a light change is just the light pass.

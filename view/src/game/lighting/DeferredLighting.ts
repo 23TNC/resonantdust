@@ -1,7 +1,7 @@
-import { Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Container, type Renderer } from "pixi.js";
+import { Container, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeDepthBakeShader, makeObjectDepthShader } from "./depthShaders";
+import { makeObjectDepthShader, DEPTH_EMPTY } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 
 /** Ambient floor — the lit base every cell starts from (the lightmap's clear
@@ -96,28 +96,15 @@ export class DeferredLighting {
     }),
     shader: this.lightShader,
   });
-  /** Depth bake (Phase 4): albedo coverage → per-chunk sort-Y. Own quad/shader —
-   *  a `Mesh` binds one shader, so it can't share the light mesh. */
-  private readonly depthShader = makeDepthBakeShader();
-  private readonly depthMesh = new Mesh({
-    geometry: new MeshGeometry({
-      positions: new Float32Array(8),
-      uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-      indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
-    }),
-    shader: this.depthShader,
-  });
-  /** Object depth (Phase 4B-ii): per-object base sort-Y, drawn `max`-blended over
-   *  the ground coverage depth. Reused for every object in a chunk. */
-  private readonly objectDepthShader = makeObjectDepthShader();
-  private readonly objectDepthMesh = new Mesh({
-    geometry: new MeshGeometry({
-      positions: new Float32Array(8),
-      uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-      indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
-    }),
-    shader: this.objectDepthShader,
-  });
+  /** Unified depth bake (Phase 4). The KEY constraint, found by bisection: a SECOND
+   *  `renderer.render()` into a depth RT within one bake silently no-ops — so the
+   *  per-object loop (N renders) only ever wrote its first quad. Fix: ONE container
+   *  of per-primitive sort-Y quads (ground + objects, treated identically), rendered
+   *  ONCE with `max` blend (frontmost sort-Y wins). Pooled quads grow on demand; each
+   *  carries its own ObjectDepthShader (a container render uses per-mesh shaders, so
+   *  the per-mesh sort-Y uniform rides along). */
+  private readonly depthBakeContainer = new Container();
+  private readonly depthQuadPool: Mesh[] = [];
 
   /** Shared, never-rendered instance for offline/preview renders (drag ghost,
    *  card-face bakes) — they draw plain albedo and never bake. */
@@ -225,52 +212,50 @@ export class DeferredLighting {
   }
 
   /**
-   * Bake a chunk's SORT-Y depth (`depthRT`, an `r16float`): write `originY + y`
-   * where the albedo is opaque enough to own the pixel (hard silhouette), else 0.
-   * The quad samples at its own pixel positions (chunk-local), so `uOriginY` lifts
-   * the local Y into world space. Cleared to 0 so empty pixels lose every later
-   * `max`-blend resolve. (4A source = albedo coverage — exact for coplanar ground;
-   * 4B swaps in per-object sort-Y for standing objects.)
+   * Bake a chunk's SORT-Y depth (`depthRT`, `r16float`) in ONE pass. Every primitive
+   * (`LitSprite` — ground tile, fills, AND standing objects, treated identically)
+   * gets a quad in {@link depthBakeContainer}: positioned at the sprite's world bounds
+   * (offset by the chunk origin), sampling the sprite's albedo for the silhouette,
+   * writing the sprite's BASE sort-Y (`sprite.y` — its anchor world-Y, the same key its
+   * zIndex uses) where opaque. The container renders ONCE with `max` blend, so the
+   * frontmost sort-Y wins per pixel: a tall object's whole silhouette carries its feet's
+   * Y, a flat tile carries its own. The single render is MANDATORY — a second
+   * `renderer.render()` into a depth RT in the same bake silently no-ops (the trap that
+   * sank the old two-pass attempt). Clear to the empty sentinel so uncovered pixels lose
+   * every max.
    */
-  bakeChunkDepth(renderer: Renderer, albedoRT: RenderTexture, depthRT: RenderTexture, originY: number): void {
-    const w = depthRT.width;
-    const h = depthRT.height;
-    const pos = this.depthMesh.geometry.positions;
-    pos[0] = 0; pos[1] = 0;
-    pos[2] = w; pos[3] = 0;
-    pos[4] = w; pos[5] = h;
-    pos[6] = 0; pos[7] = h;
-    this.depthMesh.geometry.positions = pos;
-    this.depthShader.texture = albedoRT;
-    this.depthShader.originY = originY;
-    renderer.render({ container: this.depthMesh, target: depthRT, clear: true, clearColor: [0, 0, 0, 0] });
-  }
-
-  /**
-   * Overlay per-object base sort-Y onto a chunk's depth (after {@link bakeChunkDepth}).
-   * Each OBJECT sprite (`!groundLayer`) in the chunk container is drawn individually —
-   * its world quad (offset by the chunk origin), its albedo for the silhouette, its
-   * base world-Y as the constant — `max`-blended into `depthRT`. Frontmost base-Y wins
-   * by value; feet-anchored objects (above their base) yield a flat base-Y over the
-   * ground coverage. No clear — this composes onto the ground depth already there.
-   */
-  bakeChunkObjectDepth(renderer: Renderer, container: Container, depthRT: RenderTexture, originX: number, originY: number): void {
-    this.objectDepthMesh.blendMode = "max";
-    const pos = this.objectDepthMesh.geometry.positions;
+  bakeChunkDepth(renderer: Renderer, container: Container, depthRT: RenderTexture, originX: number, originY: number): void {
+    this.depthBakeContainer.removeChildren();
+    let i = 0;
     for (const child of container.children) {
-      if (!(child instanceof LitSprite) || child.groundLayer) continue;
+      if (!(child instanceof LitSprite)) continue;
       const w = child.width;
       const h = child.height;
       const x0 = child.x - child.anchor.x * w - originX;
       const y0 = child.y - child.anchor.y * h - originY;
-      const x1 = x0 + w;
-      const y1 = y0 + h;
-      pos[0] = x0; pos[1] = y0; pos[2] = x1; pos[3] = y0; pos[4] = x1; pos[5] = y1; pos[6] = x0; pos[7] = y1;
-      this.objectDepthMesh.geometry.positions = pos;
-      this.objectDepthShader.texture = child.albedoTexture;
-      this.objectDepthShader.sortY = child.y;
-      renderer.render({ container: this.objectDepthMesh, target: depthRT, clear: false });
+      let quad = this.depthQuadPool[i];
+      if (!quad) {
+        quad = new Mesh({
+          geometry: new MeshGeometry({
+            positions: new Float32Array(8),
+            uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+          }),
+          shader: makeObjectDepthShader(),
+        });
+        quad.blendMode = "max";
+        this.depthQuadPool[i] = quad;
+      }
+      const pos = quad.geometry.positions;
+      pos[0] = x0; pos[1] = y0; pos[2] = x0 + w; pos[3] = y0; pos[4] = x0 + w; pos[5] = y0 + h; pos[6] = x0; pos[7] = y0 + h;
+      quad.geometry.positions = pos;
+      const sh = quad.shader as ReturnType<typeof makeObjectDepthShader>;
+      sh.texture = child.albedoTexture;
+      sh.sortY = child.y;
+      this.depthBakeContainer.addChild(quad);
+      i++;
     }
+    renderer.render({ container: this.depthBakeContainer, target: depthRT, clear: true, clearColor: [DEPTH_EMPTY, 0, 0, 1] });
   }
 
   /** The cursor's world position + radius, for the chunk-overlap dirty test
@@ -314,8 +299,8 @@ export class DeferredLighting {
   destroy(): void {
     this.sprites.clear();
     this.lightMesh.destroy();
-    this.depthMesh.destroy();
-    this.objectDepthMesh.destroy();
+    for (const q of this.depthQuadPool) q.destroy();
+    this.depthBakeContainer.destroy();
     this.flatNormal.destroy(true);
   }
 }
