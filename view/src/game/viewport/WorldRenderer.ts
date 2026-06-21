@@ -898,7 +898,7 @@ export class WorldRenderer extends LayoutNode {
     for (const e of this.groundChunks.values()) {
       if (!e.display) continue;
       const shader = e.display.shader as DepthCompositeShader;
-      shader.setScreen(screenDepth, pw, ph, true);
+      shader.setScreen(screenDepth, pw, ph, false);
       shader.setDebug(DEPTHVIEW);
     }
     this.compositeLayer.position.copyFrom(this.panLayer.position);

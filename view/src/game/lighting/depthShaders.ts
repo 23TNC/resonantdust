@@ -158,7 +158,11 @@ const depthCompositeBitGl = {
       if (uFlipY > 0.5) suv.y = 1.0 - suv.y;
       float screenD = decodeDepth(texture(uScreenDepth, suv));
       if (uDebug > 0.5) {
-        outColor = vec4(vec3(screenD / 65535.0), 1.0);
+        // Diagnostic: R = this chunk's own depth, G = resolved screen depth.
+        // Yellow (R≈G) = match (kept); GREEN (own < screen) = DISCARDED (the holes);
+        // red (own > screen) = this chunk in front. Reveals the ownD/screenD mismatch.
+        float own = decodeDepth(texture(uOwnDepth, vUV)) / 65535.0;
+        outColor = vec4(own, screenD / 65535.0, 0.0, 1.0);
       } else {
         float ownD = decodeDepth(texture(uOwnDepth, vUV));
         // Behind the pixel's owner (small byte-slack bias) → drop it.
