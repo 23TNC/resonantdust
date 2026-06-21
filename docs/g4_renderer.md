@@ -247,10 +247,47 @@ depth lists — is far more than 2D sprites warrant; the threshold is the standa
 2. **Run — single compare.** The dynamic prim's lit shader samples `static.depth` at the
    fragment's world position, discards where occluded, and lights the survivors live.
 
-New code over what's built (Phases 1–3): one **`depth` render target** in the per-chunk bake
-(write sort-Y under the alpha cutoff instead of color) + the **sample-and-discard** in the
-dynamic prim's shader. Build order: depth channel first (verify a real tree-over-tiles
-silhouette reads its sort-Y cleanly), then the dynamic-prim sample-and-discard.
+### Cross-chunk consequence: the chunk DISPLAY becomes a depth-tested composite (decided)
+Per-chunk storage (the [Build log](#build-log-as-built) reversal) means standing objects —
+which **overhang chunk seams** (a tree's canopy rises into the chunk above) — can't be
+composited as plain alpha-blended chunk sprites: no paint order of the chunk sprites orders
+a seam-straddling tree against the neighbouring chunk's ground correctly. So depth is
+**load-bearing for static-vs-static across chunks, not only dynamic-vs-static.** The chunk
+display is therefore a **depth-tested composite**, not plain sprite draws. (Decided
+2026-06-20 over the alternative — keep standing objects in one live global-Y-sorted layer
+with a per-object lit cache, occlusion free via sort, no depth — chosen against because the
+baked path is the cleaner endgame for baked shadows and a truly large static-object count.)
+
+### PIXI v8 feasibility (spiked 2026-06-20) — texture-encoded depth, max-blend resolve
+PIXI's 2D batch/mesh path gives no reliable per-fragment GL **depth-test** without fighting
+renderer state, so depth is **texture-encoded** (stays in the same color path as the
+lightmap bake). Three confirmed primitives make it tractable:
+- **`r16float` single-channel render texture** (`TEXTURE_FORMATS`) — stores sort-Y exactly
+  (65k levels); avoids 8-bit coarseness AND the multi-byte-packing problem (max-blend on a
+  packed RGBA value would max each byte independently — wrong).
+- **`blendMode: 'max'`** (GL `blendEquation(MAX)`, `mapWebGLBlendModesToPixi`) — the
+  **screen-depth resolve is one order-independent pass**: draw every visible chunk's depth
+  quad into a shared screen-space `r16float` with max-blend → **frontmost sort-Y per pixel**,
+  independent of draw order, so the cross-chunk seam resolves with no sorting.
+- **discard shader** — chunk color drawn through a shader that samples screen-depth at the
+  fragment and `discard`s where its own chunk depth `<` screen-depth; movers `discard` the
+  same way. (Float RT needs WebGL2 `EXT_color_buffer_float` — fine desktop; revisit mobile.)
+
+Pipeline: per-chunk `r16float` depth bake (alpha-threshold, frontmost-by-paint-order) →
+max-blend resolve to one screen `depth` texture → chunk lit color composited with the
+discard shader → movers lit live + discard. New over Phases 1–3: a depth RT per chunk, the
+screen-depth resolve pass, the discard composite shader.
+
+### Build cuts (verifiable)
+- **4·A — depth plumbing, ground only (correctness-neutral).** Add the per-chunk `r16float`
+  depth bake (ground sort-Y), the max-blend screen-depth resolve, and swap the chunk display
+  to the depth-tested composite. Ground is coplanar so output must look **identical** to
+  today — this proves the composite machinery doesn't regress anything.
+- **4·B — bake standing objects in.** Move object-prims from the live `sortLayer` into the
+  per-chunk bake (albedo+normal+depth, depth under the alpha cutoff). Drop the
+  `sortLayer.tint` stopgap. Checkpoint: trees are lit + correctly ordered across seams.
+- **4·C — movers depth-test.** Souls/dragged cards stay live, sample screen-depth, discard
+  where behind. Checkpoint: a soul walks behind a tree; dragging recomputes only damage rects.
 
 ## Transitions (cold↔hot) — cost scales with churn, not the pool
 
