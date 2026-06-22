@@ -13,6 +13,7 @@ import { PixiPanel } from "../../ui/dom/PixiPanel";
 import { WORLD_LAYER, INVENTORY_LAYER } from "../../server/data/packing";
 import { DetailsPanel } from "../../game/panels/details/DetailsPanel";
 import { ChatPanel } from "../../game/panels/chat/ChatPanel";
+import { RtPanel } from "../../game/panels/rt/RtPanel";
 import { LogManager } from "../../game/panels/chat/LogManager";
 import { panelTitle } from "../../game/panels/panelStrings";
 
@@ -86,6 +87,12 @@ export class WorldScene extends Scene {
   private chat!: ChatPanel;
   /** Open inventory viewports, keyed by their owning soul card_id. */
   private readonly inventories = new Map<number, ViewportPanel>();
+  /** The viewport `/showRT` targets — the most-recently-focused one (updated via
+   *  each viewport's `onFocus`). Defaults to the world. */
+  private activeViewport!: ViewportPanel;
+  /** Open render-texture preview panels, keyed by `<surface>:<owner>` so each
+   *  viewport gets at most one (a repeat `/showRT` re-focuses it). */
+  private readonly rtPanels = new Map<string, RtPanel>();
   /** Developer card editor — owns the right-click menu + editor panel. Lazily
    *  imported behind `isDeveloper` so the editor code never ships in a normal
    *  player's bundle (type-only `import(...)` here is erased at compile time). */
@@ -131,6 +138,8 @@ export class WorldScene extends Scene {
     });
     ctx.panels.registerNode(this.world.content, this.world);
     this.world.open();
+    this.activeViewport = this.world;
+    this.trackActive(this.world);
 
     // The logged-in player's own inventory — the `player_soul` card's inventory
     // surface (the soul lives on surface 0, never rendered; its inventory IS the
@@ -179,6 +188,10 @@ export class WorldScene extends Scene {
     // args are HEX (matching the details panel's `#<hex>` display); coords are
     // decimal. See `giveCommand`.
     this.chat.registerCommand("give", (args) => this.giveCommand(args));
+    // `/showRT` — open a render-texture preview panel for the active viewport (one
+    // per viewport). Shows live miniatures of each channel (albedo + planned
+    // normal/depth/lit/emissive). See `showRenderTextures`.
+    this.chat.registerCommand("showRT", () => this.showRenderTextures());
     this.chat.open();
 
     // Card drag-and-drop across viewports (ghost floats in the overlay; drop →
@@ -306,7 +319,52 @@ export class WorldScene extends Scene {
     this.ctx.panels?.registerNode(panel.content, panel);
     panel.open();
     this.inventories.set(ownerId, panel);
-    panel.onDestroy(() => this.inventories.delete(ownerId));
+    this.activeViewport = panel;
+    this.trackActive(panel);
+    panel.onDestroy(() => {
+      this.inventories.delete(ownerId);
+      // A closed viewport's RT preview would read a destroyed renderer — tear it
+      // down with the viewport. Its own `onDestroy` clears the `rtPanels` entry.
+      this.rtPanels.get(this.rtKey(panel))?.destroy();
+      if (this.activeViewport === panel) this.activeViewport = this.world;
+    });
+  }
+
+  /** Track a viewport as the `/showRT` target whenever it gains focus (click /
+   *  taskbar). The unsub rides `this.unsubs` (cleared on scene exit). */
+  private trackActive(vp: ViewportPanel): void {
+    this.unsubs.push(vp.onFocus(() => { this.activeViewport = vp; }));
+  }
+
+  /** Stable per-viewport key for the `rtPanels` map / RT-panel storageKey. */
+  private rtKey(vp: ViewportPanel): string {
+    return `${vp.surfaceBand}:${vp.ownerId}`;
+  }
+
+  /** `/showRT` chat command — open (or re-focus) a render-texture preview panel
+   *  for the active viewport. One panel per viewport, keyed by surface+owner; a
+   *  repeat just re-focuses the existing one. Returns a feedback line. */
+  private showRenderTextures(): string {
+    const vp = this.activeViewport ?? this.world;
+    const key = this.rtKey(vp);
+    const existing = this.rtPanels.get(key);
+    if (existing) {
+      existing.focus();
+      return `Render textures already open for "${vp.titleText}".`;
+    }
+    const panel = new RtPanel({
+      parent: this.overlayLayer,
+      label: `RT · ${vp.titleText}`,
+      storageKey: `showRT:${key}`,
+      source: () => ({ aspect: vp.aspect(), channels: vp.renderTextures() }),
+      taskbar: this.ctx.taskbar,
+      uiEditMode: this.ctx.uiEditMode,
+    });
+    this.ctx.panels?.registerNode(panel.content, panel);
+    panel.open();
+    this.rtPanels.set(key, panel);
+    panel.onDestroy(() => this.rtPanels.delete(key));
+    return `Showing render textures for "${vp.titleText}".`;
   }
 
   private viewports(): ViewportPanel[] {
@@ -417,6 +475,9 @@ export class WorldScene extends Scene {
 
   update(_deltaMS: number): void {
     for (const v of this.viewports()) v.tick();
+    // After the viewports tick (a resize can re-allocate a display RT): refresh the
+    // RT previews so their sprites pick up the live texture this frame.
+    for (const p of this.rtPanels.values()) p.tick();
     this.cardDrag.update(); // glide the drag ghost toward the cursor
     this.updateCursorReadout();
     // Size the details panel to the host body width × its natural height so
@@ -456,6 +517,8 @@ export class WorldScene extends Scene {
     this.input.dispose();
     for (const inv of this.inventories.values()) inv.destroy();
     this.inventories.clear();
+    for (const p of this.rtPanels.values()) p.destroy();
+    this.rtPanels.clear();
     this.detailsHost.destroy();
     this.chat.destroy();
     this.world.destroy();

@@ -2,6 +2,7 @@ import { Container } from "pixi.js";
 import type { CardBox } from "./cardBox";
 import { makePrimitive, type PrimDeps, type Primitive } from "./primitives";
 import type { PrimList } from "./visualSpec";
+import { LitSprite } from "../../lighting/LitSprite";
 
 /** `zIndex` resolution: world-pixel Y is multiplied by this before rounding so
  *  sub-pixel depth differences survive the integer cast, leaving the low bits
@@ -165,6 +166,18 @@ export class PrimitiveLayer extends Container {
     this.deps.faction = this.drawFaction;
     const n = Math.min(this.prims.length, list.length);
     for (let i = 0; i < n; i++) this.prims[i].update(list[i], this.box);
+  }
+
+  /** Every drawable `LitSprite` this layer owns — ground fills (`rect`/`hex`) AND
+   *  standing objects (`sprite`). The rect composite indexes + bakes each by its
+   *  footprint (objects span several rectangles); non-drawable prims (`text`,
+   *  `progress`, `mask`, `light`) are excluded. */
+  litSprites(): LitSprite[] {
+    const out: LitSprite[] = [];
+    for (const p of this.prims) {
+      if ((p.kind === "rect" || p.kind === "hex" || p.kind === "sprite") && p.node instanceof LitSprite) out.push(p.node);
+    }
+    return out;
   }
 
   /** Advance every primitive one layout step. Returns true while any is still

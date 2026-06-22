@@ -29,6 +29,10 @@ export class LitSprite extends Sprite {
   /** The albedo, kept separately from the live `texture` so the normal/emissive
    *  passes can swap `texture` to their map, render, and restore the albedo. */
   albedoTexture: Texture = Texture.EMPTY;
+  /** The resolved art stem this sprite draws — for silhouette-`Sidecar` lookup
+   *  (the rect composite's tight prim→rect footprint). Undefined for solid fills /
+   *  the hex mask (no silhouette). Set by the owning prim. */
+  stem?: string;
   private readonly deferred: DeferredLighting;
 
   constructor(deferred: DeferredLighting, texture: Texture = Texture.EMPTY) {

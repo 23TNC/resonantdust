@@ -37,27 +37,50 @@ import {
  *  fringe below this falls through to whatever's behind. Tuned by eye. */
 export const DEPTH_ALPHA_THRESHOLD = 0.5;
 
-/** Hex row 0 maps to this R byte, so rows in `[-ROW_BIAS, 255-ROW_BIAS]` encode
- *  monotonically (south = larger R = front) with no wrap. Centred → ±128 rows of
- *  headroom around the origin before R clamps (and depth flattens); at rowStep
- *  ≈129px that's ≈±16.5k px — far beyond any one texture's reach. */
-export const ROW_BIAS = 128;
+/** The rect-row sort key wraps every this-many rects (R byte = `mod(rectRow, …)`).
+ *  255, not 256, so floored-mod yields 0..254 and leaves no value double-mapped at the
+ *  seam. The consumer's wraparound compare treats a > half-period (~127) R gap as a
+ *  wrap. 255 rects ≈ 22k px ≫ any viewport → on-screen pairs never alias. */
+export const DEPTH_PERIOD = 255;
 
-// ── OBJECT depth: per-primitive hex-row sort key across its silhouette ────────
+// ── BLUE = the LAYER axis (see docs/depth_layers.md) ──────────────────────────
+// B splits the 0..255 byte into bands of {@link DEPTH_GROUP_SIZE}. The COMPARISON
+// (consumer) uses the band to pick the primary key: prims in the SAME band sort by
+// blue (intra-stack layering); prims in DIFFERENT bands fall back to ground R+G.
+// Bigger = more front on every axis. Band 0 (0..63) holds the card/tile/stack column;
+// band 1 (64..127) holds standing objects; bands 2-3 are spare.
+/** Blue band width. 4 bands: 0..63, 64..127, 128..191, 192..255. `band = B >> 6`. */
+export const DEPTH_GROUP_SIZE = 64;
+/** A lone hex tile's layer = top of the hex column (band 0). A hex STACK fills 30→0:
+ *  each added card takes a slot toward 0, pushing the tile down (max ~16 cards today,
+ *  so 30..14 used, 13..0 spare). */
+export const BLUE_HEX_TILE = 30;
+/** A card's root layer; its top/bottom stacks live just under it at 47..31 (≈16 each
+ *  way, doubled from today's 16-max for breathing room). 49..63 spare above root. */
+export const BLUE_ROOT = 48;
+/** Standing billboard objects (band 1). Centred in the band so manual per-object sort
+ *  has room above (→127) and below (→64). */
+export const BLUE_OBJECT = 80;
+
+// ── OBJECT depth: per-primitive modular sort key across its silhouette ────────
 // Each primitive's sort key rides the MESH TINT (`uColor` → `vColor`) — the one
 // per-object channel that BINDS here (readbacks proved compileHighShaderGlProgram
 // drops custom attributes/uniforms, and a hand-written GlProgram's transform UBO
 // doesn't bind; only built-ins — position, tint, gl_FragCoord — work). `encodeDepthTint`
-// packs row→R, sub-row→G into the tint; we pass those two bytes straight through to the
-// depth target's R+G. The silhouette is the sampled albedo's alpha; drawn `max`-blended
-// so the frontmost (souther row, then souther sub-row) wins per pixel.
+// packs rect-row→R, sub-rect-offset→G into the tint; we pass those two bytes straight to
+// the depth target's R+G. The silhouette is the sampled albedo's alpha. Drawn SORTED
+// back-to-front with OVERWRITE (normal blend): transparent fragments DISCARD (don't
+// stamp 0 over what's behind), opaque ones replace — so the frontmost prim's exact two
+// bytes survive. (Max-blend is wrong here: per-channel max mangles a wrapped 2-byte key.)
 const objectDepthBitGl = {
   name: "object-depth-bit",
   fragment: {
-    // outColor = sampled albedo (textureBit); vColor = the per-mesh tint (row in .r,
-    // sub-row in .g). Pass the two bytes through where opaque; else 0 (loses every max).
+    // outColor = sampled albedo (textureBit); vColor = the per-mesh tint (rect-row in .r,
+    // sub-rect offset in .g, LAYER in .b). Discard the soft fringe so it doesn't
+    // overwrite; stamp the three bytes where opaque.
     main: /* glsl */ `
-      outColor = outColor.a > ${DEPTH_ALPHA_THRESHOLD.toFixed(1)} ? vec4(vColor.r, vColor.g, 0.0, 1.0) : vec4(0.0, 0.0, 0.0, 1.0);
+      if (outColor.a <= ${DEPTH_ALPHA_THRESHOLD.toFixed(1)}) discard;
+      outColor = vec4(vColor.r, vColor.g, vColor.b, 1.0);
     `,
   },
 };
@@ -90,17 +113,66 @@ export class ObjectDepthShader extends Shader {
   }
 }
 
-/** Encode a primitive's world-Y into the depth tint (`0xRRGGBB`): R = hex row
- *  (`floor(worldY/rowStep)` + {@link ROW_BIAS}, clamped to a byte), G = sub-row
- *  offset (`frac × 255`). The shader passes R+G straight to the depth target, where
- *  a per-channel `max`-blend sorts row-first with the sub-row as tiebreak. B stays 0
- *  (free). `rowStep` = `1.5 × worldHexRadius()` (pixels per Δr). */
-export function encodeDepthTint(worldY: number, rowStep: number): number {
-  const rowF = worldY / rowStep;
-  const rowI = Math.floor(rowF);
-  const r = Math.max(0, Math.min(255, rowI + ROW_BIAS));
-  const g = Math.max(0, Math.min(255, Math.round((rowF - rowI) * 255)));
-  return (r << 16) | (g << 8);
+/** Encode a primitive's feet world-Y into the depth tint (`0xRRGGBB`) as a MODULAR
+ *  sort key — absolute depth can't fit the world AND keep sub-tile position, but the
+ *  key only has to ORDER prims that are on screen together (≤ a few dozen rects apart),
+ *  so a key that REPEATS every {@link DEPTH_PERIOD} rects is enough:
+ *
+ *    R = mod(rectRow, DEPTH_PERIOD)   — the rect COUNT in y (`floor(worldY/rectH)`)
+ *                                       wrapped to a byte (negatives flip to the top:
+ *                                       -1→254, -2→253 …, via floored mod). With ~10-20
+ *                                       rects on screen most objects share an R.
+ *    G = px offset into that rect     — `worldY − rectRow·rectH`, the RAW pixel distance
+ *                                       from the rect's top edge. `rectH < 256` so it is
+ *                                       already a byte (NOT scaled — it stays small, near
+ *                                       zero); red+green read as a fixed-point `R·rectH+G`.
+ *
+ *  The consumer compares with WRAPAROUND: when two R bytes straddle the seam (differ by
+ *  > half the period) the smaller is the souther/front one (it wrapped past the top) —
+ *  e.g. R 0..64 sits in front of R 191..255. Period = 255 rects ≈ 22k px ≫ any viewport,
+ *  so on-screen pairs never alias. B stays 0 (free). `rectH` = `worldHexRadius()` (88px).
+ *
+ *  B = the LAYER (see the BLUE_* constants / docs/depth_layers.md) — the vertical axis
+ *  that orders things sharing a ground cell (a hex stack, a card's sub-stacks, an object
+ *  riding a tile). It rides the tint's blue byte.
+ *
+ *  Stored under SORTED back-to-front OVERWRITE (not max-blend — per-channel max mangles
+ *  the multi-byte, wrapped value); the frontmost prim's exact `(R,G,B)` survives. */
+export function encodeDepthTint(worldY: number, rectH: number, blue: number): number {
+  const rectRow = Math.floor(worldY / rectH); // which rect-row in y (the rect COUNT)
+  const r = ((rectRow % DEPTH_PERIOD) + DEPTH_PERIOD) % DEPTH_PERIOD; // floored → 0..254
+  const offset = worldY - rectRow * rectH; // px into the rect, [0, rectH); rectH < 256
+  const g = Math.max(0, Math.min(255, Math.round(offset)));
+  return (r << 16) | (g << 8) | (blue & 0xff);
+}
+
+/** Reference (CPU) impl of the depth COMPARISON the GLSL consumer must mirror — kept
+ *  here as the single source of truth + unit-testable. `a`/`b` are decoded depth bytes
+ *  `{r,g,b}`. Returns +1 if `a` is in FRONT of `b`, −1 if behind, 0 if equal.
+ *
+ *  The blue BAND picks the primary key:
+ *   • same band → blue is primary (intra-column layering), ground R+G breaks the tie;
+ *   • different band → ground R+G is primary, blue breaks the tie.
+ *  Bigger = more front everywhere. R compares with WRAPAROUND (it's `mod(rectRow,255)`):
+ *  a gap > half the period means the smaller value wrapped past the top, so it's front. */
+export function depthFront(
+  a: { r: number; g: number; b: number },
+  b: { r: number; g: number; b: number },
+): number {
+  const ground = (): number => {
+    let dR = a.r - b.r;
+    if (dR > DEPTH_PERIOD / 2) dR -= DEPTH_PERIOD;
+    else if (dR < -DEPTH_PERIOD / 2) dR += DEPTH_PERIOD;
+    if (dR !== 0) return Math.sign(dR);
+    return Math.sign(a.g - b.g);
+  };
+  if (a.b >> 6 === b.b >> 6) {
+    // same band: blue primary, ground tiebreak
+    return a.b !== b.b ? Math.sign(a.b - b.b) : ground();
+  }
+  // different band: ground primary, blue tiebreak
+  const g = ground();
+  return g !== 0 ? g : Math.sign(a.b - b.b);
 }
 
 export function makeObjectDepthShader(): ObjectDepthShader {
@@ -115,17 +187,17 @@ export function makeObjectDepthShader(): ObjectDepthShader {
   });
 }
 
-/** Geometry for one depth quad. `aPosition` is set per primitive to its world bounds;
- *  `aUV` is fixed (the texture matrix maps the frame). Depth rides the mesh tint.
- *  The V is flipped (top verts → V=1) because this quad samples the object's ATLAS
- *  FRAME directly, whereas the lit pass samples a RenderTexture (PIXI stores those
- *  Y-flipped) — without this, every silhouette bakes upside-down and the discard cuts
- *  inverted-object holes (asymmetric prims like pines reveal it; symmetric hexes hide it). */
+/** Geometry for one depth quad. `aPosition` is set per primitive to its world bounds
+ *  (TL, TR, BR, BL); `aUV` is the matching unit quad (the texture matrix maps it to the
+ *  atlas frame). Depth rides the mesh tint. UV is UPRIGHT (matches `aPosition` order),
+ *  so the silhouette bakes the same way up as the albedo `Sprite` does into the rect
+ *  composite — the depth slot is sampled exactly like albedo/normal, no flip. (The old
+ *  per-chunk pipeline flipped V to match an RT-sampled consumer; that consumer is gone.) */
 export function makeDepthQuadGeometry(): Geometry {
   return new Geometry({
     attributes: {
       aPosition: { buffer: new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
-      aUV: { buffer: new Buffer({ data: new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
+      aUV: { buffer: new Buffer({ data: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
     },
     indexBuffer: new Buffer({ data: new Uint32Array([0, 1, 2, 0, 2, 3]), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
   });

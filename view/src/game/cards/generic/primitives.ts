@@ -235,6 +235,9 @@ export class TexPrim extends BasePrim {
     // Deferred two-layer split: a hex-clipped ground is the GROUND layer; every
     // other prim (standing art, solid fill) is an OBJECT. See LitSprite.groundLayer.
     this.node.groundLayer = this.mode.kind === "clippedHex";
+    // Record the resolved stem for the rect composite's silhouette-tight footprint
+    // (undefined for solid fills / the hex mask — no silhouette to tighten to).
+    this.node.stem = stem || undefined;
     setAnchor(this.node, n);
   }
 

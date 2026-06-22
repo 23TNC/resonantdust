@@ -6,6 +6,7 @@ import type { DomPanelRect, PinMode } from "../../ui/dom/DomPanel";
 import { PixiPanel } from "../../ui/dom/PixiPanel";
 import { WorldRenderer } from "./WorldRenderer";
 import { PanController } from "./PanController";
+import type { RtChannel } from "../panels/rt/RtPanel";
 
 /** Old pixijs world-viewport rect: left edge, under the top taskbar, ~800px. */
 const WORLD_RECT: DomPanelRect = { left: "0", top: "32px", width: "800px", height: "calc(100vh - 64px)" };
@@ -166,6 +167,18 @@ export class ViewportPanel extends PixiPanel {
    *  by the scene to route a click to the right viewport. */
   ownsHit(node: unknown): boolean {
     return node === this.world;
+  }
+
+  /** This viewport's render-texture channels (albedo + planned G-buffers) for the
+   *  `/showRT` dev preview. Delegates to the renderer. */
+  renderTextures(): RtChannel[] {
+    return this.world.renderTextures();
+  }
+
+  /** This viewport's display aspect ratio (width / height) — the `/showRT` preview
+   *  sizes its tiles to match. Delegates to the renderer. */
+  aspect(): number {
+    return this.world.aspect();
   }
 
   override destroy(): void {

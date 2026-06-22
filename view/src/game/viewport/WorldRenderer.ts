@@ -1,8 +1,10 @@
-import { Container, Graphics, Mesh, MeshGeometry, Point, RenderTexture, Sprite, Text, type FederatedPointerEvent, type Renderer } from "pixi.js";
+import { Buffer, BufferUsage, Container, Geometry, Graphics, Mesh, Point, Text, type FederatedPointerEvent, type RenderTexture } from "pixi.js";
 import type { GameContext } from "../../GameContext";
-import { DeferredLighting, CURSOR_LIGHT, type Light } from "../lighting/DeferredLighting";
-import { makeDepthCompositeShader, type DepthCompositeShader } from "../lighting/depthShaders";
-import { LitSprite } from "../lighting/LitSprite";
+import { DeferredLighting } from "../lighting/DeferredLighting";
+import { RectComposite, DISPLAY_INDICES } from "./rects/RectComposite";
+import { makeGroundShader, GroundShader, MAX_HOT_LIGHTS } from "./rects/rectDisplayShader";
+import { rectW, rectH, rectOffX, rectOffY, rectWorldX, rectWorldY } from "./rects/rectMath";
+import { debug } from "../../debug";
 import { LayoutNode } from "../layout/LayoutNode";
 import { HexMath } from "./hexMath";
 import { worldHexRadius, worldHexWidth, worldHexHeight } from "./hex/hexSize";
@@ -37,33 +39,28 @@ export function cellHash(q: number, r: number): number {
   return h;
 }
 
-/** Axial side length (in tiles) of a GROUND CHUNK — the per-chunk container that
- *  holds a block of tiles' ground (bg + clippedHex fills), the unit the D1b.1b
- *  bake renders in isolation. A render tiling only; independent of the server
- *  macro_zone. */
-const GROUND_CHUNK = 8;
+/** Max rect-area baked into the ground composite per frame — bounds the per-frame
+ *  bake cost so a big reveal (or first paint) streams over a few frames. Whole
+ *  coalesced blocks are baked, so this is a soft cap. */
+const BAKE_BUDGET = 96;
 
-/** The ground chunk key for a tile cell — `floor(q/N),floor(r/N)`. */
-function groundChunkKey(q: number, r: number): string {
-  return `${Math.floor(q / GROUND_CHUNK)},${Math.floor(r / GROUND_CHUNK)}`;
-}
-
-/** Dev: `?depthview` shows each chunk's baked sort-Y depth (greyscale, top-dark to
- *  bottom-light, panning continuously) instead of its lit colour — to eyeball the
- *  Phase-4 depth bake before any consumer (the composite/movers) exists. */
-const DEPTHVIEW = typeof location !== "undefined" && location.search.includes("depthview");
+/** Dev: `?rectview` logs the ground composite's per-frame bake/display work
+ *  (rects baked + display blocks) so a pan can be confirmed to re-bake only the
+ *  revealed row/column strip, never the whole composite. */
+const RECTVIEW = typeof location !== "undefined" && location.search.includes("rectview");
 
 /** zIndex of a tile's `bg` underlay within its ground chunk — below every fill
  *  prim (which `PrimitiveLayer` floors at ≈ −1e7 + worldY), so the textured
  *  clippedHex ground always draws over the flat tint. */
 const TILE_BG_Z = -2e7;
 
-/** A retained world tile. Its GROUND (the `bg` underlay + the `clippedHex`/fill
- *  prims) lives in its per-chunk ground container (`chunk` is that container's
- *  key, for refcounted teardown); its OBJECT prims live in the shared `sortLayer`.
- *  `sig` gates rebuilds. */
+/** A retained world tile. All its prims — `bg` underlay, `clippedHex`/fill ground,
+ *  and standing `sprite` objects — live in the shared detached `primSource` and bake
+ *  into the rect composite (keyed by `primId`). `sig` gates rebuilds. */
 interface TileNode {
-  chunk: string;
+  /** Stable numeric id used to key this tile's ground in the rect composite's
+   *  prim↔rect index (so a drop/rebuild can address it). */
+  primId: number;
   bg: HexTileVisual;
   prims: PrimitiveLayer;
   sig: number;
@@ -160,77 +157,50 @@ function stackFan(flags: number): { dir: number; index: number } {
  */
 export class WorldRenderer extends LayoutNode {
   private readonly panLayer = new Container();
-  private readonly tileLayer = new Container();
-  private readonly sortLayer = new Container();
   private readonly cardLayer = new Container();
-  /** Per-chunk GROUND state (D1b.1a + D1b.1b). `container` holds the `bg` +
-   *  `clippedHex`/fill prims of every tile in a `GROUND_CHUNK`² block, but is
-   *  DETACHED (a bake source, never in the scene). On a content change (`dirty`)
-   *  the container is baked into world-space `albedoRT`/`normalRT`, displayed by a
-   *  composite mesh (in {@link compositeLayer}); panning never
-   *  re-bakes. `count` refcounts the tiles so an emptied chunk frees everything. */
-  private readonly groundChunks = new Map<
-    string,
-    {
-      container: Container;
-      count: number;
-      /** Geometry changed → re-bake albedo + normal + lit. */
-      dirty: boolean;
-      /** A light affecting it changed (the cursor moved in/out) → re-light only
-       *  (`bakeChunkLit` from the cached albedo+normal; no geometry re-render). */
-      lightDirty: boolean;
-      albedoRT: RenderTexture | null;
-      normalRT: RenderTexture | null;
-      /** The LIT map (`albedo×(ambient+Σ lights)`) the display sprite shows. */
-      litRT: RenderTexture | null;
-      /** Per-chunk SORT-Y depth (`r16float`, Phase 4) — world-Y where the ground is
-       *  opaque, else the empty sentinel. Resolved across chunks for occlusion. */
-      depthRT: RenderTexture | null;
-      /** Display: a composite `Mesh` (not a plain Sprite) showing `litRT`, with
-       *  fragments `discard`ed where this chunk is behind the resolved screen depth
-       *  (the cross-chunk occlusion). Lives in {@link compositeLayer}. */
-      display: Mesh | null;
-      /** Depth sprite (shows `depthRT`, `max`-blended) in {@link depthLayer} — the
-       *  per-frame source for the screen-depth resolve. */
-      depthSprite: Sprite | null;
-      /** Chunk world origin (its baked bounds' top-left) — for re-light + the
-       *  cursor-disk overlap test. */
-      originX: number;
-      originY: number;
-    }
-  >();
-  /** Chunk keys the cursor light currently touches — for damage tracking (re-light
-   *  the chunks it leaves as well as the ones it enters). */
-  private cursorChunks = new Set<string>();
-  /** Last cursor disk centre, so `markCursorChunks` no-ops when it hasn't moved. */
-  private lastCursor: { x: number; y: number } | null = null;
-  /** Detached holders rendered into the panel-sized screen RTs each frame, both
-   *  mirroring `panLayer.position` so chunks land at their on-screen pixels:
-   *  `depthLayer` (chunk depth sprites, `max`-blended) → {@link screenDepthRT};
-   *  `compositeLayer` (chunk composite meshes) → {@link litScreenRT}. Rendering the
-   *  composite into a PANEL-sized RT (not the canvas) makes `gl_FragCoord` panel-
-   *  local, so it samples the (also panel-sized) screen depth with no canvas offset. */
-  private readonly depthLayer = new Container();
-  private readonly compositeLayer = new Container();
-  /** Screen-space resolved sort-Y (`r16float`), one frontmost value per pixel. */
-  private screenDepthRT: RenderTexture | null = null;
-  /** The composited ground colour (depth-occluded) for this frame; shown by
-   *  {@link groundSprite}. Panel-sized; rebuilt on resize. */
-  private litScreenRT: RenderTexture | null = null;
-  /** Displays {@link litScreenRT} at the panel origin (screen space — the composite
-   *  already baked in the pan), BELOW `panLayer` so objects/cards draw over it. */
-  private readonly groundSprite = new Sprite();
+  /** The detached, world-positioned container holding every visible tile's prims —
+   *  the `bg`, the `clippedHex`/fill GROUND, AND standing `sprite` OBJECTS (trees,
+   *  bushes). Never in the scene: it's the bake SOURCE the rect composite renders
+   *  dirty rectangles from (per-rect, z-sorted there, so child order is irrelevant).
+   *  Objects span several rectangles; a change dirties all of them. */
+  private readonly primSource = new Container();
+  /** The wrap-around ground composite (albedo, no lighting in M1). Bakes dirty
+   *  rectangles once and pans for free; produces the display RT shown by
+   *  {@link groundMesh}. Assigned in the constructor (needs `gctx.geometry`). */
+  private readonly albedo: RectComposite;
+  /** The ground display: ≤4 seam-split quads whose shader samples the albedo + normal
+   *  composites and applies the HOT (dynamic) lights live each frame. BELOW `panLayer`
+   *  so objects/cards draw over it. */
+  private readonly groundShader: GroundShader = makeGroundShader();
+  /** Display mesh: up to 4 quads (16 verts) splitting the window at the torus wrap,
+   *  so no quad samples across the seam. `fillDisplay` rewrites pos/uv each frame. */
+  private readonly groundPosBuf = new Buffer({ data: new Float32Array(32), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  private readonly groundUvBuf = new Buffer({ data: new Float32Array(32), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  private readonly groundGeo = new Geometry({
+    attributes: {
+      aPosition: { buffer: this.groundPosBuf, format: "float32x2" },
+      aUV: { buffer: this.groundUvBuf, format: "float32x2" },
+    },
+    indexBuffer: new Buffer({ data: DISPLAY_INDICES.slice(), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
+  });
+  private readonly groundMesh = new Mesh({ geometry: this.groundGeo, shader: this.groundShader });
+  /** HOT (dynamic) lights packed into the ground shader each frame. [0] is the cursor
+   *  light (`screen` = panel px, follows the pointer); `screen:false` lights are world
+   *  px (+pan at pack). Up to {@link MAX_HOT_LIGHTS}. */
+  private readonly hotLights: { x: number; y: number; height: number; radius: number; color: number; brightness: number; screen: boolean }[] = [
+    { x: 0, y: 0, height: 180, radius: 480, color: 0xffffff, brightness: 2.0, screen: true },
+  ];
+  /** Cursor light positioned by a real pointer move yet? (else centre it). */
+  private cursorMoved = false;
+  /** Cold (static, baked) light fixtures placed yet? (placed once the composite is ready). */
+  private coldSet = false;
+  private readonly onCursorMove: (e: FederatedPointerEvent) => void;
   private readonly grid = new HexMath(worldHexRadius());
   private readonly deps: PrimDeps;
-  /** This viewport's deferred lighting (world-space, scoped here). Owns the
-   *  lit-sprite registry + lights; the normal/light/composite passes land in
-   *  later phases. Fed the cursor each pointer move. */
+  /** This viewport's deferred lighting (world-space, scoped here). Owns the lit-sprite
+   *  registry every `LitSprite` registers with; the light/normal passes are dormant in
+   *  M1 (ground composite is flat albedo) and re-wired at the lighting milestone. */
   private readonly deferred = new DeferredLighting();
-  private readonly onCursorMove: (e: FederatedPointerEvent) => void;
-  /** G4 Phase 2 verification fixture: one static (`canBake`) light, placed at the
-   *  view centre on the first frame, so we can see the per-chunk lightmap working
-   *  before `^light` cards exist. Replaced by real authored lights later. */
-  private g4Fixture: Light | null = null;
   /** Set when any LOD texture finishes loading; the next `tick` re-resolves
    *  present tiles/cards so substitutes (64px) swap up to the ideal LOD. Many
    *  load events coalesce into one re-resolve per frame. */
@@ -244,6 +214,9 @@ export class WorldRenderer extends LayoutNode {
 
   /** Selection highlight, drawn over the selected card's footprint. */
   private readonly selectionGfx = new Graphics();
+  /** `?rectview` debug overlay: the x/y rectangle grid (red), drawn in world space
+   *  so it pans with the world — to eyeball rect alignment against the hexes. */
+  private readonly rectGrid = new Graphics();
   private selectedCardId: number | null = null;
   /** Selected world tile cell, or null. Mutually exclusive with a card
    *  selection (the scene clears one when it sets the other). Stored as the cell
@@ -267,6 +240,8 @@ export class WorldRenderer extends LayoutNode {
   private readonly queuedTiles = new Set<string>();
   private readonly queuedCards = new Set<number>();
   private animating = false;
+  /** Monotonic id source for tile ground entries in the rect composite's index. */
+  private nextPrimId = 1;
 
   /** Cards currently being dragged (dimmed in place; the ghost shows the move). */
   private readonly draggingCards = new Set<number>();
@@ -287,12 +262,21 @@ export class WorldRenderer extends LayoutNode {
     this.anchorQ = anchor.q;
     this.anchorR = anchor.r;
 
-    this.sortLayer.sortableChildren = true;
     this.cardLayer.sortableChildren = true;
-    this.panLayer.addChild(this.tileLayer, this.sortLayer, this.cardLayer, this.selectionGfx);
-    // Ground is a screen-space composite (Phase 4): the per-frame `litScreenRT`
-    // shown at the panel origin, BELOW `panLayer` so objects/cards draw over it.
-    this.container.addChild(this.groundSprite, this.panLayer);
+    // One composite, the ALBEDO channel (a composite of every tile prim's albedo —
+    // ground AND objects). Generalized: a `normal` (and lit/emissive/depth) channel
+    // is one more spec here at the lighting milestone — same slots/anchor/dirty index.
+    this.albedo = new RectComposite(this.primSource, gctx.geometry, [
+      // ALBEDO: each prim's colour, transparent where there's no geometry.
+      { name: "albedo", texOf: (s) => s.albedoTexture ?? s.texture, clearColor: [0, 0, 0, 0] },
+      // NORMAL: each prim's normal map (white-tinted so the albedo colour can't skew
+      // the vector), skipped where a prim has none so the flat-up clear (+Z) shows.
+      { name: "normal", texOf: (s) => s.normalTexture ?? null, clearColor: [0.5, 0.5, 1, 1], whiteTint: true },
+    ]);
+    this.panLayer.addChild(this.cardLayer, this.selectionGfx, this.rectGrid);
+    // Ground is the shader-displayed albedo composite, BELOW `panLayer` so
+    // objects/cards draw over it.
+    this.container.addChild(this.groundMesh, this.panLayer);
 
     this.deps = {
       lod: gctx.lodTextures,
@@ -304,16 +288,16 @@ export class WorldRenderer extends LayoutNode {
       queue: () => -1,
     };
 
-    // Drive the cursor light: project the screen position straight into
-    // `container` (content) space — the space the light buffer + mesh live in,
-    // so the light pass uses it directly with no further transform. When the
-    // cursor is over a different viewport the point lands off this one's visible
-    // area, so the light naturally stays contained. `globalpointermove` fires
-    // regardless of hit-testing; the stage just needs to be event-enabled.
+    // Cursor light: project the global pointer into this panel's local px (the space
+    // the shader sums hot lights in) and move light[0] there. `globalpointermove`
+    // fires regardless of hit-testing; a pointer over another viewport lands off this
+    // panel so the light naturally leaves. Stage must be event-enabled.
     gctx.app.stage.eventMode = "static";
     this.onCursorMove = (e: FederatedPointerEvent) => {
-      const p = this.panLayer.toLocal(e.global);
-      this.deferred.setCursorWorld(p.x, p.y);
+      const p = this.container.toLocal(e.global);
+      this.hotLights[0].x = p.x;
+      this.hotLights[0].y = p.y;
+      this.cursorMoved = true;
     };
     gctx.app.stage.on("globalpointermove", this.onCursorMove);
 
@@ -354,16 +338,7 @@ export class WorldRenderer extends LayoutNode {
       t.prims.destroy();
       t.bg.destroy();
     }
-    for (const e of this.groundChunks.values()) {
-      e.display?.destroy();
-      e.depthSprite?.destroy();
-      e.container.destroy({ children: true });
-      e.albedoRT?.destroy(true);
-      e.normalRT?.destroy(true);
-      e.litRT?.destroy(true);
-      e.depthRT?.destroy(true);
-    }
-    this.groundChunks.clear();
+    this.albedo.reset(); // drop the prim index + re-bake the window for new defs
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
     this.cards.clear();
@@ -517,6 +492,32 @@ export class WorldRenderer extends LayoutNode {
     return { packed: s.packed, q: s.q, r: s.r, stock: s.stock, flags: s.flags };
   }
 
+  /** Named render-texture channels for the `/showRT` dev preview. M1 produces only
+   *  the ground composite's albedo display RT; the normal/depth/lit/emissive
+   *  G-buffers are dormant (the lighting passes are re-wired at the lighting
+   *  milestone — see {@link DeferredLighting}) and report `null` until their
+   *  composites come online. Stable order so the preview tiles don't reshuffle as
+   *  channels light up. The textures are LIVE (re-rendered each frame), so a sprite
+   *  pointing at one shows the current frame for free. */
+  renderTextures(): { name: string; texture: RenderTexture | null }[] {
+    return [
+      // The FIXED-slot composites (the maps themselves) — not the sliding display
+      // copies. `albedo` is a composite of every ground prim's albedo.
+      { name: "albedo",   texture: this.albedo.channelComposite("albedo") },
+      { name: "normal",   texture: this.albedo.channelComposite("normal") },
+      { name: "depth",    texture: this.albedo.depthTexture }, // baked sort-Y (objects only)
+      { name: "lit",      texture: this.albedo.lightmapTexture }, // the baked cold-light map
+      { name: "emissive", texture: null },
+    ];
+  }
+
+  /** This viewport's display aspect ratio (width / height), so the `/showRT`
+   *  preview tiles can match the viewport's shape (including dormant channels with
+   *  no texture to read it from). 0 before the first layout. */
+  aspect(): number {
+    return this.height > 0 ? this.width / this.height : 0;
+  }
+
   // ── layout: reposition the pan container + re-aim the region ────────
   protected override layout(): boolean {
     const cx = this.width / 2;
@@ -606,9 +607,9 @@ export class WorldRenderer extends LayoutNode {
   private dropAbsent(): void {
     for (const [key, node] of this.tiles) {
       if (this.presentTiles.has(key)) continue;
+      this.albedo.removeTile(node.primId); // dirties the vacated rects → re-bake empty
       node.prims.destroy();
       node.bg.destroy();
-      this.releaseGroundChunk(node.chunk);
       this.tiles.delete(key);
       this.desiredTiles.delete(key);
     }
@@ -673,36 +674,126 @@ export class WorldRenderer extends LayoutNode {
 
     if (this.animating) {
       let active = false;
-      for (const t of this.tiles.values()) if (t.prims.settle()) active = true;
+      for (const t of this.tiles.values()) {
+        // A still-easing tile's ground prims move/resize → re-index + re-bake the
+        // rectangles they now cover, so the baked composite tracks the final pose.
+        if (t.prims.settle()) { active = true; this.registerTilePrims(t); }
+      }
       for (const c of this.cards.values()) if (c.layer?.settle()) active = true;
       this.animating = active;
     }
     this.drawSelection();
 
-    // Apply any LOD upgrades that landed since last frame (coalesced).
+    // Apply any LOD upgrades that landed since last frame (coalesced). A tile's
+    // ground texture swapping (64px → ideal LOD) needs its rectangles re-baked.
     if (this.texturesDirty) {
       this.texturesDirty = false;
-      for (const t of this.tiles.values()) t.prims.refreshTextures();
+      for (const t of this.tiles.values()) { t.prims.refreshTextures(); this.registerTilePrims(t); }
       for (const c of this.cards.values()) c.layer?.refreshTextures();
     }
 
-    // G4 (Phase 2): re-bake any ground chunks whose content changed (never on pan
-    // alone) into their per-chunk LIT maps (albedo × ambient + static lights). The
-    // display shows those directly. Objects (sortLayer) aren't lit yet — Phase 4 —
-    // so they're flat-dimmed to the ambient floor for now.
+    // Ground composite (M1): size to the panel, recenter the wrap-around window on
+    // the anchor (revealed strips go dirty), bake the dirty rects into the composite
+    // under budget, then copy the visible window to the display RT at the live pan
+    // offset. Idle = no bake (nothing dirty); pan = one revealed row/column strip.
     const renderer = this.gctx.app.renderer;
-    // Phase-2 fixture: once tiles exist, drop one static light at the anchor's world
-    // position (the view centre) and re-bake the chunks with it.
-    if (!this.g4Fixture && this.groundChunks.size > 0) {
-      const a = this.anchor();
-      const c = this.grid.cellToPixel(a.q, a.r);
-      this.g4Fixture = { ...CURSOR_LIGHT, x: c.x, y: c.y, canBake: true, brightness: 2.2, radius: 6 };
-      this.deferred.registerLight(this.g4Fixture);
-      for (const e of this.groundChunks.values()) e.dirty = true; // re-light with it
+    this.albedo.resize(this.width, this.height, renderer);
+    // Authoritative pan THIS frame, from the live anchor — `layout()` (the other
+    // `panLayer.position` writer) runs on the layout-flush, not every frame, so during
+    // a smooth pan it lags. Compute it here (same formula as `layout`) and set it, so
+    // the composite window (recenter), the display copy and the live object/card layers
+    // ALL use one anchor value — otherwise the ground jumps against the window/objects.
+    const a = this.grid.cellToPixel(this.anchorQ, this.anchorR);
+    const panX = this.width / 2 - a.x;
+    const panY = this.height / 2 - a.y;
+    this.panLayer.position.set(panX, panY);
+    this.albedo.recenter(a.x, a.y);
+    this.ensureColdLights(a.x, a.y);
+    this.albedo.bakeDirty(renderer, BAKE_BUDGET);
+    this.albedo.bakeLightDirty(renderer, BAKE_BUDGET); // re-bake stale lightmap slots (cold lights)
+    this.updateGroundMesh(panX, panY);
+    if (RECTVIEW) {
+      this.drawRectGrid();
+      if (this.albedo.lastBaked > 0) {
+        debug.log(["render"], `[rectview] baked ${this.albedo.lastBaked} rectangles`, 5);
+      }
     }
-    this.markCursorChunks(); // dynamic cursor light → re-light the chunks it touches
-    this.bakeDirtyChunks(renderer);
-    this.compositeGround(renderer); // resolve screen depth → composite + display ground
+  }
+
+  /** Point the ground display quad at the panel + feed the shader the window/pan so
+   *  it samples the right composite slot per fragment. The composite never moves;
+   *  the pan lives entirely in the shader's per-fragment world→slot mapping. */
+  private updateGroundMesh(panX: number, panY: number): void {
+    if (!this.albedo.ready) return;
+    const alb = this.albedo.channelComposite("albedo");
+    const nrm = this.albedo.channelComposite("normal");
+    if (!alb || !nrm) return;
+    // Rebuild the ≤4 seam-split quads for this pan, then point at both G-buffers.
+    this.albedo.fillDisplay(panX, panY, this.groundPosBuf.data as Float32Array, this.groundUvBuf.data as Float32Array);
+    this.groundPosBuf.update();
+    this.groundUvBuf.update();
+    this.groundShader.albedo = alb;
+    this.groundShader.normal = nrm;
+    const lm = this.albedo.lightmapTexture;
+    if (lm) this.groundShader.lightmap = lm;
+    this.packHotLights(panX, panY);
+  }
+
+  /** Place the cold (static, baked) light fixtures once the composite is sized — two
+   *  world-anchored torches (warm + cool) that pan with the world. The ambient floor
+   *  lives in the lightmap. A demo set until authored `^light` cards drive cold lights. */
+  private ensureColdLights(anchorWorldX: number, anchorWorldY: number): void {
+    if (this.coldSet || !this.albedo.ready) return;
+    this.coldSet = true;
+    this.albedo.setColdLights([
+      { x: anchorWorldX - 220, y: anchorWorldY - 120, height: 120, radius: 380, color: 0xffa64d, brightness: 2.2 },
+      { x: anchorWorldX + 260, y: anchorWorldY + 140, height: 120, radius: 380, color: 0x5aa0ff, brightness: 2.0 },
+    ], 0.22);
+  }
+
+  /** Pack the hot lights into the ground shader (panel px). The cursor light (screen)
+   *  centres on first frame until the pointer moves; world lights add the pan. */
+  private packHotLights(panX: number, panY: number): void {
+    const n = Math.min(this.hotLights.length, MAX_HOT_LIGHTS);
+    const data = new Float32Array(MAX_HOT_LIGHTS * 4);
+    const color = new Float32Array(MAX_HOT_LIGHTS * 4);
+    for (let i = 0; i < n; i++) {
+      const l = this.hotLights[i];
+      let x = l.x;
+      let y = l.y;
+      if (l.screen && !this.cursorMoved) { x = this.width / 2; y = this.height / 2; }
+      else if (!l.screen) { x += panX; y += panY; }
+      data[i * 4] = x; data[i * 4 + 1] = y; data[i * 4 + 2] = l.height; data[i * 4 + 3] = l.radius;
+      color[i * 4] = ((l.color >> 16) & 0xff) / 255;
+      color[i * 4 + 1] = ((l.color >> 8) & 0xff) / 255;
+      color[i * 4 + 2] = (l.color & 0xff) / 255;
+      color[i * 4 + 3] = l.brightness;
+    }
+    this.groundShader.setLights(data, color, n);
+  }
+
+  /** `?rectview`: outline every rectangle in the visible area in red (world space,
+   *  so it pans with the world). The grid lines sit at world `col·W` / `row·H`, the
+   *  exact lattice the composite bakes + copies on — to confirm rect↔hex alignment. */
+  private drawRectGrid(): void {
+    const W = rectW();
+    const H = rectH();
+    const panX = this.panLayer.position.x;
+    const panY = this.panLayer.position.y;
+    const x0 = -panX;
+    const x1 = this.width - panX;
+    const y0 = -panY;
+    const y1 = this.height - panY;
+    this.rectGrid.clear();
+    for (let c = Math.floor((x0 - rectOffX()) / W); c <= Math.ceil((x1 - rectOffX()) / W); c++) {
+      const lx = rectWorldX(c);
+      this.rectGrid.moveTo(lx, y0).lineTo(lx, y1);
+    }
+    for (let r = Math.floor((y0 - rectOffY()) / H); r <= Math.ceil((y1 - rectOffY()) / H); r++) {
+      const ly = rectWorldY(r);
+      this.rectGrid.moveTo(x0, ly).lineTo(x1, ly);
+    }
+    this.rectGrid.stroke({ color: 0xff0000, width: 1, alpha: 0.6 });
   }
 
   override setBounds(x: number, y: number, width: number, height: number): void {
@@ -740,206 +831,6 @@ export class WorldRenderer extends LayoutNode {
     }
   }
 
-  /** Get (creating if needed) the DETACHED ground container for `chunkKey` and bump
-   *  its tile refcount. The container sorts its children by world-Y (the fills
-   *  overlap ~1px via the hex overscale, so draw order matters) but is never in the
-   *  scene — it's a bake source; {@link bakeDirtyChunks} renders it into the chunk's
-   *  RTs and the display `sprite` shows the result. A new tile dirties the chunk. */
-  private acquireGroundChunk(chunkKey: string): Container {
-    let entry = this.groundChunks.get(chunkKey);
-    if (!entry) {
-      const container = new Container();
-      container.sortableChildren = true;
-      entry = {
-        container, count: 0, dirty: true, lightDirty: false,
-        albedoRT: null, normalRT: null, litRT: null, depthRT: null,
-        display: null, depthSprite: null, originX: 0, originY: 0,
-      };
-      this.groundChunks.set(chunkKey, entry);
-    }
-    entry.count++;
-    entry.dirty = true;
-    return entry.container;
-  }
-
-  /** Mark a chunk's baked ground stale (a tile in it built/changed) so the next
-   *  {@link bakeDirtyChunks} re-renders it. No-op if the chunk is already gone. */
-  private markChunkDirty(chunkKey: string): void {
-    const entry = this.groundChunks.get(chunkKey);
-    if (entry) entry.dirty = true;
-  }
-
-  /** Drop one tile's hold on its ground chunk; destroy the container, its RTs and
-   *  its display sprite when the last tile in it leaves. */
-  private releaseGroundChunk(chunkKey: string): void {
-    const entry = this.groundChunks.get(chunkKey);
-    if (!entry) return;
-    if (--entry.count <= 0) {
-      entry.display?.destroy();
-      entry.depthSprite?.destroy();
-      entry.container.destroy({ children: true });
-      entry.albedoRT?.destroy(true);
-      entry.normalRT?.destroy(true);
-      entry.litRT?.destroy(true);
-      entry.depthRT?.destroy(true);
-      this.groundChunks.delete(chunkKey);
-    } else {
-      entry.dirty = true; // a tile left → re-bake the remaining ground
-    }
-  }
-
-  /** Re-bake every dirty chunk's ground into its world-space RTs and (re)point its
-   *  display `LitSprite` at them. Runs once per render frame BEFORE the deferred
-   *  passes; a chunk is dirty only on a content change (tile build/drop), so panning
-   *  over already-built chunks bakes nothing. RTs are (re)sized to the chunk's world
-   *  content bounds at the renderer resolution; the bake offsets by that origin and
-   *  the sprite is positioned there, so the lit ground lands exactly in world space. */
-  private bakeDirtyChunks(renderer: Renderer): void {
-    const res = renderer.resolution;
-    for (const entry of this.groundChunks.values()) {
-      if (!entry.dirty && !entry.lightDirty) continue;
-      if (entry.container.children.length === 0) {
-        entry.dirty = false;
-        entry.lightDirty = false;
-        continue;
-      }
-      if (entry.dirty) {
-        // Geometry changed: re-bake albedo + normal, then light.
-        const b = entry.container.getLocalBounds();
-        const w = Math.max(1, Math.ceil(b.width));
-        const h = Math.max(1, Math.ceil(b.height));
-        if (!entry.albedoRT || entry.albedoRT.width !== w || entry.albedoRT.height !== h) {
-          entry.albedoRT?.destroy(true);
-          entry.normalRT?.destroy(true);
-          entry.litRT?.destroy(true);
-          entry.depthRT?.destroy(true);
-          entry.albedoRT = RenderTexture.create({ width: w, height: h, resolution: res });
-          entry.normalRT = RenderTexture.create({ width: w, height: h, resolution: res });
-          entry.litRT = RenderTexture.create({ width: w, height: h, resolution: res });
-          // Single-channel float so sort-Y is exact (no 8-bit coarseness) and the
-          // cross-chunk `max`-blend resolve operates on one value, not packed bytes.
-          entry.depthRT = RenderTexture.create({ width: w, height: h, resolution: res });
-        }
-        entry.originX = b.x;
-        entry.originY = b.y;
-        this.deferred.bakeGround(renderer, entry.container, entry.albedoRT, entry.normalRT!, b.x, b.y);
-        // Sort-Y depth: ONE unified pass over every primitive (tiles + objects), each
-        // writing its base sort-Y. Only on a geometry re-bake — lightDirty leaves it.
-        this.deferred.bakeChunkDepth(renderer, entry.container, entry.depthRT!, entry.originX, entry.originY);
-      }
-      // Re-light (always when dirty; on lightDirty without a geometry re-bake). The
-      // albedo + normal are cached, so a light change is just the light pass.
-      this.deferred.bakeChunkLit(
-        renderer, entry.normalRT!, entry.albedoRT!, entry.litRT!, entry.originX, entry.originY,
-      );
-      this.updateChunkDisplay(entry);
-      entry.dirty = false;
-      entry.lightDirty = false;
-    }
-  }
-
-  /** (Re)build a chunk's display: the composite `Mesh` (shows `litRT`, occluded by
-   *  the screen depth) in {@link compositeLayer}, and the depth `Sprite` (shows
-   *  `depthRT`, `max`-blended) in {@link depthLayer} for the resolve. Both sit at
-   *  the chunk world origin; geometry/size track the (possibly resized) RTs. */
-  private updateChunkDisplay(entry: { litRT: RenderTexture | null; depthRT: RenderTexture | null; display: Mesh | null; depthSprite: Sprite | null; originX: number; originY: number }): void {
-    const lit = entry.litRT!;
-    const w = lit.width;
-    const h = lit.height;
-    if (!entry.display) {
-      const geometry = new MeshGeometry({
-        positions: new Float32Array(8),
-        uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
-        indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
-      });
-      entry.display = new Mesh({ geometry, shader: makeDepthCompositeShader() });
-      this.compositeLayer.addChild(entry.display);
-    }
-    const pos = entry.display.geometry.positions;
-    pos[0] = 0; pos[1] = 0; pos[2] = w; pos[3] = 0; pos[4] = w; pos[5] = h; pos[6] = 0; pos[7] = h;
-    entry.display.geometry.positions = pos;
-    entry.display.position.set(entry.originX, entry.originY);
-    const shader = entry.display.shader as DepthCompositeShader;
-    shader.texture = lit;
-    shader.ownDepth = entry.depthRT!;
-    if (!entry.depthSprite) {
-      entry.depthSprite = new Sprite(entry.depthRT!);
-      entry.depthSprite.blendMode = "max";
-      this.depthLayer.addChild(entry.depthSprite);
-    }
-    entry.depthSprite.texture = entry.depthRT!;
-    entry.depthSprite.position.set(entry.originX, entry.originY);
-  }
-
-  /** Phase-4 ground composite, once per frame. (1) RESOLVE: render every chunk's
-   *  depth sprite (`max`-blended) into {@link screenDepthRT} → the frontmost sort-Y
-   *  per panel pixel. (2) COMPOSITE: render every chunk's mesh into {@link litScreenRT},
-   *  each sampling the screen depth via `gl_FragCoord` (panel-local, since the target
-   *  is panel-sized) and `discard`ing where it's behind the winner. (3) DISPLAY: show
-   *  `litScreenRT` via {@link groundSprite}. Both layers mirror `panLayer`, so the pan
-   *  is baked into the composite — the display sprite stays at the panel origin. */
-  private compositeGround(renderer: Renderer): void {
-    if (this.width <= 0 || this.height <= 0 || this.compositeLayer.children.length === 0) return;
-    const res = renderer.resolution;
-    const pw = Math.max(1, Math.ceil(this.width * res));
-    const ph = Math.max(1, Math.ceil(this.height * res));
-    if (!this.screenDepthRT || this.screenDepthRT.width !== this.width || this.screenDepthRT.height !== this.height) {
-      this.screenDepthRT?.destroy(true);
-      this.litScreenRT?.destroy(true);
-      this.screenDepthRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res });
-      this.litScreenRT = RenderTexture.create({ width: this.width, height: this.height, resolution: res });
-    }
-    const screenDepth = this.screenDepthRT!;
-    const litScreen = this.litScreenRT!;
-    // (1) resolve frontmost sort key across chunks (empty = 0, loses every max).
-    this.depthLayer.position.copyFrom(this.panLayer.position);
-    renderer.render({ container: this.depthLayer, target: screenDepth, clear: true, clearColor: [0, 0, 0, 1] });
-    // (2) composite: feed the screen depth to each chunk shader, then draw.
-    for (const e of this.groundChunks.values()) {
-      if (!e.display) continue;
-      const shader = e.display.shader as DepthCompositeShader;
-      shader.setScreen(screenDepth, pw, ph, false);
-      shader.setDebug(DEPTHVIEW);
-    }
-    this.compositeLayer.position.copyFrom(this.panLayer.position);
-    renderer.render({ container: this.compositeLayer, target: litScreen, clear: true });
-    // (3) display.
-    if (this.groundSprite.texture !== litScreen) this.groundSprite.texture = litScreen;
-  }
-
-  /** Mark the chunks the cursor light touches `lightDirty` (re-light only), plus the
-   *  chunks it just left (so its light clears there). Called once per frame; skips
-   *  when the cursor hasn't moved, so a still cursor / idle costs nothing. */
-  private markCursorChunks(): void {
-    const disk = this.deferred.cursorDisk();
-    // Skip when the cursor hasn't moved — a still cursor re-uses its baked-in light.
-    const same =
-      (disk === null && this.lastCursor === null) ||
-      (disk !== null && this.lastCursor !== null && disk.x === this.lastCursor.x && disk.y === this.lastCursor.y);
-    if (same) return;
-    this.lastCursor = disk ? { x: disk.x, y: disk.y } : null;
-    const next = new Set<string>();
-    if (disk) {
-      for (const [key, e] of this.groundChunks) {
-        if (!e.albedoRT) continue;
-        const ew = e.albedoRT.width;
-        const eh = e.albedoRT.height;
-        if (
-          disk.x + disk.r >= e.originX && disk.x - disk.r <= e.originX + ew &&
-          disk.y + disk.r >= e.originY && disk.y - disk.r <= e.originY + eh
-        ) {
-          next.add(key);
-          e.lightDirty = true;
-        }
-      }
-    }
-    for (const key of this.cursorChunks) {
-      if (next.has(key)) continue;
-      const e = this.groundChunks.get(key);
-      if (e) e.lightDirty = true; // cursor left → re-light without it
-    }
-    this.cursorChunks = next;
-  }
 
   private buildTile(key: string, spec: TileSpec): void {
     const center = this.grid.cellToPixel(spec.q, spec.r);
@@ -951,25 +842,25 @@ export class WorldRenderer extends LayoutNode {
 
     let node = this.tiles.get(key);
     if (!node) {
-      const chunk = groundChunkKey(spec.q, spec.r);
-      const ground = this.acquireGroundChunk(chunk);
       const bg = new HexTileVisual(
         this.deferred,
         this.deps.hexTexture ?? this.deps.whiteTexture,
       );
-      // No per-tile root: bg carries absolute world px and lives in the per-chunk
-      // ground container, below every fill prim (the clippedHex grass covers it).
+      // No per-tile root: bg carries absolute world px and lives in the detached
+      // prim SOURCE, below every fill prim (the clippedHex grass covers it). The
+      // rect composite bakes that source into its wrap-around albedo.
       bg.position.set(cornerX, cornerY);
       bg.zIndex = TILE_BG_Z;
-      ground.addChild(bg);
+      this.primSource.addChild(bg);
       const prims = new PrimitiveLayer(
         cardBox(hexW, hexH, { x: cornerX, y: cornerY }),
         this.deps,
-        // G4 4B-ii: object prims bake into the chunk too (lit + depth), not the live
-        // sortLayer — both targets are the chunk container now.
-        { target: ground, groundTarget: ground },
+        // ALL tile prims — ground fills (`rect`/`hex`) AND objects (`sprite`) — go
+        // into the baked source; the composite bakes each by its footprint (objects
+        // span several rectangles). Both targets are the source.
+        { target: this.primSource, groundTarget: this.primSource },
       );
-      node = { chunk, bg, prims, sig: spec.sig };
+      node = { primId: this.nextPrimId++, bg, prims, sig: spec.sig };
       this.tiles.set(key, node);
     } else {
       node.sig = spec.sig;
@@ -978,8 +869,18 @@ export class WorldRenderer extends LayoutNode {
     node.bg.draw(def);
     this.deps.seed = cellHash(spec.q, spec.r);
     node.prims.draw(tilePrims(spec.packed, spec.stock0, spec.stock1, this.deps.seed));
-    this.markChunkDirty(node.chunk); // ground content changed → re-bake the chunk
+    // Register this tile's primitives (bg + ground fills + object sprites) into the
+    // composite's data rectangles. Each prim is indexed by the rectangles its
+    // footprint covers; a dirty rectangle re-bakes every prim's portion in it.
+    this.registerTilePrims(node);
     this.animating = true;
+  }
+
+  /** (Re)register a tile's primitives (bg + ground fills + object sprites) with the
+   *  composite. Called on build and each settle step while the prims ease (footprint
+   *  + art settle), so the baked rectangles track the final pose. */
+  private registerTilePrims(node: TileNode): void {
+    this.albedo.setTilePrims(node.primId, [node.bg, ...node.prims.litSprites()]);
   }
 
   private buildCard(id: number, spec: CardSpec): void {
@@ -1080,21 +981,9 @@ export class WorldRenderer extends LayoutNode {
       t.prims.destroy();
       t.bg.destroy();
     }
-    for (const e of this.groundChunks.values()) {
-      e.display?.destroy();
-      e.depthSprite?.destroy();
-      e.container.destroy({ children: true });
-      e.albedoRT?.destroy(true);
-      e.normalRT?.destroy(true);
-      e.litRT?.destroy(true);
-      e.depthRT?.destroy(true);
-    }
-    this.groundChunks.clear();
-    this.screenDepthRT?.destroy(true);
-    this.litScreenRT?.destroy(true);
-    this.depthLayer.destroy({ children: true });
-    this.compositeLayer.destroy({ children: true });
-    this.groundSprite.destroy();
+    this.albedo.destroy();
+    this.primSource.destroy({ children: true });
+    this.groundMesh.destroy();
     for (const c of this.cards.values()) c.node.destroy({ children: true });
     this.tiles.clear();
     this.cards.clear();
