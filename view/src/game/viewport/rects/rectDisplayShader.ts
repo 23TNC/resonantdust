@@ -46,11 +46,35 @@ const groundLightBitGl = {
       uniform vec4 uLightColor[${MAX_HOT_LIGHTS}];  // rgb colour, a brightness
       uniform float uLightCount;
       uniform float uNormalYSign;                   // flip normal Y → screen convention
+      uniform sampler2D uShadowMask;                // projected-silhouette mask (RGB = light 0/1/2)
+      uniform vec2 uPanelSize;                       // panel px → mask UV
+      uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
       in vec2 vScreen;
     `,
     main: /* glsl */ `
       vec3 nrm = outColor.rgb * 2.0 - 1.0;          // outColor = normal composite (textureBit)
       vec3 N = normalize(vec3(nrm.x, nrm.y * uNormalYSign, nrm.z));
+      const float SHADOW_STRENGTH = 0.85;           // shadow core darkness (1 = black; tweak + HMR)
+      const float SHADOW_NEAR_RELIEF = 0.5;         // how much a shadow lightens right at the light
+                                                     // (× proximity): 0 = uniform, 1 = no shadow at the source.
+      // Standing objects (depth blue band ≥ 1 — see depthShaders BLUE_OBJECT) are upright
+      // billboards FACING the viewer (south): tilt their normal toward +Y/−Z so a light to
+      // the NORTH backlights them (front dark, edges rimmed), and never cast a ground shadow
+      // ONTO them (a shadow is a ground effect). Ground tiles (band 0) are untouched.
+      const float SOUTH_TILT = 1.8;                  // object normal +Y bias (tweak + HMR)
+      const float SOUTH_Z = 0.18;                    // object normal Z keep (lower = darker backs)
+      const float OBJECT_WRAP = 0.45;                // max back-light an object catches when a light
+                                                     // is RIGHT on it; scaled by proximity (atten)
+                                                     // so the floor rises the closer the light sits.
+      vec4 dpx = texture(uDepth, vUV);
+      // Object ⇔ the depth-blue (layer) byte is set. Standing objects bake BLUE_OBJECT (80),
+      // which PIXI sRGB-converts on the tint to ≈25 in the map; ground/tiles write no depth (0).
+      // So we gate well below the compressed object value, not against the raw 30 constant.
+      bool isObject = dpx.b * 255.0 > 12.0;
+      if (isObject) N = normalize(vec3(N.x, N.y + SOUTH_TILT, N.z * SOUTH_Z));
+      // The mask holds each hot light's projected-silhouette coverage in its own channel
+      // (R = light 0, G = light 1, B = light 2; built CPU-side in RectComposite.buildShadowMask).
+      vec4 shMask = texture(uShadowMask, vScreen / uPanelSize);
       vec3 lightSum = texture(uLightmap, vUV).rgb;  // ambient + baked cold lights
       for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
         if (float(i) >= uLightCount) break;
@@ -59,8 +83,22 @@ const groundLightBitGl = {
         float dist = length(toLight.xy);
         float atten = clamp(1.0 - dist / max(ld.w, 1.0), 0.0, 1.0);
         atten *= atten;
+        if (atten <= 0.0) continue;                 // outside radius → no light, no shadow
         float ndotl = max(dot(N, normalize(toLight)), 0.0);
-        lightSum += uLightColor[i].rgb * uLightColor[i].a * ndotl * atten;
+        // Light wrap: a backlit object still catches a nearby light around its far side, and the
+        // closer the light the more it does. Floor the diffuse by OBJECT_WRAP·atten (proximity);
+        // the lit term multiplies by atten again, so the wrap is a steep near-field effect.
+        if (isObject) ndotl = max(ndotl, OBJECT_WRAP * atten);
+        // Shadows are a GROUND effect: objects are NEVER darkened, so they always sit on
+        // top of (in front of) shadows — a shadow painted on an object's camera-facing
+        // front reads as the wrong side. Each point light's shadow masks only ITS own term.
+        float cov = i == 0 ? shMask.r : (i == 1 ? shMask.g : (i == 2 ? shMask.b : 0.0));
+        float blocked = isObject ? 0.0 : cov;
+        // Shadows relax the closer they are to the light (mirrors the object wrap): a shadow by
+        // a bright source isn't as black as one at the edge of the radius.
+        float strength = SHADOW_STRENGTH * (1.0 - SHADOW_NEAR_RELIEF * atten);
+        float lit = uLightColor[i].a * ndotl * atten * (1.0 - blocked * strength);
+        lightSum += uLightColor[i].rgb * lit;
       }
       vec4 alb = texture(uAlbedo, vUV);
       outColor = vec4(alb.rgb * lightSum, alb.a);
@@ -103,6 +141,23 @@ export class GroundShader extends Shader {
     u.uLightCount = count;
     this.resources.lightUniforms.update();
   }
+  /** The projected-silhouette shadow mask (RGB = hot light 0/1/2 coverage), sampled
+   *  per fragment at `vScreen / uPanelSize`. Rebuilt each frame by RectComposite. */
+  set shadowMask(value: Texture) {
+    this.resources.uShadowMask = value.source;
+    this.resources.uShadowMaskSampler = value.source.style;
+  }
+  /** The panel size the mask was rendered at (mask is panel-sized → UV = panel px / size). */
+  setPanelSize(w: number, h: number): void {
+    this.resources.shadowUniforms.uniforms.uPanelSize = [w, h];
+    this.resources.shadowUniforms.update();
+  }
+  /** The depth composite (blue band identifies standing-object pixels: no cast shadow,
+   *  south-tilted normal for backlighting). Sampled at `vUV`, same slot layout as albedo. */
+  set depth(value: Texture) {
+    this.resources.uDepth = value.source;
+    this.resources.uDepthSampler = value.source.style;
+  }
 }
 
 export function makeGroundShader(): GroundShader {
@@ -123,6 +178,13 @@ export function makeGroundShader(): GroundShader {
         uLightColor: { value: new Float32Array(MAX_HOT_LIGHTS * 4), type: "vec4<f32>", size: MAX_HOT_LIGHTS },
         uLightCount: { value: 0, type: "f32" },
         uNormalYSign: { value: -1, type: "f32" },
+      }),
+      uShadowMask: empty.source,
+      uShadowMaskSampler: empty.source.style,
+      uDepth: empty.source,
+      uDepthSampler: empty.source.style,
+      shadowUniforms: new UniformGroup({
+        uPanelSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
       }),
     },
   });

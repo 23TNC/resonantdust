@@ -1,5 +1,11 @@
-import { Buffer, BufferUsage, Container, Geometry, Matrix, Mesh, RenderTexture, Sprite, Texture, type Renderer } from "pixi.js";
+import { Buffer, BufferUsage, Container, Geometry, Matrix, Mesh, RenderTexture, Sprite, Texture, earcut, type Renderer } from "pixi.js";
 import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
+import type { Sidecar } from "../../../assets/geometry/geoTypes";
+import {
+  makeShadowMaskShader, makeShadowGeometry, MAX_SHADOW_VERTS, MAX_SHADOW_CASTERS,
+  SHADOW_CHANNEL_TINT, SHADOW_OCC_HEIGHT_SCALE, SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH,
+  SHADOW_MAX_LEN, type ShadowMaskShader,
+} from "./shadowMaskShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
 import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, BLUE_OBJECT, type ObjectDepthShader } from "../../lighting/depthShaders";
@@ -29,6 +35,20 @@ export type IndexedSprite = Sprite & {
    *  bake so a mover is never occluded by flat ground, only by standing objects. */
   groundLayer?: boolean;
 };
+
+/** A resolved shadow caster: the silhouette transform needed to project it onto the
+ *  ground. WORLD px (`+pan` applied at projection). `footNY` = the silhouette's lowest
+ *  contour point (normalized), the ground line; `feetX` its centre. */
+interface ShadowCaster {
+  feetX: number;
+  groundY: number;
+  left: number;
+  w: number;
+  h: number;
+  footNY: number;
+  stem: string;
+  sidecar: Sidecar;
+}
 
 /** One G-buffer channel: a name + which texture of a primitive feeds it. The
  *  composite owns one fixed-slot RT (the "map", e.g. albedo or normal) per channel. */
@@ -138,6 +158,24 @@ export class RectComposite {
   private readonly depthBakeContainer = new Container();
   private readonly depthQuadPool: Mesh<Geometry, ObjectDepthShader>[] = [];
 
+  // ── shadows (projected-silhouette mask) ──────────────────────────────────
+  /** Panel-sized RGBA mask: each hot light's projected-silhouette coverage in one
+   *  channel (R/G/B). The display shader samples it per fragment. See `buildShadowMask`. */
+  private shadowRT: RenderTexture | null = null;
+  private shadowW = 0;
+  private shadowH = 0;
+  /** One child mesh per hot light (tinted to its channel), all in one container rendered
+   *  ONCE — a second render into the same RT no-ops (the depth saga's trap). `cap` = the
+   *  mesh's current vertex capacity (doubles on demand). */
+  private readonly shadowContainer = new Container();
+  private readonly shadowMeshes: { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number }[] = [];
+  /** Per-stem SOLID (hole-filled) silhouette triangulation, contour-only via earcut —
+   *  shadows want a solid cast, not the sprite's internal alpha holes. Normalized coords;
+   *  light-independent, so cached once per stem (keyed incl. `?v=` → re-mastered = new key). */
+  private readonly shadowTriCache = new Map<string, { pts: Float32Array; tris: Uint32Array }[]>();
+  /** Reused scratch for projected contour points (avoids per-poly allocation). */
+  private readonly shadowScratch: number[] = [];
+
   /** Diagnostics (read by `?rectview`). */
   lastBaked = 0;
 
@@ -176,6 +214,11 @@ export class RectComposite {
   /** The baked sort-Y depth RT (debug panel `depth`; consumed by dynamic movers). */
   get depthTexture(): RenderTexture | null {
     return this.depthRT;
+  }
+
+  /** The per-frame projected-silhouette shadow mask (display samples it). */
+  get shadowMaskTexture(): RenderTexture | null {
+    return this.shadowRT;
   }
 
   /** Replace the cold (static, baked) light set + ambient. Marks the whole window's
@@ -256,6 +299,16 @@ export class RectComposite {
     const rows = Math.ceil(viewH / rectH()) + 2 * OVERSCAN;
     this.viewW = viewW;
     this.viewH = viewH;
+    // Shadow mask is panel-px-sized (sampled by panel position), so it tracks viewW/viewH
+    // — NOT the rect-slot grid — and must resize even when the rect count is unchanged.
+    const pw = Math.ceil(viewW);
+    const ph = Math.ceil(viewH);
+    if (!this.shadowRT || this.shadowW !== pw || this.shadowH !== ph) {
+      this.shadowRT?.destroy(true);
+      this.shadowRT = RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution });
+      this.shadowW = pw;
+      this.shadowH = ph;
+    }
     if (cols === this.cols && rows === this.rows && this.scratchRT) return;
     this.cols = cols;
     this.rows = rows;
@@ -350,6 +403,164 @@ export class RectComposite {
     if (!set) return;
     for (const s of set) this.dropSprite(s);
     this.tileGroups.delete(tileId);
+  }
+
+  /** Rebuild the projected-silhouette shadow mask for the hot `lights` (panel px:
+   *  `{x,y,z,radius}`). Each light's nearby casters are projected through it onto the
+   *  ground and rasterized into that light's mask channel; `panX/panY` map caster world
+   *  px → panel. One container of per-light meshes, ONE render with `max` blend. */
+  buildShadowMask(renderer: Renderer, lights: { x: number; y: number; z: number; radius: number }[], panX: number, panY: number): void {
+    if (!this.shadowRT) return;
+    const n = Math.min(lights.length, SHADOW_CHANNEL_TINT.length);
+    // One mesh per light (all its in-range casters), tinted to the light's channel; ONE
+    // render, `max`-blend. Shadows are GROUND-only (the display never darkens object pixels),
+    // so no per-caster identity / self-exclusion is needed — objects always sit on top.
+    this.shadowContainer.removeChildren();
+    for (let i = 0; i < n; i++) {
+      const casters = this.gatherShadowCasters(lights[i].x - panX, lights[i].y - panY, lights[i].radius);
+      let need = 0; // total projected verts this light needs (3 per solid triangle)
+      for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
+      const slot = this.ensureShadowMesh(i, need);
+      let v = 0;
+      const Lz = Math.max(lights[i].z, 1);
+      for (const c of casters) v = this.projectCaster(slot.data, v, c, lights[i].x, lights[i].y, Lz, panX, panY);
+      slot.data.fill(0, v * 2); // zero the tail → degenerate (no-area) triangles
+      slot.pos.update();
+      this.shadowContainer.addChild(slot.mesh);
+    }
+    renderer.render({ container: this.shadowContainer, target: this.shadowRT, clear: true, clearColor: [0, 0, 0, 0] });
+  }
+
+  /** The per-light coverage mesh at index `i`, its vertex buffer grown (DOUBLING) to hold
+   *  `need` vertices. Tinted once to the light's channel (R/G/B). */
+  private ensureShadowMesh(i: number, need: number): { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number } {
+    let slot = this.shadowMeshes[i];
+    if (!slot) {
+      const { geometry, pos } = makeShadowGeometry();
+      const mesh = new Mesh({ geometry, shader: makeShadowMaskShader() });
+      mesh.blendMode = "max";
+      mesh.tint = SHADOW_CHANNEL_TINT[i];
+      slot = { mesh, pos, data: pos.data as Float32Array, cap: MAX_SHADOW_VERTS };
+      this.shadowMeshes[i] = slot;
+    }
+    if (need > slot.cap) {
+      let cap = slot.cap;
+      while (cap < need) cap *= 2;
+      const { geometry, pos } = makeShadowGeometry(cap);
+      slot.mesh.geometry.destroy();
+      slot.mesh.geometry = geometry;
+      slot.pos = pos;
+      slot.data = pos.data as Float32Array;
+      slot.cap = cap;
+    }
+    return slot;
+  }
+
+  /** The SOLID (hole-filled) triangulation of a stem's silhouette — earcut over the
+   *  CONTOUR ONLY (holes ignored: a shadow casts a solid shape, not the sprite's internal
+   *  alpha gaps). Normalized coords; cached per stem (light-independent). */
+  private shadowTris(stem: string, sidecar: Sidecar): { pts: Float32Array; tris: Uint32Array }[] {
+    let cached = this.shadowTriCache.get(stem);
+    if (cached) return cached;
+    cached = sidecar.polygons.map((poly) => {
+      const flat: number[] = [];
+      for (const [x, y] of poly.contour) flat.push(x, y);
+      const tris = earcut(flat, undefined, 2); // contour only → solid (holes filled)
+      return { pts: new Float32Array(flat), tris: new Uint32Array(tris) };
+    });
+    this.shadowTriCache.set(stem, cached);
+    return cached;
+  }
+
+  /** Project ONE caster's SOLID silhouette through a light (panel px) onto the ground,
+   *  writing triangle-list vertices into `out` starting at vertex `vStart`; returns the new
+   *  vertex count. Shared by the coverage + caster-row passes. Billboard shear: ONE direction
+   *  per caster (feet centre → away from light, avoids per-vertex fold); a point at height
+   *  `hUp` lays out by `hUp/(lightZ−hUp)·min(dist,cap)`, clamped to {@link SHADOW_MAX_LEN};
+   *  north-going offsets are stretched ({@link SHADOW_NORTH_STRETCH}) to fight foreshorten. */
+  private projectCaster(out: Float32Array, vStart: number, c: ShadowCaster, Lx: number, Ly: number, Lz: number, panX: number, panY: number): number {
+    const baseX = c.feetX + panX;
+    const baseY = c.groundY + panY;
+    const toLx = Lx - baseX;
+    const toLy = Ly - baseY;
+    const dBL = Math.hypot(toLx, toLy) || 1;
+    const dirx = -toLx / dBL; // away from the light (one direction for the whole caster)
+    const diry = -toLy / dBL;
+    const perpx = -diry; // unit perpendicular to the shadow direction: the silhouette WIDTH lays
+    const perpy = dirx;  // across this, so a side-lit (E/W) shadow keeps thickness, not a sliver.
+    const dBLc = Math.min(dBL, SHADOW_DBL_CAP);
+    const polys = this.shadowTris(c.stem, c.sidecar);
+    // Bound the WHOLE shadow by uniformly scaling so its TIP (the projection of the
+    // silhouette's highest point, smallest ny) lands at SHADOW_MAX_LEN — this keeps the tip
+    // POINTED. (Per-vertex clamping instead collapses every over-long vertex onto one arc,
+    // slicing the tip flat.) `hCap` only guards `Lz − hUp → 0`; set high so it doesn't shape.
+    const hCap = Lz * 0.95;
+    let minNy = 1.0;
+    for (const pg of polys) { const pts = pg.pts; for (let p = 1; p < pts.length; p += 2) if (pts[p] < minNy) minNy = pts[p]; }
+    let topHUp = Math.max(c.footNY - minNy, 0) * c.h * SHADOW_OCC_HEIGHT_SCALE;
+    if (topHUp > hCap) topHUp = hCap;
+    const tipD = (topHUp / (Lz - topHUp)) * dBLc;
+    const scale = tipD > SHADOW_MAX_LEN ? SHADOW_MAX_LEN / tipD : 1.0;
+    const proj = this.shadowScratch;
+    let v = vStart;
+    for (const pg of polys) {
+      const pts = pg.pts;
+      proj.length = 0;
+      for (let p = 0; p < pts.length; p += 2) {
+        const nx = pts[p];
+        const ny = pts[p + 1];
+        let hUp = Math.max(c.footNY - ny, 0) * c.h * SHADOW_OCC_HEIGHT_SCALE;
+        if (hUp > hCap) hUp = hCap; // safety only — keep Lz−hUp positive
+        const d = (hUp / (Lz - hUp)) * dBLc * scale; // length along the shadow dir (uniform-scaled tip)
+        const wOff = (nx - 0.5) * c.w; // sprite-width offset from the feet centre
+        let projY = diry * d;
+        if (projY < 0) projY *= SHADOW_NORTH_STRETCH; // stretch the north-going LENGTH only
+        // width laid ACROSS the shadow dir (perp) + length ALONG it — keeps E/W shadows solid
+        proj.push(c.feetX + panX + perpx * wOff + dirx * d, baseY + perpy * wOff + projY);
+      }
+      const tris = pg.tris;
+      for (let t = 0; t + 2 < tris.length; t += 3) {
+        if (v + 3 > out.length / 2) return v;
+        for (let k = 0; k < 3; k++) {
+          const idx = tris[t + k] * 2;
+          out[v * 2] = proj[idx];
+          out[v * 2 + 1] = proj[idx + 1];
+          v++;
+        }
+      }
+    }
+    return v;
+  }
+
+  /** Standing objects (not ground) with silhouette geometry within `radius` of WORLD
+   *  `(cx,cy)`, NEAREST-first (so the visually-relevant casters always win), capped at
+   *  {@link MAX_SHADOW_CASTERS}. Carries feet centre + ground line + size + foot line +
+   *  stem/sidecar — enough to project the silhouette. */
+  private gatherShadowCasters(cx: number, cy: number, radius: number): ShadowCaster[] {
+    const hits: { c: ShadowCaster; d2: number }[] = [];
+    const r2 = radius * radius;
+    for (const e of this.prims.values()) {
+      const s = e.sprite;
+      if (s.groundLayer || !s.albedoTexture || !s.stem) continue; // flat ground doesn't occlude
+      const sidecar = this.geometry.get(s.stem);
+      if (!sidecar || !sidecar.polygons.length) continue;
+      const w = s.width;
+      const h = s.height;
+      const left = s.x - s.anchor.x * w;
+      const top = s.y - s.anchor.y * h;
+      let footNY = 0; // silhouette's lowest contour point → the ground line
+      for (const poly of sidecar.polygons) for (const [, ny] of poly.contour) if (ny > footNY) footNY = ny;
+      const groundY = top + footNY * h;
+      const feetX = s.x + (0.5 - s.anchor.x) * w;
+      const dx = feetX - cx;
+      const dy = groundY - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2) continue;
+      hits.push({ c: { feetX, groundY, left, w, h, footNY, stem: s.stem, sidecar }, d2 });
+    }
+    hits.sort((a, b) => a.d2 - b.d2);
+    if (hits.length > MAX_SHADOW_CASTERS) hits.length = MAX_SHADOW_CASTERS;
+    return hits.map((x) => x.c);
   }
 
   private dropSprite(s: IndexedSprite): void {

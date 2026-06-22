@@ -1,8 +1,9 @@
-import { Buffer, BufferUsage, Container, Geometry, Graphics, Mesh, Point, Text, type FederatedPointerEvent, type RenderTexture } from "pixi.js";
+import { Buffer, BufferUsage, Container, Geometry, Graphics, Mesh, Point, Text, type FederatedPointerEvent, type Renderer, type RenderTexture } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting } from "../lighting/DeferredLighting";
 import { RectComposite, DISPLAY_INDICES } from "./rects/RectComposite";
 import { makeGroundShader, GroundShader, MAX_HOT_LIGHTS } from "./rects/rectDisplayShader";
+import { MAX_SHADOW_LIGHTS } from "./rects/shadowMaskShader";
 import { rectW, rectH, rectOffX, rectOffY, rectWorldX, rectWorldY } from "./rects/rectMath";
 import { debug } from "../../debug";
 import { LayoutNode } from "../layout/LayoutNode";
@@ -188,7 +189,7 @@ export class WorldRenderer extends LayoutNode {
    *  light (`screen` = panel px, follows the pointer); `screen:false` lights are world
    *  px (+pan at pack). Up to {@link MAX_HOT_LIGHTS}. */
   private readonly hotLights: { x: number; y: number; height: number; radius: number; color: number; brightness: number; screen: boolean }[] = [
-    { x: 0, y: 0, height: 180, radius: 480, color: 0xffffff, brightness: 2.0, screen: true },
+    { x: 0, y: 0, height: 110, radius: 480, color: 0xffffff, brightness: 2.0, screen: true },
   ];
   /** Cursor light positioned by a real pointer move yet? (else centre it). */
   private cursorMoved = false;
@@ -507,6 +508,7 @@ export class WorldRenderer extends LayoutNode {
       { name: "normal",   texture: this.albedo.channelComposite("normal") },
       { name: "depth",    texture: this.albedo.depthTexture }, // baked sort-Y (objects only)
       { name: "lit",      texture: this.albedo.lightmapTexture }, // the baked cold-light map
+      { name: "shadow",   texture: this.albedo.shadowMaskTexture }, // hot-light shadow mask (RGB = light 0/1/2)
       { name: "emissive", texture: null },
     ];
   }
@@ -711,7 +713,7 @@ export class WorldRenderer extends LayoutNode {
     this.ensureColdLights(a.x, a.y);
     this.albedo.bakeDirty(renderer, BAKE_BUDGET);
     this.albedo.bakeLightDirty(renderer, BAKE_BUDGET); // re-bake stale lightmap slots (cold lights)
-    this.updateGroundMesh(panX, panY);
+    this.updateGroundMesh(renderer, panX, panY);
     if (RECTVIEW) {
       this.drawRectGrid();
       if (this.albedo.lastBaked > 0) {
@@ -723,7 +725,7 @@ export class WorldRenderer extends LayoutNode {
   /** Point the ground display quad at the panel + feed the shader the window/pan so
    *  it samples the right composite slot per fragment. The composite never moves;
    *  the pan lives entirely in the shader's per-fragment world→slot mapping. */
-  private updateGroundMesh(panX: number, panY: number): void {
+  private updateGroundMesh(renderer: Renderer, panX: number, panY: number): void {
     if (!this.albedo.ready) return;
     const alb = this.albedo.channelComposite("albedo");
     const nrm = this.albedo.channelComposite("normal");
@@ -737,6 +739,30 @@ export class WorldRenderer extends LayoutNode {
     const lm = this.albedo.lightmapTexture;
     if (lm) this.groundShader.lightmap = lm;
     this.packHotLights(panX, panY);
+    this.buildShadowMask(renderer, panX, panY);
+  }
+
+  /** Rebuild the projected-silhouette shadow mask for the hot lights (≤3 cast — one per
+   *  mask channel) and point the ground shader at it. Light positions are resolved to
+   *  panel px exactly as `packHotLights` does (cursor centres until the pointer moves;
+   *  world lights add the pan), then `RectComposite` projects the casters per light. */
+  private buildShadowMask(renderer: Renderer, panX: number, panY: number): void {
+    const n = Math.min(this.hotLights.length, MAX_SHADOW_LIGHTS);
+    const lights: { x: number; y: number; z: number; radius: number }[] = [];
+    for (let i = 0; i < n; i++) {
+      const l = this.hotLights[i];
+      let x = l.x;
+      let y = l.y;
+      if (l.screen && !this.cursorMoved) { x = this.width / 2; y = this.height / 2; }
+      else if (!l.screen) { x += panX; y += panY; }
+      lights.push({ x, y, z: l.height, radius: l.radius });
+    }
+    this.albedo.buildShadowMask(renderer, lights, panX, panY);
+    const mask = this.albedo.shadowMaskTexture;
+    if (mask) this.groundShader.shadowMask = mask;
+    const depth = this.albedo.depthTexture;
+    if (depth) this.groundShader.depth = depth;
+    this.groundShader.setPanelSize(this.width, this.height);
   }
 
   /** Place the cold (static, baked) light fixtures once the composite is sized — two
