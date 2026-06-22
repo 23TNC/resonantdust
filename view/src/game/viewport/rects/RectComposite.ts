@@ -486,8 +486,6 @@ export class RectComposite {
     const dBL = Math.hypot(toLx, toLy) || 1;
     const dirx = -toLx / dBL; // away from the light (one direction for the whole caster)
     const diry = -toLy / dBL;
-    const perpx = -diry; // unit perpendicular to the shadow direction: the silhouette WIDTH lays
-    const perpy = dirx;  // across this, so a side-lit (E/W) shadow keeps thickness, not a sliver.
     const dBLc = Math.min(dBL, SHADOW_DBL_CAP);
     const polys = this.shadowTris(c.stem, c.sidecar);
     // Bound the WHOLE shadow by uniformly scaling so its TIP (the projection of the
@@ -512,11 +510,12 @@ export class RectComposite {
         let hUp = Math.max(c.footNY - ny, 0) * c.h * SHADOW_OCC_HEIGHT_SCALE;
         if (hUp > hCap) hUp = hCap; // safety only — keep Lz−hUp positive
         const d = (hUp / (Lz - hUp)) * dBLc * scale; // length along the shadow dir (uniform-scaled tip)
-        const wOff = (nx - 0.5) * c.w; // sprite-width offset from the feet centre
-        let projY = diry * d;
-        if (projY < 0) projY *= SHADOW_NORTH_STRETCH; // stretch the north-going LENGTH only
-        // width laid ACROSS the shadow dir (perp) + length ALONG it — keeps E/W shadows solid
-        proj.push(c.feetX + panX + perpx * wOff + dirx * d, baseY + perpy * wOff + projY);
+        let oy = diry * d;
+        if (oy < 0) oy *= SHADOW_NORTH_STRETCH; // stretch the north-going length only
+        // SHEAR (stretch/lean): WIDTH stays horizontal (nx·w), only the height shears toward the
+        // away-from-light dir. N/S looks good; E/W goes thin (height lays horizontal) — the
+        // accepted trade vs the rotated version that swept the whole silhouette around the feet.
+        proj.push(c.left + nx * c.w + panX + dirx * d, baseY + oy);
       }
       const tris = pg.tris;
       for (let t = 0; t + 2 < tris.length; t += 3) {
