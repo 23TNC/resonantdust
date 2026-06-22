@@ -54,6 +54,19 @@ interface ShadowCaster {
  *  the cold-shadow bake). */
 type ShadowMeshSlot = { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number };
 
+/** One mover to bake into the hot maps: its display `node` (a positioned PrimitiveLayer/marker
+ *  Container — currently displaying albedo), its `lit` LitSprites (for the normal-channel swap),
+ *  its WORLD-space AABB (which slots it covers), and `zIndex` (back-to-front sort within a slot). */
+export interface HotEntry {
+  node: Container;
+  lit: IndexedSprite[];
+  wx0: number;
+  wy0: number;
+  wx1: number;
+  wy1: number;
+  zIndex: number;
+}
+
 /** One G-buffer channel: a name + which texture of a primitive feeds it. The
  *  composite owns one fixed-slot RT (the "map", e.g. albedo or normal) per channel. */
 export interface ChannelSpec {
@@ -186,6 +199,14 @@ export class RectComposite {
   private coldShadowRT: RenderTexture | null = null;
   private readonly coldShadowContainer = new Container();
   private readonly coldShadowMeshes: ShadowMeshSlot[] = [];
+
+  // ── hot prims (per-frame movers: cards/souls) ────────────────────────────
+  /** Movers' albedo/normal, SAME slot layout as the static composites, but RE-BAKED every
+   *  frame from the mover nodes (they tween constantly). The display merges these over the
+   *  cold world by depth. Unlike the static bake, mover nodes are TRANSFORMED PrimitiveLayer
+   *  trees, so we render the node in place (with a slot transform) rather than reparent leaves. */
+  private hotAlbedo: RenderTexture | null = null;
+  private hotNormal: RenderTexture | null = null;
 
   /** Diagnostics (read by `?rectview`). */
   lastBaked = 0;
@@ -345,6 +366,13 @@ export class RectComposite {
     this.coldShadowRT?.destroy(true);
     this.coldShadowRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
     renderer.render({ container: this.empty, target: this.coldShadowRT, clear: true, clearColor: [0, 0, 0, 0] });
+    // Hot prims (movers): albedo + normal, same slot layout; transparent (no mover) → cold shows.
+    this.hotAlbedo?.destroy(true);
+    this.hotNormal?.destroy(true);
+    this.hotAlbedo = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    this.hotNormal = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
+    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 0] });
     // Depth: same slot layout; cleared to 0 (empty = behind everything).
     this.depthRT?.destroy(true);
     this.depthRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
@@ -805,6 +833,68 @@ export class RectComposite {
 
   private inWindow(wc: number, wr: number): boolean {
     return wc >= this.winCol && wc < this.winCol + this.cols && wr >= this.winRow && wr < this.winRow + this.rows;
+  }
+
+  // ── hot prims (per-frame mover bake) ─────────────────────────────────────
+  /** The hot mover maps (display samples + merges them over the cold world by depth). */
+  get hotAlbedoTexture(): RenderTexture | null { return this.hotAlbedo; }
+  get hotNormalTexture(): RenderTexture | null { return this.hotNormal; }
+
+  /** Re-bake the mover albedo+normal maps from `entries` every frame: stamp each slot a mover
+   *  covers (the overlapping nodes rendered in place with a slot transform), and clear slots
+   *  movers just left. Slot layout matches the cold composites, so the display merges at the
+   *  same UV. Mover nodes are reparented into the bake container (preserving world position),
+   *  rendered, and returned — like the static bake, but on whole nodes, not leaf sprites. */
+  bakeHotPrims(renderer: Renderer, entries: HotEntry[]): void {
+    if (!this.hotAlbedo || !this.hotNormal || !this.scratchRT || !this.scratchTex) return;
+    // The hot map is per-frame and the movers move, so rebuild from scratch: clear the WHOLE
+    // map, then stamp each covered slot. (An incremental vacate-track would ghost — the blit
+    // alpha-blends, so a cleared scratch can't overwrite a vacated slot's stale mover pixels.)
+    renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
+    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 0] });
+    if (entries.length === 0) return;
+    const rectMap = new Map<string, HotEntry[]>();
+    for (const e of entries) {
+      const r = rectsForAABB(e.wx0, e.wy0, e.wx1, e.wy1);
+      for (let c = r.col0; c <= r.col1; c++)
+        for (let row = r.row0; row <= r.row1; row++) {
+          if (!this.inWindow(c, row)) continue;
+          const k = `${c},${row}`;
+          let s = rectMap.get(k);
+          if (!s) rectMap.set(k, (s = []));
+          s.push(e);
+        }
+    }
+    for (const [k, es] of rectMap) {
+      es.sort((a, b) => a.zIndex - b.zIndex);
+      this.bakeHotRect(renderer, k, es);
+    }
+  }
+
+  private slotXY(key: string): [number, number, number, number] {
+    const ci = key.indexOf(",");
+    const wc = +key.slice(0, ci);
+    const wr = +key.slice(ci + 1);
+    return [wc, wr, mod(wc, this.cols) * rectW(), mod(wr, this.rows) * rectH()];
+  }
+
+  private bakeHotRect(renderer: Renderer, key: string, entries: HotEntry[]): void {
+    const W = rectW(), H = rectH();
+    const [wc, wr, slotX, slotY] = this.slotXY(key);
+    const m = new Matrix().translate(-rectWorldX(wc), -rectWorldY(wr));
+    const parents = entries.map((e) => e.node.parent);
+    const saved = entries.map((e) => e.lit.map((s) => ({ s, tint: s.tint, tex: s.texture })));
+    for (const e of entries) this.bakeContainer.addChild(e.node);
+    // ALBEDO: nodes already display their albedo → render as-is.
+    renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 0], transform: m });
+    this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotAlbedo!, slotX, slotY, false);
+    // NORMAL: each LitSprite → its normal map (white tint so the vector isn't skewed); no map → hide.
+    for (const e of entries) for (const s of e.lit) { if (s.normalTexture) { s.texture = s.normalTexture; s.tint = 0xffffff; } else { s.renderable = false; } }
+    renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0.5, 0.5, 1, 0], transform: m });
+    this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotNormal!, slotX, slotY, false);
+    // Restore textures/tints/renderable, then return the nodes to their parents.
+    for (const group of saved) for (const r of group) { r.s.renderable = true; r.s.texture = r.tex; r.s.tint = r.tint; }
+    for (let i = 0; i < entries.length; i++) parents[i]?.addChild(entries[i].node);
   }
 
   // ── cold-light lightmap bake ─────────────────────────────────────────────

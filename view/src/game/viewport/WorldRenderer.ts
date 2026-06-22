@@ -1,7 +1,7 @@
 import { Buffer, BufferUsage, Container, Geometry, Graphics, Mesh, Point, Text, type FederatedPointerEvent, type Renderer, type RenderTexture } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting } from "../lighting/DeferredLighting";
-import { RectComposite, DISPLAY_INDICES } from "./rects/RectComposite";
+import { RectComposite, DISPLAY_INDICES, type HotEntry } from "./rects/RectComposite";
 import { makeGroundShader, GroundShader, MAX_HOT_LIGHTS } from "./rects/rectDisplayShader";
 import { MAX_SHADOW_LIGHTS } from "./rects/shadowMaskShader";
 import { rectW, rectH, rectOffX, rectOffY, rectWorldX, rectWorldY } from "./rects/rectMath";
@@ -509,6 +509,8 @@ export class WorldRenderer extends LayoutNode {
       { name: "depth",    texture: this.albedo.depthTexture }, // baked sort-Y (objects only)
       { name: "lit",      texture: this.albedo.lightmapTexture }, // the baked cold-light map
       { name: "shadow",   texture: this.albedo.shadowMaskTexture }, // hot-light shadow mask (RGB = light 0/1/2)
+      { name: "hotAlb",   texture: this.albedo.hotAlbedoTexture }, // per-frame mover albedo (G7 hot prims)
+      { name: "hotNrm",   texture: this.albedo.hotNormalTexture }, // per-frame mover normal
       { name: "emissive", texture: null },
     ];
   }
@@ -713,6 +715,7 @@ export class WorldRenderer extends LayoutNode {
     this.ensureColdLights(a.x, a.y);
     this.albedo.bakeDirty(renderer, BAKE_BUDGET);
     this.albedo.bakeLightDirty(renderer, BAKE_BUDGET); // re-bake stale lightmap slots (cold lights)
+    this.bakeHotPrims(renderer); // per-frame: movers (cards/souls) → hot albedo/normal maps
     this.updateGroundMesh(renderer, panX, panY);
     if (RECTVIEW) {
       this.drawRectGrid();
@@ -725,6 +728,24 @@ export class WorldRenderer extends LayoutNode {
   /** Point the ground display quad at the panel + feed the shader the window/pan so
    *  it samples the right composite slot per fragment. The composite never moves;
    *  the pan lives entirely in the shader's per-fragment world→slot mapping. */
+  /** Gather the movers (cards/souls — world-positioned in `cardLayer`) and re-bake them into
+   *  the hot albedo/normal maps this frame. World AABB = node local bounds + its world pos. */
+  private bakeHotPrims(renderer: Renderer): void {
+    const hot: HotEntry[] = [];
+    for (const c of this.cards.values()) {
+      const lb = c.node.getLocalBounds();
+      const px = c.node.position.x;
+      const py = c.node.position.y;
+      hot.push({
+        node: c.node,
+        lit: c.layer ? c.layer.litSprites() : [],
+        wx0: px + lb.minX, wy0: py + lb.minY, wx1: px + lb.maxX, wy1: py + lb.maxY,
+        zIndex: c.node.zIndex,
+      });
+    }
+    this.albedo.bakeHotPrims(renderer, hot);
+  }
+
   private updateGroundMesh(renderer: Renderer, panX: number, panY: number): void {
     if (!this.albedo.ready) return;
     const alb = this.albedo.channelComposite("albedo");
