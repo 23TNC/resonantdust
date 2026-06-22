@@ -3,7 +3,7 @@ import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
 import type { Sidecar } from "../../../assets/geometry/geoTypes";
 import {
   makeShadowMaskShader, makeShadowGeometry, MAX_SHADOW_VERTS, MAX_SHADOW_CASTERS,
-  SHADOW_CHANNEL_TINT, SHADOW_OCC_HEIGHT_SCALE, SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH,
+  SHADOW_CHANNEL_TINT, shadowHeightScale, SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH,
   SHADOW_MAX_LEN, type ShadowMaskShader,
 } from "./shadowMaskShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
@@ -49,6 +49,10 @@ interface ShadowCaster {
   stem: string;
   sidecar: Sidecar;
 }
+
+/** A pooled max-blend shadow mesh + its growable vertex buffer (shared by the hot mask and
+ *  the cold-shadow bake). */
+type ShadowMeshSlot = { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number };
 
 /** One G-buffer channel: a name + which texture of a primitive feeds it. The
  *  composite owns one fixed-slot RT (the "map", e.g. albedo or normal) per channel. */
@@ -168,13 +172,20 @@ export class RectComposite {
    *  ONCE — a second render into the same RT no-ops (the depth saga's trap). `cap` = the
    *  mesh's current vertex capacity (doubles on demand). */
   private readonly shadowContainer = new Container();
-  private readonly shadowMeshes: { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number }[] = [];
+  private readonly shadowMeshes: ShadowMeshSlot[] = [];
   /** Per-stem SOLID (hole-filled) silhouette triangulation, contour-only via earcut —
    *  shadows want a solid cast, not the sprite's internal alpha holes. Normalized coords;
    *  light-independent, so cached once per stem (keyed incl. `?v=` → re-mastered = new key). */
   private readonly shadowTriCache = new Map<string, { pts: Float32Array; tris: Uint32Array }[]>();
   /** Reused scratch for projected contour points (avoids per-poly allocation). */
   private readonly shadowScratch: number[] = [];
+
+  // ── cold-light shadows (baked into the lightmap) ─────────────────────────
+  /** Cold-shadow coverage, SAME slot layout as the lightmap (RGB = cold light 0/1/2). The
+   *  lightmap bake samples it to remove each occluded cold light's term (ambient stays). */
+  private coldShadowRT: RenderTexture | null = null;
+  private readonly coldShadowContainer = new Container();
+  private readonly coldShadowMeshes: ShadowMeshSlot[] = [];
 
   /** Diagnostics (read by `?rectview`). */
   lastBaked = 0;
@@ -330,6 +341,10 @@ export class RectComposite {
     this.lightmap = RenderTexture.create({ width: cw, height: ch, resolution: res });
     const a = this.coldAmbient;
     renderer.render({ container: this.empty, target: this.lightmap, clear: true, clearColor: [a, a, a, 1] });
+    // Cold-shadow coverage: same slot layout; cleared to 0 (no shadow).
+    this.coldShadowRT?.destroy(true);
+    this.coldShadowRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    renderer.render({ container: this.empty, target: this.coldShadowRT, clear: true, clearColor: [0, 0, 0, 0] });
     // Depth: same slot layout; cleared to 0 (empty = behind everything).
     this.depthRT?.destroy(true);
     this.depthRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
@@ -420,7 +435,7 @@ export class RectComposite {
       const casters = this.gatherShadowCasters(lights[i].x - panX, lights[i].y - panY, lights[i].radius);
       let need = 0; // total projected verts this light needs (3 per solid triangle)
       for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
-      const slot = this.ensureShadowMesh(i, need);
+      const slot = this.ensureShadowMesh(this.shadowMeshes, i, need);
       let v = 0;
       const Lz = Math.max(lights[i].z, 1);
       for (const c of casters) v = this.projectCaster(slot.data, v, c, lights[i].x, lights[i].y, Lz, panX, panY);
@@ -431,17 +446,17 @@ export class RectComposite {
     renderer.render({ container: this.shadowContainer, target: this.shadowRT, clear: true, clearColor: [0, 0, 0, 0] });
   }
 
-  /** The per-light coverage mesh at index `i`, its vertex buffer grown (DOUBLING) to hold
+  /** The `pool`'s coverage mesh at index `i`, its vertex buffer grown (DOUBLING) to hold
    *  `need` vertices. Tinted once to the light's channel (R/G/B). */
-  private ensureShadowMesh(i: number, need: number): { mesh: Mesh<Geometry, ShadowMaskShader>; pos: Buffer; data: Float32Array; cap: number } {
-    let slot = this.shadowMeshes[i];
+  private ensureShadowMesh(pool: ShadowMeshSlot[], i: number, need: number): ShadowMeshSlot {
+    let slot = pool[i];
     if (!slot) {
       const { geometry, pos } = makeShadowGeometry();
       const mesh = new Mesh({ geometry, shader: makeShadowMaskShader() });
       mesh.blendMode = "max";
       mesh.tint = SHADOW_CHANNEL_TINT[i];
       slot = { mesh, pos, data: pos.data as Float32Array, cap: MAX_SHADOW_VERTS };
-      this.shadowMeshes[i] = slot;
+      pool[i] = slot;
     }
     if (need > slot.cap) {
       let cap = slot.cap;
@@ -488,6 +503,9 @@ export class RectComposite {
     const diry = -toLy / dBL;
     const dBLc = Math.min(dBL, SHADOW_DBL_CAP);
     const polys = this.shadowTris(c.stem, c.sidecar);
+    // Height scale DIMINISHES with caster height (taller → smaller), so tall casters don't
+    // ride the steep part of the hUp/(Lz−hUp) perspective curve and elongate their tips.
+    const occScale = shadowHeightScale(c.h);
     // Bound the WHOLE shadow by uniformly scaling so its TIP (the projection of the
     // silhouette's highest point, smallest ny) lands at SHADOW_MAX_LEN — this keeps the tip
     // POINTED. (Per-vertex clamping instead collapses every over-long vertex onto one arc,
@@ -495,7 +513,7 @@ export class RectComposite {
     const hCap = Lz * 0.95;
     let minNy = 1.0;
     for (const pg of polys) { const pts = pg.pts; for (let p = 1; p < pts.length; p += 2) if (pts[p] < minNy) minNy = pts[p]; }
-    let topHUp = Math.max(c.footNY - minNy, 0) * c.h * SHADOW_OCC_HEIGHT_SCALE;
+    let topHUp = Math.max(c.footNY - minNy, 0) * c.h * occScale;
     if (topHUp > hCap) topHUp = hCap;
     const tipD = (topHUp / (Lz - topHUp)) * dBLc;
     const scale = tipD > SHADOW_MAX_LEN ? SHADOW_MAX_LEN / tipD : 1.0;
@@ -507,7 +525,7 @@ export class RectComposite {
       for (let p = 0; p < pts.length; p += 2) {
         const nx = pts[p];
         const ny = pts[p + 1];
-        let hUp = Math.max(c.footNY - ny, 0) * c.h * SHADOW_OCC_HEIGHT_SCALE;
+        let hUp = Math.max(c.footNY - ny, 0) * c.h * occScale;
         if (hUp > hCap) hUp = hCap; // safety only — keep Lz−hUp positive
         const d = (hUp / (Lz - hUp)) * dBLc * scale; // length along the shadow dir (uniform-scaled tip)
         let oy = diry * d;
@@ -797,6 +815,9 @@ export class RectComposite {
     if (!this.lightmap || !normal || this.lightDirty.size === 0) return;
     this.lightBakeShader.normal = normal;
     this.lightBakeShader.setColdLights(...this.packCold(), this.coldAmbient);
+    this.buildColdShadows(); // project the cold casters once; per-rect bake stamps the slots
+    if (this.coldShadowRT) this.lightBakeShader.coldShadow = this.coldShadowRT;
+    if (this.depthRT) this.lightBakeShader.depth = this.depthRT; // object gate + backlight, like hot
     let baked = 0;
     const done: string[] = [];
     for (const key of this.lightDirty) {
@@ -829,8 +850,37 @@ export class RectComposite {
     (this.lightBakeUv.data as Float32Array).set([u0, v0, u1, v0, u1, v1, u0, v1]);
     this.lightBakeUv.update();
     this.lightBakeShader.setRect(rectWorldX(wc), rectWorldY(wr));
+    // First stamp this rect's COLD-SHADOW slot: render the projected cold silhouettes (world
+    // px) into the scratch (clipped to the rect), then blit into the cold-shadow slot — the
+    // lightmap shader below samples it at the same slot UV. (Must precede the lightmap render.)
+    if (this.coldShadowRT && this.scratchRT && this.scratchTex) {
+      const cm = new Matrix().translate(-rectWorldX(wc), -rectWorldY(wr));
+      renderer.render({ container: this.coldShadowContainer, target: this.scratchRT, clear: true, clearColor: [0, 0, 0, 0], transform: cm });
+      this.blit(renderer, this.scratchTex, 0, 0, W, H, this.coldShadowRT, slotX, slotY, false);
+    }
     const m = new Matrix().translate(slotX, slotY);
     renderer.render({ container: this.lightBakeMesh, target: this.lightmap!, clear: false, transform: m });
+  }
+
+  /** Project the cold lights' shadow casters (world px) into per-light meshes (RGB), ready for
+   *  {@link bakeLightRect} to stamp per rect. Cheap to rebuild — only runs when a lightmap rect
+   *  is dirty (geometry or a cold light changed). Up to 3 cold lights cast (R/G/B channels). */
+  private buildColdShadows(): void {
+    const n = Math.min(this.coldLights.length, SHADOW_CHANNEL_TINT.length);
+    this.coldShadowContainer.removeChildren();
+    for (let i = 0; i < n; i++) {
+      const l = this.coldLights[i];
+      const casters = this.gatherShadowCasters(l.x, l.y, l.radius); // world px (no pan)
+      let need = 0;
+      for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
+      const slot = this.ensureShadowMesh(this.coldShadowMeshes, i, need);
+      let v = 0;
+      const Lz = Math.max(l.height, 1);
+      for (const c of casters) v = this.projectCaster(slot.data, v, c, l.x, l.y, Lz, 0, 0); // pan 0 → world
+      slot.data.fill(0, v * 2);
+      slot.pos.update();
+      this.coldShadowContainer.addChild(slot.mesh);
+    }
   }
 
   /** Pack cold lights → `[data, color, count]` (data: xy world, z height, w radius). */

@@ -56,9 +56,28 @@ export const SHADOW_MAX_LEN = 280;
  *  the caster count is effectively unbounded — this is just the starting allocation. */
 export const MAX_SHADOW_VERTS = 8192;
 
-/** Occluder height as a fraction of its sprite px — the billboard's modelled height
- *  for the projection shear (tweak + HMR). Matched the old wedge's value. */
+/** Occluder height as a fraction of its sprite px — the billboard's modelled height for the
+ *  projection shear. The BASE value (small casters); taller ones diminish, see {@link shadowHeightScale}. */
 export const SHADOW_OCC_HEIGHT_SCALE = 0.5;
+
+/** Sprite height (world px) at/below which a caster uses the full {@link SHADOW_OCC_HEIGHT_SCALE}.
+ *  Bush-ish — tune so bushes hit the 0.5 you like; taller casters fall off from here. (HMR) */
+export const SHADOW_HEIGHT_REF = 100;
+
+/** Height-scale drop per DOUBLING of sprite height past {@link SHADOW_HEIGHT_REF}. So 2× ref =
+ *  0.4, 4× ref = 0.3, 8× = 0.2 … taming the perspective blowup that elongates tall-caster tips. */
+export const SHADOW_HEIGHT_FALLOFF = 0.1;
+
+/** Floor on the diminished height scale (very tall casters can't fall below this). */
+export const SHADOW_HEIGHT_MIN = 0.15;
+
+/** The occluder height scale for a caster of sprite height `h`: full at/below the reference,
+ *  then `−FALLOFF` per doubling. Shorter shadows (less perspective stretch) for tall casters,
+ *  while bushes keep the look you like. `scale = BASE − FALLOFF·log2(h/ref)`, clamped. */
+export function shadowHeightScale(h: number): number {
+  const f = SHADOW_OCC_HEIGHT_SCALE - SHADOW_HEIGHT_FALLOFF * Math.log2(Math.max(h, 1) / SHADOW_HEIGHT_REF);
+  return Math.max(SHADOW_HEIGHT_MIN, Math.min(SHADOW_OCC_HEIGHT_SCALE, f));
+}
 
 /** Shadows projecting NORTH (away from a southern light, screen −Y) are foreshortened by
  *  the ground's recede; stretch their Y-offset by this so they read as long as southward

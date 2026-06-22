@@ -38,13 +38,24 @@ const lightBakeBitGl = {
       uniform float uAmbient;
       uniform float uNormalYSign;
       uniform vec2 uRectWorld;                       // this rect's world origin
+      uniform sampler2D uColdShadow;                 // baked cold-shadow coverage (RGB = light 0/1/2)
+      uniform sampler2D uDepth;                       // depth composite (blue band ⇒ standing object)
       in vec2 vLocal;
     `,
     main: /* glsl */ `
       vec3 nrm = outColor.rgb * 2.0 - 1.0;          // outColor = normal slot (textureBit)
       vec3 N = normalize(vec3(nrm.x, nrm.y * uNormalYSign, nrm.z));
       vec2 world = uRectWorld + vLocal;
-      vec3 sum = vec3(uAmbient);
+      const float SHADOW_STRENGTH = 0.85;            // 1 = a shadow fully removes its light's term
+      // Match the hot pass's depth-driven object handling: standing objects get a south-tilted
+      // normal (+ wrap floor) for backlighting and are NEVER cold-shadowed (shadows are ground).
+      const float SOUTH_TILT = 1.8;
+      const float SOUTH_Z = 0.18;
+      const float OBJECT_WRAP = 0.45;
+      bool isObject = texture(uDepth, vUV).b * 255.0 > 12.0;
+      if (isObject) N = normalize(vec3(N.x, N.y + SOUTH_TILT, N.z * SOUTH_Z));
+      vec4 csh = texture(uColdShadow, vUV);          // this slot's cold-shadow coverage, per light
+      vec3 sum = vec3(uAmbient);                      // ambient is never shadowed
       for (int i = 0; i < ${MAX_COLD_LIGHTS}; i++) {
         if (float(i) >= uLightCount) break;
         vec4 ld = uLightData[i];
@@ -53,7 +64,10 @@ const lightBakeBitGl = {
         float atten = clamp(1.0 - dist / max(ld.w, 1.0), 0.0, 1.0);
         atten *= atten;
         float ndotl = max(dot(N, normalize(toLight)), 0.0);
-        sum += uLightColor[i].rgb * uLightColor[i].a * ndotl * atten;
+        if (isObject) ndotl = max(ndotl, OBJECT_WRAP * atten); // backlit objects catch some near light
+        // First 3 cold lights (R/G/B) lose their term where occluded; objects are never shadowed.
+        float sh = isObject ? 0.0 : (i == 0 ? csh.r : (i == 1 ? csh.g : (i == 2 ? csh.b : 0.0)));
+        sum += uLightColor[i].rgb * uLightColor[i].a * ndotl * atten * (1.0 - sh * SHADOW_STRENGTH);
       }
       outColor = vec4(sum, 1.0);
     `,
@@ -91,6 +105,16 @@ export class LightBakeShader extends Shader {
     u.uAmbient = ambient;
     this.resources.lightUniforms.update();
   }
+  /** The baked cold-shadow coverage map (same slot layout; sampled at the rect's `vUV`). */
+  set coldShadow(value: Texture) {
+    this.resources.uColdShadow = value.source;
+    this.resources.uColdShadowSampler = value.source.style;
+  }
+  /** The depth composite — its blue band marks standing objects (no cold shadow + backlight). */
+  set depth(value: Texture) {
+    this.resources.uDepth = value.source;
+    this.resources.uDepthSampler = value.source.style;
+  }
 }
 
 export function makeLightBakeShader(): LightBakeShader {
@@ -100,6 +124,10 @@ export function makeLightBakeShader(): LightBakeShader {
     resources: {
       uTexture: empty.source,
       uSampler: empty.source.style,
+      uColdShadow: empty.source,
+      uColdShadowSampler: empty.source.style,
+      uDepth: empty.source,
+      uDepthSampler: empty.source.style,
       textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
       bakeUniforms: new UniformGroup({
         uRectWorld: { value: new Float32Array([0, 0]), type: "vec2<f32>" },
