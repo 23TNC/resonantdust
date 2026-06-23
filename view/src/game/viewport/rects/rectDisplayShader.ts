@@ -52,17 +52,23 @@ const groundLightBitGl = {
       uniform sampler2D uHotAlbedo;                 // per-frame mover albedo (premultiplied)
       uniform sampler2D uHotNormal;                 // per-frame mover normal (flat-up where unmapped)
       uniform sampler2D uHotDepth;                  // per-frame mover depth (feet-Y + card layer)
-      // Feet-Y compare (depth R+G, bytes 0..255), >0 if A is SOUTHER (in front). R wraps
-      // (mod 255); G breaks an R tie. NOTE: the blue BAND of depthShaders.ts depthFront is
-      // unusable here — the mesh-tint sRGB squash collapses the byte values (BLUE_ROOT 48→9,
-      // BLUE_OBJECT 80→25, both into B<64), so the band threshold breaks. The squash is
-      // MONOTONIC, so the R+G ordering survives; the merge uses that + an object-present
-      // test (cold B > 12, matching the isObject gate) instead of the band.
+      // Depth compare (bytes 0..255), mirrors depthShaders.ts depthFront. >0 if A is in
+      // FRONT of B. The bytes are now RAW (encodeDepthTint √-predistorts past the gamma-2.0
+      // tint→buffer squash, so BLUE_ROOT reads 48 not 9): the blue BAND (B>>6) picks the
+      // primary key — same band → blue primary (intra-column layering), ground R+G tiebreak;
+      // different band → ground R+G primary, blue tiebreak. R wraps (mod 255); G breaks an R tie.
       float groundCmp(vec3 a, vec3 b) {
         float dR = a.r - b.r;
         if (dR > 127.5) dR -= 255.0; else if (dR < -127.5) dR += 255.0;
         if (abs(dR) > 0.5) return sign(dR);
         return sign(a.g - b.g);
+      }
+      float depthFront(vec3 a, vec3 b) {
+        if (floor(a.b / 64.0) == floor(b.b / 64.0)) {
+          return abs(a.b - b.b) > 0.5 ? sign(a.b - b.b) : groundCmp(a, b);
+        }
+        float g = groundCmp(a, b);
+        return g != 0.0 ? g : sign(a.b - b.b);
       }
       in vec2 vScreen;
     `,
@@ -124,16 +130,13 @@ const groundLightBitGl = {
       // (the same SOUTH_TILT/SOUTH_Z + wrap) so a light to the NORTH backlights them
       // (front dark, edges rimmed) instead of lighting the front from behind. No ground
       // shadow. premultiplied-over the lit ground. Maps baked by RectComposite.bakeHotPrims.
-      // Pick hot-vs-cold by depth. A mover beats BARE GROUND always (cold writes no depth
-      // there — hex tile ground is groundLayer); vs a standing OBJECT (cold B > 12) it wins
-      // only where its feet are SOUTHER (groundCmp ≥ 0). So a card behind a tree is occluded,
-      // a card in front occludes it. Feet-Y (R+G) survives the sRGB tint squash (monotonic);
-      // the blue BAND does NOT, so this uses an object-present test, not depthFront's band.
+      // Pick hot-vs-cold by depth: composite the mover only where it's in FRONT of the cold
+      // pixel (depthFront ≥ 0). A card behind a tree is occluded (cold shows); a card in front
+      // occludes it; a card over bare ground (cold writes 0, band 0) always wins.
       vec4 hotA = texture(uHotAlbedo, vUV);
       vec3 hotD = texture(uHotDepth, vUV).rgb * 255.0;
       vec3 coldD = dpx.rgb * 255.0;
-      bool coldObj = coldD.b > 12.0;
-      if (hotA.a > 0.003 && (!coldObj || groundCmp(hotD, coldD) >= 0.0)) {
+      if (hotA.a > 0.003 && depthFront(hotD, coldD) >= 0.0) {
         vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
         vec3 Nh = normalize(vec3(hn.x, hn.y * uNormalYSign, hn.z));
         Nh = normalize(vec3(Nh.x, Nh.y + SOUTH_TILT, Nh.z * SOUTH_Z)); // pitch forward, like objects

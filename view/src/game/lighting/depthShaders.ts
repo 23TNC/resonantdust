@@ -143,7 +143,12 @@ export function encodeDepthTint(worldY: number, rectH: number, blue: number): nu
   const r = ((rectRow % DEPTH_PERIOD) + DEPTH_PERIOD) % DEPTH_PERIOD; // floored → 0..254
   const offset = worldY - rectRow * rectH; // px into the rect, [0, rectH); rectH < 256
   const g = Math.max(0, Math.min(255, Math.round(offset)));
-  return (r << 16) | (g << 8) | (blue & 0xff);
+  // PRE-DISTORT: the tint→buffer path applies gamma 2.0 (the byte is SQUARED:
+  // 48→9, 80→25 = v²/255), squashing the bands + crushing precision. Write √ so the
+  // square recovers the raw byte (√(v/255)·255 then ²/255 = v). Near-lossless (only
+  // the very top 1-2 codes are unreachable). The clear path is NOT distorted.
+  const pre = (v: number): number => Math.round(Math.sqrt(v / 255) * 255);
+  return (pre(r) << 16) | (pre(g) << 8) | (pre(blue) & 0xff);
 }
 
 /** Reference (CPU) impl of the depth COMPARISON the GLSL consumer must mirror — kept
