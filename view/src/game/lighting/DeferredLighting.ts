@@ -1,7 +1,7 @@
 import { Container, Geometry, Matrix, Mesh, MeshGeometry, RenderTexture, Texture, UniformGroup, type Renderer } from "pixi.js";
 import { LitSprite } from "./LitSprite";
 import { MAX_LIGHTS, makeDeferredLightShader } from "./deferredLightShader";
-import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, BLUE_OBJECT, type ObjectDepthShader } from "./depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, setQuadDepth, BLUE_OBJECT, type ObjectDepthShader } from "./depthShaders";
 import { worldHexRadius } from "../viewport/hex/hexSize";
 import { debug } from "../../debug";
 
@@ -252,7 +252,7 @@ export class DeferredLighting {
       // Depth rides the mesh TINT (the per-object channel that binds) — keyed on the
       // prim's feet world-Y. NOTE: dormant old-pipeline path; arg2 is now rectH (not
       // rowStep) under the rect-renderer encode — left as-is since this is unwired.
-      quad.tint = encodeDepthTint(child.y, rowStep, BLUE_OBJECT);
+      setQuadDepth(quad.geometry, child.y, rowStep, BLUE_OBJECT);
       (quad.shader as ObjectDepthShader).texture = child.albedoTexture;
       this.depthBakeContainer.addChild(quad);
       i++;

@@ -74,13 +74,23 @@ export const BLUE_OBJECT = 80;
 // bytes survive. (Max-blend is wrong here: per-channel max mangles a wrapped 2-byte key.)
 const objectDepthBitGl = {
   name: "object-depth-bit",
+  // The depth bytes ride a CUSTOM per-vertex attribute `aDepth` (rect-row in .r, sub-rect
+  // offset in .g, LAYER in .b — all 0..1), NOT the tint. The tint→buffer path applies a
+  // gamma-2.0 SQUARE (`v²/255`) that ruins the bytes; a custom attribute writes RAW. The
+  // high-shader template inserts this bit's vertex `in`/`out` into the generated vertex
+  // shader, so the attribute actually binds (a geometry attribute with no shader that
+  // references it is what read 0 before). All 4 verts of a quad carry the same depth.
+  vertex: {
+    header: /* glsl */ `in vec3 aDepth; out vec3 vDepth;`,
+    main: /* glsl */ `vDepth = aDepth;`,
+  },
   fragment: {
-    // outColor = sampled albedo (textureBit); vColor = the per-mesh tint (rect-row in .r,
-    // sub-rect offset in .g, LAYER in .b). Discard the soft fringe so it doesn't
-    // overwrite; stamp the three bytes where opaque.
+    // outColor = sampled albedo (textureBit) → its alpha is the silhouette. Discard the
+    // soft fringe so it doesn't overwrite; stamp the raw depth bytes where opaque.
+    header: /* glsl */ `in vec3 vDepth;`,
     main: /* glsl */ `
       if (outColor.a <= ${DEPTH_ALPHA_THRESHOLD.toFixed(1)}) discard;
-      outColor = vec4(vColor.r, vColor.g, vColor.b, 1.0);
+      outColor = vec4(vDepth, 1.0);
     `,
   },
 };
@@ -139,16 +149,33 @@ export class ObjectDepthShader extends Shader {
  *  Stored under SORTED back-to-front OVERWRITE (not max-blend — per-channel max mangles
  *  the multi-byte, wrapped value); the frontmost prim's exact `(R,G,B)` survives. */
 export function encodeDepthTint(worldY: number, rectH: number, blue: number): number {
+  const [r, g, b] = depthBytes(worldY, rectH, blue);
+  return (r << 16) | (g << 8) | b;
+}
+
+/** The raw depth sort-key BYTES (0..255) for a feet world-Y + layer. R = rect-row
+ *  `mod(DEPTH_PERIOD)`; G = px offset into the rect; B = the layer. The canonical packing
+ *  — written RAW (no gamma) because {@link setQuadDepth} feeds it through a vertex
+ *  attribute, not the gamma-squaring tint. */
+function depthBytes(worldY: number, rectH: number, blue: number): [number, number, number] {
   const rectRow = Math.floor(worldY / rectH); // which rect-row in y (the rect COUNT)
   const r = ((rectRow % DEPTH_PERIOD) + DEPTH_PERIOD) % DEPTH_PERIOD; // floored → 0..254
-  const offset = worldY - rectRow * rectH; // px into the rect, [0, rectH); rectH < 256
-  const g = Math.max(0, Math.min(255, Math.round(offset)));
-  // PRE-DISTORT: the tint→buffer path applies gamma 2.0 (the byte is SQUARED:
-  // 48→9, 80→25 = v²/255), squashing the bands + crushing precision. Write √ so the
-  // square recovers the raw byte (√(v/255)·255 then ²/255 = v). Near-lossless (only
-  // the very top 1-2 codes are unreachable). The clear path is NOT distorted.
-  const pre = (v: number): number => Math.round(Math.sqrt(v / 255) * 255);
-  return (pre(r) << 16) | (pre(g) << 8) | (pre(blue) & 0xff);
+  const g = Math.max(0, Math.min(255, Math.round(worldY - rectRow * rectH))); // px into rect
+  return [r, g, blue & 0xff];
+}
+
+/** Set a depth quad's `aDepth` attribute to the feet-Y + layer sort key (all 4 verts).
+ *  This REPLACES the old `quad.tint = encodeDepthTint(...)` — the tint→buffer path applies
+ *  a gamma-2.0 square that ruins the bytes; a custom attribute carries them RAW + at float
+ *  precision. The shader (`objectDepthBitGl`) forwards `aDepth`→`vDepth`→the depth RT. */
+export function setQuadDepth(geometry: Geometry, worldY: number, rectH: number, blue: number): void {
+  const [r, g, b] = depthBytes(worldY, rectH, blue);
+  const buf = geometry.attributes.aDepth.buffer;
+  const d = buf.data as Float32Array;
+  const nr = r / 255, ng = g / 255, nb = b / 255;
+  d[0] = nr; d[1] = ng; d[2] = nb; d[3] = nr; d[4] = ng; d[5] = nb;
+  d[6] = nr; d[7] = ng; d[8] = nb; d[9] = nr; d[10] = ng; d[11] = nb;
+  buf.update();
 }
 
 /** Reference (CPU) impl of the depth COMPARISON the GLSL consumer must mirror — kept
@@ -203,6 +230,10 @@ export function makeDepthQuadGeometry(): Geometry {
     attributes: {
       aPosition: { buffer: new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
       aUV: { buffer: new Buffer({ data: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x2", stride: 2 * 4, offset: 0 },
+      // Per-vertex depth sort key (all 4 verts equal), set by `setQuadDepth`. Carries the
+      // bytes RAW past the tint's gamma-2.0 squash. The `objectDepthBitGl` vertex bit
+      // declares `in vec3 aDepth` so the high-shader's generated vertex stage binds it.
+      aDepth: { buffer: new Buffer({ data: new Float32Array(12), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST }), format: "float32x3", stride: 3 * 4, offset: 0 },
     },
     indexBuffer: new Buffer({ data: new Uint32Array([0, 1, 2, 0, 2, 3]), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
   });

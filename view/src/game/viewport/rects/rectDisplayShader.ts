@@ -53,8 +53,9 @@ const groundLightBitGl = {
       uniform sampler2D uHotNormal;                 // per-frame mover normal (flat-up where unmapped)
       uniform sampler2D uHotDepth;                  // per-frame mover depth (feet-Y + card layer)
       // Depth compare (bytes 0..255), mirrors depthShaders.ts depthFront. >0 if A is in
-      // FRONT of B. The bytes are now RAW (encodeDepthTint √-predistorts past the gamma-2.0
-      // tint→buffer squash, so BLUE_ROOT reads 48 not 9): the blue BAND (B>>6) picks the
+      // FRONT of B. The bytes are RAW — setQuadDepth carries them on a custom aDepth
+      // vertex attribute, bypassing the gamma-2.0 tint->buffer squash (BLUE_ROOT reads 48
+      // not 9): the blue BAND (B>>6) picks the
       // primary key — same band → blue primary (intra-column layering), ground R+G tiebreak;
       // different band → ground R+G primary, blue tiebreak. R wraps (mod 255); G breaks an R tie.
       float groundCmp(vec3 a, vec3 b) {

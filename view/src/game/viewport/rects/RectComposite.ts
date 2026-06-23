@@ -8,7 +8,7 @@ import {
 } from "./shadowMaskShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
-import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, setQuadDepth, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
 
 /** A static (baked) light, in WORLD px. Contributes to the lightmap. */
 export interface ColdLight {
@@ -818,7 +818,7 @@ export class RectComposite {
       pb.update();
       // Standing objects (band 1). Tiles/stacks (band 0) are still omitted below until
       // hex-card stacks render — see docs/depth_layers.md "Deferred".
-      quad.tint = encodeDepthTint(baseY, H, BLUE_OBJECT);
+      setQuadDepth(quad.geometry, baseY, H, BLUE_OBJECT);
       (quad.shader as ObjectDepthShader).texture = s.albedoTexture;
       this.depthBakeContainer.addChild(quad);
       q++;
@@ -933,7 +933,7 @@ export class RectComposite {
         const pb = quad.geometry.attributes.aPosition.buffer;
         (pb.data as Float32Array).set([e.wx0, e.wy0, e.wx1, e.wy0, e.wx1, e.wy1, e.wx0, e.wy1]);
         pb.update();
-        quad.tint = encodeDepthTint(e.wy1, H, BLUE_ROOT);
+        setQuadDepth(quad.geometry, e.wy1, H, BLUE_ROOT);
         (quad.shader as ObjectDepthShader).texture = Texture.WHITE;
         this.depthBakeContainer.addChild(quad);
       }
