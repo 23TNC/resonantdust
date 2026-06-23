@@ -24,11 +24,11 @@
         #0A3D73 &color.bg set
         #0B4F8A &color.title set
         #E6F1FF &color.text set
-        ; A blueprint-styled soul (soul category, `human.blueprint` object) — the
+        ; A blueprint-styled soul (soul category, `golem.blueprint` object) — the
         ; existing blueprint art; `nd_furnace` has no master in the tree. Fitting
         ; for a blueprint that assembles a chord SOUL.
         $asset::soul &pack set
-        human.blueprint &variant set
+        golem.blueprint &variant set
       @init>
         $functions::rect_card call drop
       @update>
