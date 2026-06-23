@@ -269,6 +269,11 @@ export class WorldRenderer extends LayoutNode {
     this.anchorR = anchor.r;
 
     this.cardLayer.sortableChildren = true;
+    // The cards are deferred-lit via the hot G-buffer (baked each frame, lit + composited
+    // in the ground shader), so the raw cardLayer draw is retired — it would otherwise
+    // paint the unlit albedo on top. Nodes still live here (the bake reparents them out
+    // and back); only this layer's own draw is suppressed.
+    this.cardLayer.renderable = false;
     // One composite, the ALBEDO channel (a composite of every tile prim's albedo —
     // ground AND objects). Generalized: a `normal` (and lit/emissive/depth) channel
     // is one more spec here at the lighting milestone — same slots/anchor/dirty index.
@@ -764,6 +769,13 @@ export class WorldRenderer extends LayoutNode {
     this.groundShader.normal = nrm;
     const lm = this.albedo.lightmapTexture;
     if (lm) this.groundShader.lightmap = lm;
+    // Hot prims (movers/cards): the display shader lights this per-frame G-buffer and
+    // composites it over the lit ground, so the cards are deferred-lit (not the raw
+    // `cardLayer` draw, which is retired). Same two maps `bakeHotPrims` writes.
+    const hotA = this.albedo.hotAlbedoTexture;
+    const hotN = this.albedo.hotNormalTexture;
+    if (hotA) this.groundShader.hotAlbedo = hotA;
+    if (hotN) this.groundShader.hotNormal = hotN;
     this.packHotLights(panX, panY);
     this.buildShadowMask(renderer, panX, panY);
   }

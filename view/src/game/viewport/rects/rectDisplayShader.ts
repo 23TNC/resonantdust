@@ -49,6 +49,8 @@ const groundLightBitGl = {
       uniform sampler2D uShadowMask;                // projected-silhouette mask (RGB = light 0/1/2)
       uniform vec2 uPanelSize;                       // panel px → mask UV
       uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
+      uniform sampler2D uHotAlbedo;                 // per-frame mover albedo (premultiplied)
+      uniform sampler2D uHotNormal;                 // per-frame mover normal (flat-up where unmapped)
       in vec2 vScreen;
     `,
     main: /* glsl */ `
@@ -102,6 +104,30 @@ const groundLightBitGl = {
       }
       vec4 alb = texture(uAlbedo, vUV);
       outColor = vec4(alb.rgb * lightSum, alb.a);
+
+      // ── hot prims (movers/cards): light the per-frame G-buffer + composite OVER ──
+      // Sample the hot albedo/normal at the SAME slot UV. Where a mover covers this
+      // pixel, light it with the same lights using its own normal (a viewer-facing
+      // billboard — no ground shadow, no object south-tilt) and premultiplied-over
+      // the lit ground. The hot maps are baked each frame by RectComposite.bakeHotPrims.
+      vec4 hotA = texture(uHotAlbedo, vUV);
+      if (hotA.a > 0.003) {
+        vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
+        vec3 Nh = normalize(vec3(hn.x, hn.y * uNormalYSign, hn.z));
+        vec3 hotSum = texture(uLightmap, vUV).rgb;   // ambient + baked cold (ground-normal approx)
+        for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
+          if (float(i) >= uLightCount) break;
+          vec4 ld = uLightData[i];
+          vec3 toL = vec3(ld.xy - vScreen, ld.z);
+          float d = length(toL.xy);
+          float at = clamp(1.0 - d / max(ld.w, 1.0), 0.0, 1.0); at *= at;
+          if (at <= 0.0) continue;
+          float nl = max(dot(Nh, normalize(toL)), 0.0);
+          hotSum += uLightColor[i].rgb * (uLightColor[i].a * nl * at);
+        }
+        vec3 litHot = hotA.rgb * hotSum;             // hotA premultiplied → already × alpha
+        outColor = vec4(litHot + outColor.rgb * (1.0 - hotA.a), hotA.a + outColor.a * (1.0 - hotA.a));
+      }
     `,
   },
 };
@@ -158,6 +184,16 @@ export class GroundShader extends Shader {
     this.resources.uDepth = value.source;
     this.resources.uDepthSampler = value.source.style;
   }
+  /** Per-frame hot-prim (mover) albedo — lit + composited over the ground. */
+  set hotAlbedo(value: Texture) {
+    this.resources.uHotAlbedo = value.source;
+    this.resources.uHotAlbedoSampler = value.source.style;
+  }
+  /** Per-frame hot-prim normal (flat-up where unmapped). */
+  set hotNormal(value: Texture) {
+    this.resources.uHotNormal = value.source;
+    this.resources.uHotNormalSampler = value.source.style;
+  }
 }
 
 export function makeGroundShader(): GroundShader {
@@ -183,6 +219,10 @@ export function makeGroundShader(): GroundShader {
       uShadowMaskSampler: empty.source.style,
       uDepth: empty.source,
       uDepthSampler: empty.source.style,
+      uHotAlbedo: empty.source,
+      uHotAlbedoSampler: empty.source.style,
+      uHotNormal: empty.source,
+      uHotNormalSampler: empty.source.style,
       shadowUniforms: new UniformGroup({
         uPanelSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
       }),
