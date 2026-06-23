@@ -372,7 +372,7 @@ export class RectComposite {
     this.hotAlbedo = RenderTexture.create({ width: cw, height: ch, resolution: res });
     this.hotNormal = RenderTexture.create({ width: cw, height: ch, resolution: res });
     renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
-    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 0] });
+    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 1] });
     // Depth: same slot layout; cleared to 0 (empty = behind everything).
     this.depthRT?.destroy(true);
     this.depthRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
@@ -851,7 +851,7 @@ export class RectComposite {
     // map, then stamp each covered slot. (An incremental vacate-track would ghost — the blit
     // alpha-blends, so a cleared scratch can't overwrite a vacated slot's stale mover pixels.)
     renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
-    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 0] });
+    renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 1] });
     if (entries.length === 0) return;
     const rectMap = new Map<string, HotEntry[]>();
     for (const e of entries) {
@@ -888,12 +888,27 @@ export class RectComposite {
     // ALBEDO: nodes already display their albedo → render as-is.
     renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 0], transform: m });
     this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotAlbedo!, slotX, slotY, false);
-    // NORMAL: each LitSprite → its normal map (white tint so the vector isn't skewed); no map → hide.
+    // NORMAL: ONLY real-normal LitSprites draw (their normal map, white-tinted so the
+    // albedo tint can't skew the vector). Everything else — no-normal LitSprites
+    // (solid-fill rects) AND non-LitSprite leaves (title text, bars) — is hidden so
+    // it falls through to the OPAQUE flat-up clear (the facing-user normal
+    // #8080ff), never writing albedo/white into the normal buffer.
+    const litSet = new Set<unknown>();
+    for (const e of entries) for (const s of e.lit) litSet.add(s);
+    const hiddenLeaves: Container[] = [];
+    const hideLeaves = (c: Container): void => {
+      for (const ch of c.children as Container[]) {
+        if (ch.children && ch.children.length) hideLeaves(ch);
+        else if (!litSet.has(ch) && ch.renderable) { ch.renderable = false; hiddenLeaves.push(ch); }
+      }
+    };
+    for (const e of entries) hideLeaves(e.node);
     for (const e of entries) for (const s of e.lit) { if (s.normalTexture) { s.texture = s.normalTexture; s.tint = 0xffffff; } else { s.renderable = false; } }
-    renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0.5, 0.5, 1, 0], transform: m });
+    renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0.5, 0.5, 1, 1], transform: m });
     this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotNormal!, slotX, slotY, false);
     // Restore textures/tints/renderable, then return the nodes to their parents.
     for (const group of saved) for (const r of group) { r.s.renderable = true; r.s.texture = r.tex; r.s.tint = r.tint; }
+    for (const ch of hiddenLeaves) ch.renderable = true;
     for (let i = 0; i < entries.length; i++) parents[i]?.addChild(entries[i].node);
   }
 
