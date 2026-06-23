@@ -232,9 +232,11 @@ export class TexPrim extends BasePrim {
       else this.node.setTextures(this.deps.whiteTexture, null);
       this.mode = { kind: "fill" };
     }
-    // Deferred two-layer split: a hex-clipped ground is the GROUND layer; every
-    // other prim (standing art, solid fill) is an OBJECT. See LitSprite.groundLayer.
-    this.node.groundLayer = this.mode.kind === "clippedHex";
+    // Deferred two-layer split: a HEX prim is tile GROUND (textured `clippedHex` OR a
+    // solid-fill hex like a plain-colour floor — both are the tessellating ground, not a
+    // standing object); `rect`/`sprite` prims (card bodies, standing art) are OBJECTS that
+    // bake depth + occlude. So ground never spuriously occludes a card sitting on it.
+    this.node.groundLayer = this.kind === "hex";
     // Record the resolved stem for the rect composite's silhouette-tight footprint
     // (undefined for solid fills / the hex mask — no silhouette to tighten to).
     this.node.stem = stem || undefined;

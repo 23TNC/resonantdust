@@ -124,15 +124,16 @@ const groundLightBitGl = {
       // (the same SOUTH_TILT/SOUTH_Z + wrap) so a light to the NORTH backlights them
       // (front dark, edges rimmed) instead of lighting the front from behind. No ground
       // shadow. premultiplied-over the lit ground. Maps baked by RectComposite.bakeHotPrims.
-      // The mover composites OVER the cold ground. Depth-gated occlusion (a card behind a
-      // tree being hidden) is built — the hot DEPTH map is baked + bound (uHotDepth) and
-      // groundCmp does the squash-robust feet-Y compare — but is DISABLED here pending two
-      // depth-system fixes it surfaced: (1) the sRGB mesh-tint squash collapses the blue
-      // bands, so a card can't be layered vs an object reliably; (2) solid-fill TILE ground
-      // (e.g. the inventory floor) bakes OBJECT depth (only clippedHex is groundLayer), so a
-      // feet-Y gate wrongly occludes cards behind the floor. Re-enable once those land.
+      // Pick hot-vs-cold by depth. A mover beats BARE GROUND always (cold writes no depth
+      // there — hex tile ground is groundLayer); vs a standing OBJECT (cold B > 12) it wins
+      // only where its feet are SOUTHER (groundCmp ≥ 0). So a card behind a tree is occluded,
+      // a card in front occludes it. Feet-Y (R+G) survives the sRGB tint squash (monotonic);
+      // the blue BAND does NOT, so this uses an object-present test, not depthFront's band.
       vec4 hotA = texture(uHotAlbedo, vUV);
-      if (hotA.a > 0.003) {
+      vec3 hotD = texture(uHotDepth, vUV).rgb * 255.0;
+      vec3 coldD = dpx.rgb * 255.0;
+      bool coldObj = coldD.b > 12.0;
+      if (hotA.a > 0.003 && (!coldObj || groundCmp(hotD, coldD) >= 0.0)) {
         vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
         vec3 Nh = normalize(vec3(hn.x, hn.y * uNormalYSign, hn.z));
         Nh = normalize(vec3(Nh.x, Nh.y + SOUTH_TILT, Nh.z * SOUTH_Z)); // pitch forward, like objects
