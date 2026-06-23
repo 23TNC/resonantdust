@@ -804,15 +804,21 @@ export class WorldRenderer extends LayoutNode {
     this.groundShader.setPanelSize(this.width, this.height);
   }
 
-  /** Place the cold (static, baked) light fixtures once the composite is sized — two
-   *  world-anchored torches (warm + cool) that pan with the world. The ambient floor
-   *  lives in the lightmap. A demo set until authored `^light` cards drive cold lights. */
+  /** Place the cold (static, baked) light fixtures once the composite is sized — a warm
+   *  torch CENTRED on the anchor (its pool lands on the viewport centre) + a cool one
+   *  offset, both world-anchored so they pan with the world. The ambient floor lives in
+   *  the lightmap. Uniform across viewports (the inventory's anchor IS its centre — no
+   *  per-kind branch). A demo set until authored `^light` cards drive cold lights. */
   private ensureColdLights(anchorWorldX: number, anchorWorldY: number): void {
     if (this.coldSet || !this.albedo.ready) return;
     this.coldSet = true;
+    const H = 120;
+    // Warm torch CENTRED on the anchor — its pool lands on the viewport centre (a flat
+    // floor needs no height-drop; only the world's iso-tilted ground does, handled by the
+    // cursor-light offset). Cool one offset.
     this.albedo.setColdLights([
-      { x: anchorWorldX - 220, y: anchorWorldY - 120, height: 120, radius: 380, color: 0xffa64d, brightness: 2.2 },
-      { x: anchorWorldX + 260, y: anchorWorldY + 140, height: 120, radius: 380, color: 0x5aa0ff, brightness: 2.0 },
+      { x: anchorWorldX, y: anchorWorldY, height: H, radius: 380, color: 0xffa64d, brightness: 2.2 },
+      { x: anchorWorldX + 260, y: anchorWorldY + 140, height: H, radius: 380, color: 0x5aa0ff, brightness: 2.0 },
     ], 0.22);
   }
 
