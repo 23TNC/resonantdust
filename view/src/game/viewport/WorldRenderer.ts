@@ -125,6 +125,11 @@ function cardContentSig(item: Extract<Renderable, { layer: "card" }>): string {
  *  remaining distance covered each tick). ~0.25 ≈ a few-frame glide at 60fps. */
 const CARD_TWEEN_EASE = 0.25;
 
+/** The cursor light floats at `height` above the ground; on the iso-tilted ground
+ *  its illumination pool lands NORTH (up-screen) of the pointer. Drop the light's
+ *  panel-Y by this × its height so the pool re-centres on the cursor. (tune + HMR) */
+const CURSOR_LIGHT_DROP = 0.3;
+
 /** Alpha of a card while it's being dragged — the ghost (in the scene overlay)
  *  carries the live visual; the source card stays dimmed in place. */
 const DRAG_ALPHA = 0.3;
@@ -776,6 +781,7 @@ export class WorldRenderer extends LayoutNode {
       let y = l.y;
       if (l.screen && !this.cursorMoved) { x = this.width / 2; y = this.height / 2; }
       else if (!l.screen) { x += panX; y += panY; }
+      if (l.screen) y += CURSOR_LIGHT_DROP * l.height; // pool sits on the cursor, not above it
       lights.push({ x, y, z: l.height, radius: l.radius });
     }
     this.albedo.buildShadowMask(renderer, lights, panX, panY);
@@ -810,6 +816,7 @@ export class WorldRenderer extends LayoutNode {
       let y = l.y;
       if (l.screen && !this.cursorMoved) { x = this.width / 2; y = this.height / 2; }
       else if (!l.screen) { x += panX; y += panY; }
+      if (l.screen) y += CURSOR_LIGHT_DROP * l.height; // pool sits on the cursor, not above it
       data[i * 4] = x; data[i * 4 + 1] = y; data[i * 4 + 2] = l.height; data[i * 4 + 3] = l.radius;
       color[i * 4] = ((l.color >> 16) & 0xff) / 255;
       color[i * 4 + 1] = ((l.color >> 8) & 0xff) / 255;
