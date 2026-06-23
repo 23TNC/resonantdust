@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 
 use resonantdust_codec::card_model;
-use resonantdust_codec::packed::{pack_macro_zone_full, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
+use resonantdust_codec::packed::{pack_macro_zone_full, surface_of, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
 use resonantdust_codec::plan::{ActionPlan, Effect, HoldKinds, StockOp};
 use resonantdust_dsl::bridge::{stock_default_u32, stock_slot_bits, stock_slot_for_aspect, stock_to_vec, Card};
 use resonantdust_dsl::loader::Bundle;
@@ -159,22 +159,62 @@ fn translate<S: CardStore>(
             }
             VmEffect::Create { def, target } => {
                 let dk = def_key(def);
-                // Owner is either a real bound card, or a sibling created card
-                // (`created.M.inventory`) recorded as a dependency.
-                let owner = if let Some((m, rem)) = parse_created(target) {
+                // Where the created card lands: a sibling created card's inventory
+                // (`created.M.inventory`), a real bound card's `.inventory`, or a
+                // bound card's `.location` (its exact world cell — the blueprint
+                // spot the chord soul takes).
+                let placement = if let Some((m, rem)) = parse_created(target) {
                     if rem != "inventory" {
                         return Err(format!("create into {target:?}: handle target must end in .inventory"));
                     }
-                    OwnerRef::Synth(m)
+                    Placement::Inventory(OwnerRef::Synth(m))
                 } else {
-                    let (owner_card, container) = resolve_target(frame, store, target, now_ms)?;
-                    if container.as_deref() != Some("inventory") {
-                        return Err(format!("create target must end in .inventory; got {target:?}"));
+                    let (card, container) = resolve_target(frame, store, target, now_ms)?;
+                    match container.as_deref() {
+                        Some("inventory") => Placement::Inventory(OwnerRef::Real(card)),
+                        Some("location") => {
+                            // `card` is the bound card itself — spawn at its zone+cell,
+                            // re-owned by ITS owner (a world soul owns its world cards).
+                            let c = store
+                                .card_at(card, now_ms)
+                                .ok_or_else(|| format!("create at {target:?}: card {card} not found"))?;
+                            Placement::At {
+                                surface: surface_of(c.macro_zone),
+                                macro_zone: c.macro_zone,
+                                micro_location: c.micro_location,
+                                owner_id: c.owner_id,
+                            }
+                        }
+                        _ => return Err(format!(
+                            "create target must end in .inventory or .location; got {target:?}"
+                        )),
                     }
-                    OwnerRef::Real(owner_card)
                 };
                 let stock = stock_default_u32(bundle, &dk);
-                synths.push(Synthetic { def_key: dk, owner, stock, alive: true, tag: 0 });
+                synths.push(Synthetic { def_key: dk, placement, stock, alive: true, tag: 0 });
+            }
+            VmEffect::Move { source, target } => {
+                let card_id = frame
+                    .card_at(source)
+                    .ok_or_else(|| format!("move: source {source:?} is not a bound card"))?;
+                let (dest, container) = resolve_target(frame, store, target, now_ms)?;
+                let (surface, macro_zone, owner_id) = match container.as_deref() {
+                    Some("inventory") => (
+                        INVENTORY_LAYER,
+                        pack_macro_zone_full(dest, INVENTORY_LAYER, 0, 0),
+                        dest,
+                    ),
+                    Some("location") => {
+                        let c = store
+                            .card_at(dest, now_ms)
+                            .ok_or_else(|| format!("move to {target:?}: card {dest} not found"))?;
+                        (surface_of(c.macro_zone), c.macro_zone, c.owner_id)
+                    }
+                    _ => return Err(format!(
+                        "move target must end in .inventory or .location; got {target:?}"
+                    )),
+                };
+                ap.effects.push(Effect::Move { card_id, surface, macro_zone, owner_id });
             }
             VmEffect::Stock { slot, aspect, delta, abs } => {
                 if let Some((idx, rem)) = parse_created(slot) {
@@ -246,7 +286,7 @@ fn translate<S: CardStore>(
         if !synths[i].alive {
             continue;
         }
-        if let OwnerRef::Synth(m) = synths[i].owner {
+        if let Placement::Inventory(OwnerRef::Synth(m)) = synths[i].placement {
             if !synths.get(m).map(|s| s.alive).unwrap_or(false) {
                 return Err(format!("created.{i} nests in created.{m}, which was destroyed or absent"));
             }
@@ -270,17 +310,26 @@ fn translate<S: CardStore>(
         if !s.alive {
             continue;
         }
-        let owner_id = match s.owner {
-            OwnerRef::Real(id) => id,
-            OwnerRef::Synth(m) => synths[m].tag, // assigned above (nonzero — it's referenced)
+        let (surface, macro_zone, owner_id, micro_location) = match &s.placement {
+            Placement::Inventory(OwnerRef::Real(id)) => {
+                (INVENTORY_LAYER, pack_macro_zone_full(*id, INVENTORY_LAYER, 0, 0), *id, None)
+            }
+            Placement::Inventory(OwnerRef::Synth(m)) => {
+                let tag = synths[*m].tag; // assigned above (nonzero — it's referenced)
+                (INVENTORY_LAYER, pack_macro_zone_full(tag, INVENTORY_LAYER, 0, 0), tag, None)
+            }
+            Placement::At { surface, macro_zone, micro_location, owner_id } => {
+                (*surface, *macro_zone, *owner_id, Some(*micro_location))
+            }
         };
         ap.effects.push(Effect::Create {
             def_key: s.def_key.clone(),
-            surface: INVENTORY_LAYER,
-            macro_zone: pack_macro_zone_full(owner_id, INVENTORY_LAYER, 0, 0),
+            surface,
+            macro_zone,
             owner_id,
             stock: s.stock,
             tag: s.tag,
+            micro_location,
         });
     }
 
@@ -288,18 +337,25 @@ fn translate<S: CardStore>(
 }
 
 /// A card created in this plan, folded so same-card modifies don't become extra
-/// effects. `owner` is a real card or a sibling synthetic (a nesting dependency);
-/// `tag` (0 = none) is set when another synthetic nests in this one.
+/// effects. `placement` is where it lands; `tag` (0 = none) is set when another
+/// synthetic nests in this one.
 struct Synthetic {
     def_key: String,
-    owner: OwnerRef,
+    placement: Placement,
     stock: u32,
     alive: bool,
     tag: u32,
 }
 
-/// Where a created card nests: a real bound card, or a sibling created card
-/// (index into the synthetics, addressed `created.M` in the recipe).
+/// Where a created card lands: into an owner's inventory (first free cell), or at
+/// an exact world cell (the `create … .location` path — a bound card's spot).
+enum Placement {
+    Inventory(OwnerRef),
+    At { surface: u8, macro_zone: u64, micro_location: u32, owner_id: u32 },
+}
+
+/// Whose inventory a created card nests in: a real bound card, or a sibling
+/// created card (index into the synthetics, addressed `created.M` in the recipe).
 enum OwnerRef {
     Real(u32),
     Synth(usize),
@@ -410,7 +466,7 @@ fn resolve_target<S: CardStore>(
                 }
                 cid = c.micro_location;
             }
-            "inventory" => container = Some(seg.to_string()),
+            "inventory" | "location" => container = Some(seg.to_string()),
             other => return Err(format!("unsupported target step {other:?} in {path:?}")),
         }
     }
@@ -487,6 +543,7 @@ mod tests {
                     owner_id: root,
                     stock: 4,
                     tag: 1,
+                    micro_location: None,
                 },
                 // pip: owner is log's tag (shard resolves), no own tag, no stock.
                 Effect::Create {
@@ -496,6 +553,7 @@ mod tests {
                     owner_id: 1,
                     stock: 0,
                     tag: 0,
+                    micro_location: None,
                 },
             ]
         );

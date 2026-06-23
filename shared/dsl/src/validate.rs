@@ -54,6 +54,8 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
     "array" => (2, 0),
     "destroy" => (1, 0),
     "create" => (2, 0),
+    // `&source &target move` — pops the moved card + its destination, pushes none.
+    "move" => (2, 0),
     // `as` names the card the preceding `create` made (tracked in a register, so
     // `create` stays stack-neutral and bare creates still validate): pops the
     // name address, pushes nothing.

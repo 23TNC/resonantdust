@@ -120,6 +120,16 @@ async function handleLogin(id: number, name: string): Promise<void> {
         core.give(pid, "player_soul", pid, 0, 0, 0);
         try {
           await waitFor(() => core!.player_soul_id() >= 0, 5000, "player_soul(minted)");
+          // A fresh player's starting kit, seeded into the player_soul's own
+          // inventory (its inventory IS the player's): one blueprint + one dust,
+          // which assemble a chord_soul via the `chord_soul_assemble` recipe.
+          // `surface 1` = INVENTORY_LAYER; zone_owner == owner + (0,0) → the
+          // shard first-free-places into the soul's inventory bucket.
+          const soul = core.player_soul_id();
+          if (soul >= 0) {
+            core.give(soul, "blueprint_chord_soul", soul, 1, 0, 0);
+            core.give(soul, "dust", soul, 1, 0, 0);
+          }
         } catch {
           /* still pending — the pump's `playerSoul` event opens it if it lands */
         }

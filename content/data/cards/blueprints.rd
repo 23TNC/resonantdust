@@ -7,11 +7,11 @@
       @define>
         blueprint &aspect.type set
 
-  ; A reusable blueprint: placed in the world, fed dust (drag dust onto it), it
-  ; assembles a `chord_soul` at its location and returns to the player's inventory
-  ; (recipe `chord_soul_assemble`). Hosts the top stack so dust can sit on it.
+  ; A reusable blueprint: placed in the world and fed dust (co-located on its
+  ; tile), it assembles a `chord_soul` at its location and returns to the player's
+  ; inventory (recipe `chord_soul_assemble`). Mirrors `corpus`'s plain shape — the
+  ; matcher binds co-located cards into the recipe's stack slots, no stack bits.
   ::blueprint_chord_soul>
     :data>
       @define>
         blueprint &aspect.type set
-        4 &aspect.stack_hosts set

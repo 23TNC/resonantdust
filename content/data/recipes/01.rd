@@ -179,3 +179,19 @@
       4 &h.aspect.progress set
       $card::pip &h.inventory create
       1 &slot.0.0.aspect.forged set
+
+  ; Blueprint assembly: a `blueprint_chord_soul` (root) fed `dust` (co-located on
+  ; its tile) assembles a `chord_soul` AT the blueprint's world cell, sends the
+  ; reusable blueprint back to the player's inventory, and consumes the dust.
+  ; Exercises the new `create … .location` (exact-cell spawn) + `move` verbs.
+  ::chord_soul_assemble>
+    @input>
+      $card::blueprint_chord_soul *slot.0.0.def_id eq if &slot.0.0 use
+      $card::dust *slot.2.0.def_id eq if &slot.2.0 claim
+
+    @output>
+      10 &sys.duration set
+      ltr &slot.2.0.style set
+      $card::chord_soul &slot.0.0.location create
+      &slot.0.0 &slot.0.0.owner.inventory move
+      &slot.2.0 destroy

@@ -35,7 +35,24 @@ pub enum Effect {
   /// this plan whose card this one nests in; the shard resolves the tag to the
   /// minted id while applying. `tag` (0 = none) is THIS card's own tag, set when
   /// a sibling references it, so the shard can register `tag -> minted_id`.
-  Create { def_key: String, surface: u8, macro_zone: u64, owner_id: u32, stock: u32, tag: u32 },
+  ///
+  /// `micro_location` (`None` = the default) lets the shard place the card on the
+  /// first free cell of its target zone (the inventory path). `Some(micro)` pins
+  /// it to an EXACT cell — the `create … .location` path, which spawns a card at a
+  /// bound card's world cell (e.g. the blueprint's spot).
+  Create {
+    def_key: String,
+    surface: u8,
+    macro_zone: u64,
+    owner_id: u32,
+    stock: u32,
+    tag: u32,
+    micro_location: Option<u32>,
+  },
+  /// Relocate an existing bound card to another zone (`surface` + `macro_zone`),
+  /// re-owned by `owner_id`, placed on the first free cell there — the `move`
+  /// verb. Used to send a consumed blueprint back to the player's inventory.
+  Move { card_id: u32, surface: u8, macro_zone: u64, owner_id: u32 },
   /// Spawn a deferred stack member anchored to `host_card_id`.
   CreateDeferred { def_key: String, host_card_id: u32 },
   /// Mutate the synthetic tile's per-cell stock `slot` (`set_tile_stock`) — the

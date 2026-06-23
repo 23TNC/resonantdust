@@ -797,8 +797,12 @@ impl Hold {
 pub enum Effect {
   /// `&slot destroy` — mark the bound card dead.
   Destroy { slot: String },
-  /// `$card::x &target create` — spawn `def` into `target` (`…owner.inventory`).
+  /// `$card::x &target create` — spawn `def` into `target` (`…owner.inventory`,
+  /// or `…location` to spawn at a bound card's world cell).
   Create { def: String, target: String },
+  /// `&source &target move` — relocate the bound card `source` to `target`
+  /// (`…owner.inventory`). The consumed-blueprint-back-to-inventory verb.
+  Move { source: String, target: String },
   /// `&slot.aspect.x dec`/`inc`/`set` — per-row tile-stock mutation. `delta` is
   /// the signed change for inc/dec; `set` carries the absolute value with abs=true.
   Stock { slot: String, aspect: String, delta: i64, abs: bool },
@@ -1273,6 +1277,16 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
           "destroy" if mode == Mode::Output => {
             let a = st.pop().unwrap();
             plan.effects.push(Effect::Destroy { slot: store.resolve_addr(a.addr()) });
+          }
+          // `&source &target move` — relocate a bound card. Postfix order: source
+          // pushed first, target second, so target is on top.
+          "move" if mode == Mode::Output => {
+            let target = st.pop().unwrap();
+            let source = st.pop().unwrap();
+            plan.effects.push(Effect::Move {
+              source: store.resolve_addr(source.addr()),
+              target: store.resolve_addr(target.addr()),
+            });
           }
           "create" if mode == Mode::Output => {
             let a = st.pop().unwrap();
