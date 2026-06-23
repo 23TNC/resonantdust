@@ -106,14 +106,16 @@ const groundLightBitGl = {
       outColor = vec4(alb.rgb * lightSum, alb.a);
 
       // ── hot prims (movers/cards): light the per-frame G-buffer + composite OVER ──
-      // Sample the hot albedo/normal at the SAME slot UV. Where a mover covers this
-      // pixel, light it with the same lights using its own normal (a viewer-facing
-      // billboard — no ground shadow, no object south-tilt) and premultiplied-over
-      // the lit ground. The hot maps are baked each frame by RectComposite.bakeHotPrims.
+      // Sample the hot albedo/normal at the SAME slot UV. Movers are standing billboards
+      // FACING the viewer, exactly like the ground objects — so pitch their normal forward
+      // (the same SOUTH_TILT/SOUTH_Z + wrap) so a light to the NORTH backlights them
+      // (front dark, edges rimmed) instead of lighting the front from behind. No ground
+      // shadow. premultiplied-over the lit ground. Maps baked by RectComposite.bakeHotPrims.
       vec4 hotA = texture(uHotAlbedo, vUV);
       if (hotA.a > 0.003) {
         vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
         vec3 Nh = normalize(vec3(hn.x, hn.y * uNormalYSign, hn.z));
+        Nh = normalize(vec3(Nh.x, Nh.y + SOUTH_TILT, Nh.z * SOUTH_Z)); // pitch forward, like objects
         vec3 hotSum = texture(uLightmap, vUV).rgb;   // ambient + baked cold (ground-normal approx)
         for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
           if (float(i) >= uLightCount) break;
@@ -123,6 +125,7 @@ const groundLightBitGl = {
           float at = clamp(1.0 - d / max(ld.w, 1.0), 0.0, 1.0); at *= at;
           if (at <= 0.0) continue;
           float nl = max(dot(Nh, normalize(toL)), 0.0);
+          nl = max(nl, OBJECT_WRAP * at);            // backlit billboard catches some near light
           hotSum += uLightColor[i].rgb * (uLightColor[i].a * nl * at);
         }
         vec3 litHot = hotA.rgb * hotSum;             // hotA premultiplied → already × alpha

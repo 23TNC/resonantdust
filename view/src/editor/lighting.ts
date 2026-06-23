@@ -8,6 +8,17 @@
 //! and undo/redo-correct (just re-read the channels). Lambert + per-light
 //! distance falloff + ambient — same model as the deferred pass.
 
+/** Billboard treatment — pitch the surface normal FORWARD (south, toward the
+ *  viewer) so a card lights like a standing billboard, exactly as the in-game
+ *  hot-prim/object pass does (`rectDisplayShader`). Same constants. A light to the
+ *  north then backlights (front dark, edges rimmed) instead of lighting the front
+ *  from behind; the wrap floors the diffuse so a near backlight still catches some
+ *  light. Flat-up rects (no normal map) pitch forward too → they read as a facing
+ *  surface, not a flat panel. */
+const SOUTH_TILT = 1.8;
+const SOUTH_Z = 0.18;
+const OBJECT_WRAP = 0.45;
+
 /** A point light positioned in texel space, `height` above the surface. */
 export interface Light {
   x: number;
@@ -52,9 +63,13 @@ export function composite(
       nx = n[i] / 127.5 - 1;
       ny = (n[i + 1] / 127.5 - 1) * normalYSign;
       nz = n[i + 2] / 127.5 - 1;
-      const inv = 1 / (Math.hypot(nx, ny, nz) || 1);
-      nx *= inv; ny *= inv; nz *= inv;
     }
+    // Pitch forward (south) like the in-game billboard/object pass — applied to the
+    // mapped normal AND the flat-up default, so rects light as a facing surface.
+    ny += SOUTH_TILT;
+    nz *= SOUTH_Z;
+    const ninv = 1 / (Math.hypot(nx, ny, nz) || 1);
+    nx *= ninv; ny *= ninv; nz *= ninv;
     let lr = ambient;
     let lg = ambient;
     let lb = ambient;
@@ -66,8 +81,8 @@ export function composite(
       if (at <= 0) continue;
       at *= at;
       const inv = 1 / (Math.hypot(dx, dy, L.height) || 1);
-      const ndotl = nx * dx * inv + ny * dy * inv + nz * L.height * inv;
-      if (ndotl <= 0) continue;
+      let ndotl = nx * dx * inv + ny * dy * inv + nz * L.height * inv;
+      ndotl = Math.max(ndotl, OBJECT_WRAP * at); // backlit billboard catches some near light
       const c = L.intensity * ndotl * at;
       lr += L.r * c; lg += L.g * c; lb += L.b * c;
     }
