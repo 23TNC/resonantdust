@@ -42,3 +42,19 @@
         1 &aspect.soul set
         3 &aspect.inventory stock
         2 &aspect.inventory set
+
+  ; A world soul carrying a `chord` — the product of the blueprint_chord_soul +
+  ; dust assembly recipe (`chord_soul_assemble`). A plain soul like `human` plus a
+  ; `chord` marker; created in the world AT the blueprint's location.
+  ::chord_soul>
+    :data>
+      @define>
+        soul &aspect.type set
+        2 &aspect.soul set
+        1 &aspect.chord set
+        10 &aspect.move_speed set
+        2 &aspect.inventory set
+        2 &aspect.anchor_active set
+        6 &aspect.anchor_hot set
+        12 &aspect.anchor_warm set
+        20 &aspect.anchor_cold set

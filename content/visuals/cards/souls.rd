@@ -48,3 +48,19 @@
       @destroy>
         $functions::rect_card call drop
         $functions::card_death call drop
+
+  ::chord_soul>
+    :visuals>
+      @define>
+        $shape.generic &shape set
+        #6a4caa &color.bg set
+        #ecd6aa &color.title set
+        #0b1426 &color.text set
+        $asset::soul_white &pack set
+      @init>
+        $functions::rect_card call drop
+      @update>
+        $functions::rect_card call drop
+      @destroy>
+        $functions::rect_card call drop
+        $functions::card_death call drop
