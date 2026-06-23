@@ -32,6 +32,7 @@
       @define>
         requisite &aspect.type set
         1 &aspect.aether set
+        4 &aspect.stack_joins set
 
   ; Stacking-resolver test card: hosts NO stacks (0b0000), joins top+bottom
   ; (0b1100=12). Used by the harness stack tests — a leaf that caps a stack and
