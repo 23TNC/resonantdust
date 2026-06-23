@@ -51,6 +51,19 @@ const groundLightBitGl = {
       uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
       uniform sampler2D uHotAlbedo;                 // per-frame mover albedo (premultiplied)
       uniform sampler2D uHotNormal;                 // per-frame mover normal (flat-up where unmapped)
+      uniform sampler2D uHotDepth;                  // per-frame mover depth (feet-Y + card layer)
+      // Feet-Y compare (depth R+G, bytes 0..255), >0 if A is SOUTHER (in front). R wraps
+      // (mod 255); G breaks an R tie. NOTE: the blue BAND of depthShaders.ts depthFront is
+      // unusable here — the mesh-tint sRGB squash collapses the byte values (BLUE_ROOT 48→9,
+      // BLUE_OBJECT 80→25, both into B<64), so the band threshold breaks. The squash is
+      // MONOTONIC, so the R+G ordering survives; the merge uses that + an object-present
+      // test (cold B > 12, matching the isObject gate) instead of the band.
+      float groundCmp(vec3 a, vec3 b) {
+        float dR = a.r - b.r;
+        if (dR > 127.5) dR -= 255.0; else if (dR < -127.5) dR += 255.0;
+        if (abs(dR) > 0.5) return sign(dR);
+        return sign(a.g - b.g);
+      }
       in vec2 vScreen;
     `,
     main: /* glsl */ `
@@ -111,6 +124,13 @@ const groundLightBitGl = {
       // (the same SOUTH_TILT/SOUTH_Z + wrap) so a light to the NORTH backlights them
       // (front dark, edges rimmed) instead of lighting the front from behind. No ground
       // shadow. premultiplied-over the lit ground. Maps baked by RectComposite.bakeHotPrims.
+      // The mover composites OVER the cold ground. Depth-gated occlusion (a card behind a
+      // tree being hidden) is built — the hot DEPTH map is baked + bound (uHotDepth) and
+      // groundCmp does the squash-robust feet-Y compare — but is DISABLED here pending two
+      // depth-system fixes it surfaced: (1) the sRGB mesh-tint squash collapses the blue
+      // bands, so a card can't be layered vs an object reliably; (2) solid-fill TILE ground
+      // (e.g. the inventory floor) bakes OBJECT depth (only clippedHex is groundLayer), so a
+      // feet-Y gate wrongly occludes cards behind the floor. Re-enable once those land.
       vec4 hotA = texture(uHotAlbedo, vUV);
       if (hotA.a > 0.003) {
         vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
@@ -197,6 +217,11 @@ export class GroundShader extends Shader {
     this.resources.uHotNormal = value.source;
     this.resources.uHotNormalSampler = value.source.style;
   }
+  /** Per-frame hot-prim depth — `depthFront(hotDepth, coldDepth)` gates the merge. */
+  set hotDepth(value: Texture) {
+    this.resources.uHotDepth = value.source;
+    this.resources.uHotDepthSampler = value.source.style;
+  }
 }
 
 export function makeGroundShader(): GroundShader {
@@ -226,6 +251,8 @@ export function makeGroundShader(): GroundShader {
       uHotAlbedoSampler: empty.source.style,
       uHotNormal: empty.source,
       uHotNormalSampler: empty.source.style,
+      uHotDepth: empty.source,
+      uHotDepthSampler: empty.source.style,
       shadowUniforms: new UniformGroup({
         uPanelSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
       }),

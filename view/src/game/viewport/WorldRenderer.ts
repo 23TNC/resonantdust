@@ -455,11 +455,18 @@ export class WorldRenderer extends LayoutNode {
 
   /** Seed a card's start position to a global drop point: if it's rendered here
    *  now, move it there immediately; otherwise stash it so its next build starts
-   *  there. Either way the position tween then glides it to its data cell. */
+   *  there. Either way the position tween then glides it to its data cell.
+   *
+   *  `(globalX, globalY)` is the cursor at release — where the drag ghost was
+   *  CENTRED (its pivot is the body centre). The card node is top-left-origin, so
+   *  we shift by `(ox, oy)` to land the body centre on the cursor; without this
+   *  the card snaps down-right by half its size the instant the ghost vanishes. */
   seedDropPosition(id: number, globalX: number, globalY: number): void {
     const p = this.panLayer.toLocal(new Point(globalX, globalY));
     const c = this.cards.get(id);
-    if (c) c.node.position.set(p.x, p.y);
+    // Stash the centre point; `buildCard` applies its own `(ox, oy)` (the node
+    // isn't built yet there, so the offset isn't known until then).
+    if (c) c.node.position.set(p.x + c.ox, p.y + c.oy);
     else this.dropSeed.set(id, { x: p.x, y: p.y });
   }
 
@@ -521,6 +528,7 @@ export class WorldRenderer extends LayoutNode {
       { name: "shadow",   texture: this.albedo.shadowMaskTexture }, // hot-light shadow mask (RGB = light 0/1/2)
       { name: "hotAlb",   texture: this.albedo.hotAlbedoTexture }, // per-frame mover albedo (G7 hot prims)
       { name: "hotNrm",   texture: this.albedo.hotNormalTexture }, // per-frame mover normal
+      { name: "hotDep",   texture: this.albedo.hotDepthTexture }, // per-frame mover depth (feet-Y + layer)
       { name: "emissive", texture: null },
     ];
   }
@@ -774,8 +782,10 @@ export class WorldRenderer extends LayoutNode {
     // `cardLayer` draw, which is retired). Same two maps `bakeHotPrims` writes.
     const hotA = this.albedo.hotAlbedoTexture;
     const hotN = this.albedo.hotNormalTexture;
+    const hotD = this.albedo.hotDepthTexture;
     if (hotA) this.groundShader.hotAlbedo = hotA;
     if (hotN) this.groundShader.hotNormal = hotN;
+    if (hotD) this.groundShader.hotDepth = hotD;
     this.packHotLights(panX, panY);
     this.buildShadowMask(renderer, panX, panY);
   }
@@ -1013,7 +1023,9 @@ export class WorldRenderer extends LayoutNode {
     // glides it from there to its data cell; otherwise it appears at its cell.
     const seed = this.dropSeed.get(id);
     if (seed) {
-      node.position.set(seed.x, seed.y);
+      // `seed` is the cursor/body-centre at release; this node is top-left-origin,
+      // so apply `(ox, oy)` to centre the body there (matches the drag ghost).
+      node.position.set(seed.x + ox, seed.y + oy);
       this.dropSeed.delete(id);
     } else {
       node.position.set(center.x + ox, center.y + oy);

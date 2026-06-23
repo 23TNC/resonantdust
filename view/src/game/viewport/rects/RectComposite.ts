@@ -8,7 +8,7 @@ import {
 } from "./shadowMaskShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
-import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, BLUE_OBJECT, type ObjectDepthShader } from "../../lighting/depthShaders";
+import { makeObjectDepthShader, makeDepthQuadGeometry, encodeDepthTint, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
 
 /** A static (baked) light, in WORLD px. Contributes to the lightmap. */
 export interface ColdLight {
@@ -207,6 +207,10 @@ export class RectComposite {
    *  trees, so we render the node in place (with a slot transform) rather than reparent leaves. */
   private hotAlbedo: RenderTexture | null = null;
   private hotNormal: RenderTexture | null = null;
+  /** Per-frame mover DEPTH (feet-Y + card layer), same slot layout. The display merge
+   *  compares it against the cold depth via `depthFront` to pick hot-vs-cold per pixel
+   *  (a card behind an object is occluded; a card in front occludes the object). */
+  private hotDepth: RenderTexture | null = null;
 
   /** Diagnostics (read by `?rectview`). */
   lastBaked = 0;
@@ -373,6 +377,9 @@ export class RectComposite {
     this.hotNormal = RenderTexture.create({ width: cw, height: ch, resolution: res });
     renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
     renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 1] });
+    this.hotDepth?.destroy(true);
+    this.hotDepth = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    renderer.render({ container: this.empty, target: this.hotDepth, clear: true, clearColor: [0, 0, 0, 1] });
     // Depth: same slot layout; cleared to 0 (empty = behind everything).
     this.depthRT?.destroy(true);
     this.depthRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
@@ -839,6 +846,7 @@ export class RectComposite {
   /** The hot mover maps (display samples + merges them over the cold world by depth). */
   get hotAlbedoTexture(): RenderTexture | null { return this.hotAlbedo; }
   get hotNormalTexture(): RenderTexture | null { return this.hotNormal; }
+  get hotDepthTexture(): RenderTexture | null { return this.hotDepth; }
 
   /** Re-bake the mover albedo+normal maps from `entries` every frame: stamp each slot a mover
    *  covers (the overlapping nodes rendered in place with a slot transform), and clear slots
@@ -852,6 +860,7 @@ export class RectComposite {
     // alpha-blends, so a cleared scratch can't overwrite a vacated slot's stale mover pixels.)
     renderer.render({ container: this.empty, target: this.hotAlbedo, clear: true, clearColor: [0, 0, 0, 0] });
     renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 1] });
+    if (this.hotDepth) renderer.render({ container: this.empty, target: this.hotDepth, clear: true, clearColor: [0, 0, 0, 1] });
     if (entries.length === 0) return;
     const rectMap = new Map<string, HotEntry[]>();
     for (const e of entries) {
@@ -903,9 +912,34 @@ export class RectComposite {
       }
     };
     for (const e of entries) hideLeaves(e.node);
-    for (const e of entries) for (const s of e.lit) { if (s.normalTexture) { s.texture = s.normalTexture; s.tint = 0xffffff; } else { s.renderable = false; } }
+    // Real-normal sprites → their normal map (white tint). No-normal LitSprites (the
+    // solid-fill rects, a WHITE-atlas texture) → tint flat-up #8080ff so they RENDER
+    // flat-up (white×#8080ff) — occluding a back card's normal under the painter's
+    // z-sort (stacked-card normal ordering), not just falling to the clear (which
+    // would let the back show through a front card's rect).
+    for (const e of entries) for (const s of e.lit) { if (s.normalTexture) { s.texture = s.normalTexture; s.tint = 0xffffff; } else { s.tint = 0x8080ff; } }
     renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0.5, 0.5, 1, 1], transform: m });
     this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotNormal!, slotX, slotY, false);
+    // DEPTH: one solid quad per mover covering its AABB, tinted by its feet-Y + card
+    // layer (BLUE_ROOT, band 0). Entries are z-sorted (back-to-front) + OVERWRITE, so the
+    // front mover's depth survives. The display merge picks hot-vs-cold via `depthFront`.
+    // (Over-covers transparent card margins, but the merge masks on the hot albedo alpha.)
+    if (this.hotDepth) {
+      this.depthBakeContainer.removeChildren();
+      for (let qi = 0; qi < entries.length; qi++) {
+        const e = entries[qi];
+        let quad = this.depthQuadPool[qi];
+        if (!quad) { quad = new Mesh({ geometry: makeDepthQuadGeometry(), shader: makeObjectDepthShader() }); quad.blendMode = "normal"; this.depthQuadPool[qi] = quad; }
+        const pb = quad.geometry.attributes.aPosition.buffer;
+        (pb.data as Float32Array).set([e.wx0, e.wy0, e.wx1, e.wy0, e.wx1, e.wy1, e.wx0, e.wy1]);
+        pb.update();
+        quad.tint = encodeDepthTint(e.wy1, H, BLUE_ROOT);
+        (quad.shader as ObjectDepthShader).texture = Texture.WHITE;
+        this.depthBakeContainer.addChild(quad);
+      }
+      renderer.render({ container: this.depthBakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 1], transform: m });
+      this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotDepth, slotX, slotY, false);
+    }
     // Restore textures/tints/renderable, then return the nodes to their parents.
     for (const group of saved) for (const r of group) { r.s.renderable = true; r.s.texture = r.tex; r.s.tint = r.tint; }
     for (const ch of hiddenLeaves) ch.renderable = true;
@@ -1025,6 +1059,9 @@ export class RectComposite {
     this.lightmap?.destroy(true);
     this.lightBakeMesh.destroy();
     this.depthRT?.destroy(true);
+    this.hotAlbedo?.destroy(true);
+    this.hotNormal?.destroy(true);
+    this.hotDepth?.destroy(true);
     for (const quad of this.depthQuadPool) quad.destroy();
     this.depthBakeContainer.destroy();
     this.blitSprite.destroy();
