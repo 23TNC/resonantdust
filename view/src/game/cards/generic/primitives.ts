@@ -263,6 +263,14 @@ export class TexPrim extends BasePrim {
   }
 }
 
+/** Hard cap on label characters — real names are short; this only bites on
+ *  overlong strings (untranslated locale keys), keeping the shrink-to-fit from
+ *  rendering them microscopically small. The trailing glyph becomes `…`. */
+const MAX_TEXT_CHARS = 22;
+/** Fraction of the allocated box width a label may fill — leaves a side margin so
+ *  text never visually touches the card edge. */
+const TEXT_WIDTH_FRAC = 0.94;
+
 /** `text` — a BitmapText. Content + font size are discrete (a re-rasterize);
  *  position / alpha / tint ease. */
 export class TextPrim extends BasePrim {
@@ -277,8 +285,16 @@ export class TextPrim extends BasePrim {
   private fontScale = 1;
 
   protected applyDiscrete(n: VisualNode, box: CardBox): void {
-    this.node.text = n.text ?? "";
-    this.fontScale = Math.max(0.01, pxY(box, n.size.y) / TEXT_BAKE_PX);
+    // Cap the character count first (a guard so an unusually long string — e.g. a
+    // raw, untranslated locale key — shrinks to a readable size, not microscopic).
+    const raw = n.text ?? "";
+    this.node.text = raw.length > MAX_TEXT_CHARS ? raw.slice(0, MAX_TEXT_CHARS - 1) + "…" : raw;
+    // Height drives the base glyph scale; then shrink further if the rendered text
+    // would be wider than its allocated box (`size.x`) — so a label never overruns.
+    const heightScale = Math.max(0.01, pxY(box, n.size.y) / TEXT_BAKE_PX);
+    const maxW = pxX(box, n.size.x) * TEXT_WIDTH_FRAC;
+    const naturalW = this.node.getLocalBounds().width; // width at the baked font size
+    this.fontScale = naturalW > 0 ? Math.min(heightScale, maxW / naturalW) : heightScale;
     setAnchor(this.node, n);
   }
 
