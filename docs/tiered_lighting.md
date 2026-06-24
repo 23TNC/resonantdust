@@ -150,13 +150,23 @@ current display loop already does it).
 - VERIFIED: 8 world lights over the forest — all 8 lanes incl. both alpha lanes carry independent
   coverage, RGB not zeroed, 8 distinct coloured pools with per-light shadows. Premultiply cleared.
 
-### Phase 2 — dynamic pool (warm field + 32 lights)
-- `warm_shadowmap` (32-bit, double-buffered, world/rect-space) + ping-pong combine folding the 8
-  fresh scatter channels in, round-robin.
-- 32 lights in uniforms; display loop (4×8 bit extractor) + cross-fade on the fresh 8.
-- Cursor-pin behind a flag.
-- Verify: 32 dynamic lights; move one slowly → shadow lags then 1-frame-fades to correct, no pop;
-  pan → shadows track the world.
+### Phase 2a — dynamic pool (warm field + 32 lights) ✅ DONE (6fa424f)
+- `warmCombineShader` ping-pong: packs the 8 fresh scatter lanes into one warm channel (the
+  round-robin batch = exactly one byte), carries the rest, `blendMode "none"` (verbatim → alpha
+  lane survives). `warm_shadowmap` double-buffered, **panel-space** (Phase 2a).
+- 32 lights in uniforms; display flat loop deriving c=i/8,b=i-c*8 (valid array index) + bf_byte/
+  bf_bit gate + cross-fade the fresh batch with live scatter. Round-robin ceil(count/8) batches.
+- VERIFIED: 32 world lights → all 4 warm channels fill incl. alpha (91k/198k/205k/137k px); every
+  light lit + shadowed; cursor (1 light) unchanged. Gotchas hit: `packed` is a GLSL reserved word;
+  computed uniform-array index is illegal in ES 1.00; backticks in GLSL comments close the literal.
+- Not yet visually confirmed: the 1-frame cross-fade smoothing a *moving* light (mechanism in
+  place); possible faint 4-frame shadow-edge shimmer from the rotating cross-fade (polish, watch).
+
+### Phase 2b — pan-stability (pending)
+- Warm field is panel-space, so a camera pan misaligns the accumulated bits. Make it world-space:
+  either a world/rect-space warm field with the **panel→world transform in the combine**, or a
+  scroll-on-pan cache (G4's risky bit). Cursor-pin flag if real-time cursor shadow lag reads badly.
+- Verify: pan → warm shadows track the world; move a light → lag then fade, no pop.
 
 ### Phase 3 — cold scaling (per-rect maps + CPU active map)
 - Replace cold uniform-array with per-rect data/color maps + CPU 32-bit active map; `LightBakeShader`
