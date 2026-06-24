@@ -162,11 +162,26 @@ current display loop already does it).
 - Not yet visually confirmed: the 1-frame cross-fade smoothing a *moving* light (mechanism in
   place); possible faint 4-frame shadow-edge shimmer from the rotating cross-fade (polish, watch).
 
-### Phase 2b — pan-stability (pending)
-- Warm field is panel-space, so a camera pan misaligns the accumulated bits. Make it world-space:
-  either a world/rect-space warm field with the **panel→world transform in the combine**, or a
-  scroll-on-pan cache (G4's risky bit). Cursor-pin flag if real-time cursor shadow lag reads badly.
-- Verify: pan → warm shadows track the world; move a light → lag then fade, no pop.
+### Phase 2b — pan-stability ✅ DONE (f49522c)
+- The combine **scrolls** the carried channels by the UV pan delta (read uPrevWarm at
+  `vUV − uPanDelta`; revealed edges → 0/lit), so accumulated bits track the world. Warm buffers
+  are NEAREST (bitfield — bilinear corrupts bits; also quantizes the scroll to whole texels).
+  WorldRenderer passes `(pan − lastPan)/size`. Chosen over a world/rect-space field to avoid
+  per-frame per-rect blits into the torus layout — keeps everything panel-space.
+- VERIFIED: a controlled +0.10 pan shifts channel 0 by +152px (expected ~177, shortfall = right-
+  edge clipping; correct direction + magnitude); uPanDelta reaches the shader; static unchanged.
+- Caveat: screen lights (the cursor) scroll with the world too, but re-scatter each batch-0 frame
+  so the live cross-fade masks it. Cursor-pin remains an option if it ever reads badly.
+- Still open (carried from 2a): cross-fade no-pop on a *moving* light + possible rotating shimmer
+  are eyeball-unconfirmed; no perf measurement; only tested with injected lights.
+
+### Debug notes (gotchas that cost time)
+- `extract.pixels` returns the **DPR-scaled physical** buffer — address it by the returned
+  `.width`, NOT `RenderTexture.width` (CSS). Using the CSS width scrambled a centroid measurement
+  into a false "scroll doesn't work."
+- GLSL/PIXI failures are **silent** (compile error → mesh skipped → black/zero, logged only to
+  `console.error`). `packed` is a reserved word; computed uniform-array indices are illegal in
+  ES 1.00; backticks in GLSL comments close the template literal. `tsc` catches none of these.
 
 ### Phase 3 — cold scaling (per-rect maps + CPU active map)
 - Replace cold uniform-array with per-rect data/color maps + CPU 32-bit active map; `LightBakeShader`
