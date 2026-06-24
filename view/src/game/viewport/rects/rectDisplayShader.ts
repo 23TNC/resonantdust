@@ -9,10 +9,11 @@ import {
   Matrix,
   UniformGroup,
 } from "pixi.js";
+import { BITFIELD_GLSL } from "../../lighting/bitfield";
 
-/** Max HOT (dynamic, per-frame) lights summed in the display pass. The loop breaks
- *  on `uLightCount`, so unused slots cost nothing; keep the active set small. */
-export const MAX_HOT_LIGHTS = 8;
+/** Max DYNAMIC lights summed in the display pass (the global pool). The loop breaks on
+ *  `uLightCount`, so unused slots cost nothing. 32 = 4 warm-field channels × 8 lights. */
+export const MAX_HOT_LIGHTS = 32;
 
 /**
  * The viewport ground shader. The ground is drawn as ≤4 quads (the torus-seam split
@@ -46,9 +47,12 @@ const groundLightBitGl = {
       uniform vec4 uLightColor[${MAX_HOT_LIGHTS}];  // rgb colour, a brightness
       uniform float uLightCount;
       uniform float uNormalYSign;                   // flip normal Y → screen convention
-      uniform sampler2D uShadowMask;                // scatter map 0: lanes R/G/B/A = lights 0/1/2/3
-      uniform sampler2D uShadowMask2;               // scatter map 1: lanes R/G/B/A = lights 4/5/6/7
+      uniform sampler2D uShadowMask;                // scatter map 0: lanes R/G/B/A = THIS FRAME's fresh batch lights 0..3
+      uniform sampler2D uShadowMask2;               // scatter map 1: fresh batch lights 4..7
+      uniform sampler2D uWarmField;                 // 32-bit occlusion bitfield (bit i = light i shadowed)
+      uniform float uFreshChannel;                  // warm channel (0..3) refreshed this frame = the fresh 8-light batch
       uniform vec2 uPanelSize;                       // panel px → mask UV
+      ${BITFIELD_GLSL}
       uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
       uniform sampler2D uHotAlbedo;                 // per-frame mover albedo (premultiplied)
       uniform sampler2D uHotNormal;                 // per-frame mover normal (flat-up where unmapped)
@@ -95,14 +99,22 @@ const groundLightBitGl = {
       // So we gate well below the compressed object value, not against the raw 30 constant.
       bool isObject = dpx.b * 255.0 > 12.0;
       if (isObject) N = normalize(vec3(N.x, N.y + SOUTH_TILT, N.z * SOUTH_Z));
-      // The mask holds each hot light's projected-silhouette coverage in its own channel
-      // (R = light 0, G = light 1, B = light 2; built CPU-side in RectComposite.buildShadowMask).
+      // 32 dynamic lights: occlusion comes from the warm bitfield (bit i = light i shadowed
+      // here), refreshed 8/frame round-robin. The fresh batch (channel uFreshChannel) ALSO has
+      // live scatter coverage in the 2 maps — cross-fade the stale warm bit with it for a
+      // 1-frame fade (no pop). Sampled panel-space (Phase 2a). Built in RectComposite.
       vec2 maskUV = vScreen / uPanelSize;
-      vec4 shMask = texture(uShadowMask, maskUV);   // lights 0..3 (R/G/B/A)
-      vec4 shMask2 = texture(uShadowMask2, maskUV); // lights 4..7 (R/G/B/A)
+      vec4 shMask = texture(uShadowMask, maskUV);   // fresh batch lanes 0..3 (R/G/B/A)
+      vec4 shMask2 = texture(uShadowMask2, maskUV); // fresh batch lanes 4..7
+      vec4 warm = texture(uWarmField, maskUV);      // 32-bit occlusion field
+      int freshC = int(uFreshChannel + 0.5);
       vec3 lightSum = texture(uLightmap, vUV).rgb;  // ambient + baked cold lights
+      // Flat loop so uLightData[i] is a valid loop-index access (ES 1.00 forbids indexing a
+      // uniform array by a computed var). Channel c = i/8, bit b = i-c*8 derive the warm bit.
       for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
         if (float(i) >= uLightCount) break;
+        int c = i / 8;
+        int b = i - c * 8;
         vec4 ld = uLightData[i];
         vec3 toLight = vec3(ld.xy - vScreen, ld.z);
         float dist = length(toLight.xy);
@@ -110,21 +122,21 @@ const groundLightBitGl = {
         atten *= atten;
         if (atten <= 0.0) continue;                 // outside radius → no light, no shadow
         float ndotl = max(dot(N, normalize(toLight)), 0.0);
-        // Light wrap: a backlit object still catches a nearby light around its far side, and the
-        // closer the light the more it does. Floor the diffuse by OBJECT_WRAP·atten (proximity);
-        // the lit term multiplies by atten again, so the wrap is a steep near-field effect.
+        // Backlit object catches some near light around its far side (steep near-field).
         if (isObject) ndotl = max(ndotl, OBJECT_WRAP * atten);
-        // Shadows are a GROUND effect: objects are NEVER darkened, so they always sit on
-        // top of (in front of) shadows — a shadow painted on an object's camera-facing
-        // front reads as the wrong side. Each point light's shadow masks only ITS own term.
-        // Coverage for light i: lane (i&3) of map (i>>2). Selected without dynamic vec
-        // indexing (ES 1.00) — pick the map, then the lane by ladder.
-        vec4 sm = i < 4 ? shMask : shMask2;
-        int lane = i - (i < 4 ? 0 : 4);
-        float cov = lane == 0 ? sm.r : (lane == 1 ? sm.g : (lane == 2 ? sm.b : sm.a));
-        float blocked = isObject ? 0.0 : cov;
-        // Shadows relax the closer they are to the light (mirrors the object wrap): a shadow by
-        // a bright source isn't as black as one at the edge of the radius.
+        float blockedWarm = bf_bit(bf_byte(warm, c), b); // 1 = shadowed (cached, possibly stale)
+        float blocked;
+        if (c == freshC) {                           // fresh batch → cross-fade with live scatter
+          vec4 sm = b < 4 ? shMask : shMask2;
+          int lane = b - (b < 4 ? 0 : 4);
+          float cov = lane == 0 ? sm.r : (lane == 1 ? sm.g : (lane == 2 ? sm.b : sm.a));
+          blocked = 0.5 * (blockedWarm + cov);
+        } else {
+          blocked = blockedWarm;
+        }
+        if (isObject) blocked = 0.0;                 // objects are never ground-shadowed
+        // Shadows relax near the light (mirrors the object wrap): a bright-source shadow isn't
+        // as black as one at the radius edge.
         float strength = SHADOW_STRENGTH * (1.0 - SHADOW_NEAR_RELIEF * atten);
         float lit = uLightColor[i].a * ndotl * atten * (1.0 - blocked * strength);
         lightSum += uLightColor[i].rgb * lit;
@@ -208,10 +220,20 @@ export class GroundShader extends Shader {
     this.resources.uShadowMask = value.source;
     this.resources.uShadowMaskSampler = value.source.style;
   }
-  /** Scatter map 1 (lanes R/G/B/A = dynamic light 4/5/6/7 coverage). */
+  /** Scatter map 1 (fresh-batch lanes R/G/B/A = lights 4..7 coverage). */
   set shadowMask2(value: Texture) {
     this.resources.uShadowMask2 = value.source;
     this.resources.uShadowMask2Sampler = value.source.style;
+  }
+  /** The 32-bit warm occlusion field (bit i = light i shadowed here). Rebuilt each frame. */
+  set warmField(value: Texture) {
+    this.resources.uWarmField = value.source;
+    this.resources.uWarmFieldSampler = value.source.style;
+  }
+  /** Which warm channel (0..3) is the fresh round-robin batch this frame (cross-faded). */
+  setFreshChannel(c: number): void {
+    this.resources.shadowUniforms.uniforms.uFreshChannel = c;
+    this.resources.shadowUniforms.update();
   }
   /** The panel size the mask was rendered at (mask is panel-sized → UV = panel px / size). */
   setPanelSize(w: number, h: number): void {
@@ -264,6 +286,8 @@ export function makeGroundShader(): GroundShader {
       uShadowMaskSampler: empty.source.style,
       uShadowMask2: empty.source,
       uShadowMask2Sampler: empty.source.style,
+      uWarmField: empty.source,
+      uWarmFieldSampler: empty.source.style,
       uDepth: empty.source,
       uDepthSampler: empty.source.style,
       uHotAlbedo: empty.source,
@@ -274,6 +298,7 @@ export function makeGroundShader(): GroundShader {
       uHotDepthSampler: empty.source.style,
       shadowUniforms: new UniformGroup({
         uPanelSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
+        uFreshChannel: { value: 0, type: "f32" },
       }),
     },
   });

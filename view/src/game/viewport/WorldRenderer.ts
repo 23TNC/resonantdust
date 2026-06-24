@@ -162,6 +162,8 @@ function stackFan(flags: number): { dir: number; index: number } {
  * fast pan can't interleave old tiles.
  */
 export class WorldRenderer extends LayoutNode {
+  /** Round-robin frame counter for the warm-field scatter batch (which 8 lights refresh). */
+  private shadowBatch = 0;
   private readonly panLayer = new Container();
   private readonly cardLayer = new Container();
   /** The detached, world-positioned container holding every visible tile's prims —
@@ -791,14 +793,20 @@ export class WorldRenderer extends LayoutNode {
     this.buildShadowMask(renderer, panX, panY);
   }
 
-  /** Rebuild the projected-silhouette scatter maps for the dynamic lights (≤MAX_SHADOW_LIGHTS
-   *  cast — one per lane across 2 maps) and point the ground shader at them. Light positions
-   *  are resolved to panel px exactly as `packHotLights` does (cursor centres until the pointer
-   *  moves; world lights add the pan), then `RectComposite` projects the casters per light. */
+  /** Scatter THIS frame's 8-light round-robin batch and fold it into the warm field. The 32
+   *  dynamic lights split into ceil(count/8) batches (one per warm channel); each frame builds
+   *  one batch's silhouettes into the 2 scatter maps (lanes 0..7), then `buildWarmField` packs
+   *  them into that channel. Light positions resolve to panel px like `packHotLights`. ≤8 lights
+   *  → 1 batch (always fresh, no lag); 32 → 4-frame cycle (≤3-frame shadow lag). */
   private buildShadowMask(renderer: Renderer, panX: number, panY: number): void {
-    const n = Math.min(this.hotLights.length, MAX_SHADOW_LIGHTS);
+    const count = Math.min(this.hotLights.length, MAX_HOT_LIGHTS);
+    const batches = Math.max(1, Math.ceil(count / MAX_SHADOW_LIGHTS));
+    const batch = this.shadowBatch % batches;
+    this.shadowBatch++;
     const lights: { x: number; y: number; z: number; radius: number }[] = [];
-    for (let i = 0; i < n; i++) {
+    for (let j = 0; j < MAX_SHADOW_LIGHTS; j++) {
+      const i = batch * MAX_SHADOW_LIGHTS + j;
+      if (i >= count) break;
       const l = this.hotLights[i];
       let x = l.x;
       let y = l.y;
@@ -808,10 +816,14 @@ export class WorldRenderer extends LayoutNode {
       lights.push({ x, y, z: l.height, radius: l.radius });
     }
     this.albedo.buildShadowMask(renderer, lights, panX, panY);
+    this.albedo.buildWarmField(renderer, batch); // fold the 8 fresh lanes into warm channel `batch`
     const m0 = this.albedo.shadowMaskTextureAt(0);
     if (m0) this.groundShader.shadowMask = m0;
     const m1 = this.albedo.shadowMaskTextureAt(1);
     if (m1) this.groundShader.shadowMask2 = m1;
+    const warm = this.albedo.warmFieldTexture;
+    if (warm) this.groundShader.warmField = warm;
+    this.groundShader.setFreshChannel(batch);
     const depth = this.albedo.depthTexture;
     if (depth) this.groundShader.depth = depth;
     this.groundShader.setPanelSize(this.width, this.height);

@@ -6,6 +6,7 @@ import {
   MAX_SHADOW_LIGHTS, SHADOW_MAPS, channelForLight, shadowMapOf, shadowHeightScale,
   SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH, SHADOW_MAX_LEN, type ShadowMaskShader,
 } from "./shadowMaskShader";
+import { makeWarmCombineShader, makeWarmQuadGeometry, type WarmCombineShader } from "./warmCombineShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
 import { makeObjectDepthShader, makeDepthQuadGeometry, setQuadDepth, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
@@ -177,6 +178,16 @@ export class RectComposite {
   private shadowRTs: (RenderTexture | null)[] = [];
   private shadowW = 0;
   private shadowH = 0;
+  // ── warm field (32-bit dynamic occlusion, ping-pong) ─────────────────────
+  /** Two panel-sized rgba8 buffers holding the 32-light occlusion bitfield (bit i = light i
+   *  SHADOWED here). Each frame the combine folds the fresh 8-light batch into one channel,
+   *  carrying the rest — round-robin 8/frame over 32 = 4-frame cycle. Display samples the
+   *  current buffer. Panel-space for now (Phase 2a); pan-stability is Phase 2b. */
+  private warmRTs: (RenderTexture | null)[] = [null, null];
+  private warmCur = 0;
+  private readonly warmShader: WarmCombineShader = makeWarmCombineShader();
+  private warmMesh: Mesh<Geometry, WarmCombineShader> | null = null;
+  private readonly warmContainer = new Container();
   /** One child mesh per hot light (tinted to its channel), all in one container rendered
    *  ONCE — a second render into the same RT no-ops (the depth saga's trap). `cap` = the
    *  mesh's current vertex capacity (doubles on demand). */
@@ -252,6 +263,11 @@ export class RectComposite {
    *  it. Map `m` holds dynamic lights `m*4 .. m*4+3` in lanes R/G/B/A. */
   shadowMaskTextureAt(m: number): RenderTexture | null {
     return this.shadowRTs[m] ?? null;
+  }
+
+  /** The current 32-bit warm occlusion field (display samples it; bit i = light i shadowed). */
+  get warmFieldTexture(): RenderTexture | null {
+    return this.warmRTs[this.warmCur];
   }
 
   /** Replace the cold (static, baked) light set + ambient. Marks the whole window's
@@ -340,6 +356,24 @@ export class RectComposite {
       for (const rt of this.shadowRTs) rt?.destroy(true);
       this.shadowRTs = Array.from({ length: SHADOW_MAPS }, () =>
         RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }));
+      // Warm field: two panel-sized buffers (ping-pong), cleared to 0 (all-lit). Plus the
+      // full-screen combine quad sized to the panel.
+      for (const rt of this.warmRTs) rt?.destroy(true);
+      this.warmRTs = [
+        RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }),
+        RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }),
+      ];
+      for (const rt of this.warmRTs) renderer.render({ container: this.empty, target: rt!, clear: true, clearColor: [0, 0, 0, 0] });
+      this.warmCur = 0;
+      this.warmMesh?.geometry.destroy();
+      const geom = makeWarmQuadGeometry(pw, ph);
+      if (!this.warmMesh) {
+        this.warmMesh = new Mesh({ geometry: geom, shader: this.warmShader });
+        this.warmMesh.blendMode = "none"; // verbatim RGBA write — no premultiply (alpha survives)
+        this.warmContainer.addChild(this.warmMesh);
+      } else {
+        this.warmMesh.geometry = geom;
+      }
       this.shadowW = pw;
       this.shadowH = ph;
     }
@@ -479,6 +513,22 @@ export class RectComposite {
       }
       renderer.render({ container: this.shadowContainer, target: this.shadowRTs[map]!, clear: true, clearColor: [0, 0, 0, 0] });
     }
+  }
+
+  /** Ping-pong the warm field: read the previous buffer + the fresh scatter maps, fold this
+   *  frame's 8-light batch into channel `freshChannel` (0..3), write the other buffer. Call
+   *  after {@link buildShadowMask} (which must hold the batch's 8 lights in lanes 0..7). */
+  buildWarmField(renderer: Renderer, freshChannel: number): void {
+    if (!this.warmRTs[0] || !this.warmRTs[1] || !this.warmMesh || this.shadowRTs.length !== SHADOW_MAPS) return;
+    const prevIdx = this.warmCur;
+    const curIdx = 1 - this.warmCur;
+    this.warmShader.prevWarm = this.warmRTs[prevIdx]!;
+    this.warmShader.scatter0 = this.shadowRTs[0]!;
+    this.warmShader.scatter1 = this.shadowRTs[1]!;
+    this.warmShader.setFresh(freshChannel);
+    // Full-screen quad, blendMode "none" → overwrites every pixel; no clear needed.
+    renderer.render({ container: this.warmContainer, target: this.warmRTs[curIdx]!, clear: false });
+    this.warmCur = curIdx;
   }
 
   /** The `pool`'s coverage mesh at index `i`, its vertex buffer grown (DOUBLING) to hold
