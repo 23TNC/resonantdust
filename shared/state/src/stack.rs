@@ -29,6 +29,17 @@ use crate::recipe_state::{owning_player, CardStore, CardView, WORLD_PLAYER_ID};
 /// current at `now_ms`.
 pub trait StackStore: CardStore {
     fn members_of(&self, root_id: u32, now_ms: u64) -> Vec<CardView>;
+
+    /// The tile occupying a cell `(q, r)` of zone `macro_zone`, as a virtual
+    /// loose-root [`CardView`] — the would-be hex member when a card is seated
+    /// there. Only `packed_definition` (the tile's def, for its stack bits) and
+    /// `macro_zone` are meaningful; the rest are best-effort. `None` when the cell
+    /// has no tile (empty corner / non-tiled surface). Defaults to `None` for
+    /// stores without zone data: they don't enforce loose placement against the
+    /// terrain — the bundle-aware client does, predicting the move.
+    fn tile_at(&self, _macro_zone: u64, _q: u8, _r: u8, _now_ms: u64) -> Option<CardView> {
+        None
+    }
 }
 
 /// Where a placement puts the source card. The Rust-enum counterpart of the
@@ -120,6 +131,15 @@ pub fn plan_place<S: StackStore>(
         Placement::Loose { surface, macro_zone, q, r, x, y } => {
             let (surface, macro_zone, micro) =
                 resolve_loose(store, caller_player_id, surface, macro_zone, q, r, x, y, now_ms)?;
+            // Seating a card loose on a tile is the bidirectional drop against that
+            // tile: it hosts nothing, so the only resolution is the *invert* — the
+            // tile joins the source's hex stack, which requires the source to host
+            // hex (leaf-aware). The same rule movement uses ([`can_seat_on_tile`]).
+            if !can_seat_on_tile(store, card_id, with_surface(macro_zone, surface), q, r, now_ms, bits) {
+                return Err(format!(
+                    "place: card {card_id} can't rest on a tile here — it doesn't host the hex stack the tile would join"
+                ));
+            }
             Resolved::Place { surface, macro_zone, micro }
         }
     };
@@ -178,6 +198,34 @@ pub fn plan_place<S: StackStore>(
         writes.extend(plan_splice(store, &moved, now_ms));
     }
     Ok(Plan { writes })
+}
+
+/// Can `card_id` be seated as a loose root on the tile at cell `(q, r)` of
+/// `macro_zone` (a full zone key, surface included)? This is the bidirectional
+/// drop against the cell's tile: the tile hosts nothing, so it can only join the
+/// card's hex stack — i.e. the card must host hex (leaf-aware via [`open_stack`],
+/// the same check [`resolve_stack`]'s invert uses). An empty cell has no tile to
+/// mount, so seating is unconditional (a host-`0` card can occupy open cells —
+/// the moving-tile-card edge case). The shared rule behind both loose placement
+/// and movement onto a tile.
+pub fn can_seat_on_tile<S: StackStore>(
+    store: &S,
+    card_id: u32,
+    macro_zone: u64,
+    q: u8,
+    r: u8,
+    now_ms: u64,
+    bits: &dyn Fn(u16) -> StackBits,
+) -> bool {
+    let Some(card) = store.card_at(card_id, now_ms) else {
+        return false;
+    };
+    let Some(tile) = store.tile_at(macro_zone, q, r, now_ms) else {
+        return true; // empty cell — nothing to mount
+    };
+    let source_bits = bits(card.packed_definition);
+    let tile_bits = bits(tile.packed_definition);
+    open_stack(store, card_id, macro_zone, source_bits, tile_bits, STACK_DIR_HEX, now_ms, bits).is_some()
 }
 
 /// Reject if `view` is held by an in-flight action (claim / borrow / position).
@@ -590,25 +638,36 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Mock(HashMap<u32, CardView>);
+    struct Mock {
+        cards: HashMap<u32, CardView>,
+        /// The synthetic tile every cell reports (tests place onto a single cell).
+        tile: Option<CardView>,
+    }
     impl Mock {
         fn with(mut self, v: CardView) -> Self {
-            self.0.insert(v.card_id, v);
+            self.cards.insert(v.card_id, v);
+            self
+        }
+        fn with_tile(mut self, t: CardView) -> Self {
+            self.tile = Some(t);
             self
         }
     }
     impl CardStore for Mock {
         fn card_at(&self, id: u32, _t: u64) -> Option<CardView> {
-            self.0.get(&id).cloned()
+            self.cards.get(&id).cloned()
         }
     }
     impl StackStore for Mock {
         fn members_of(&self, root_id: u32, _now: u64) -> Vec<CardView> {
-            self.0
+            self.cards
                 .values()
                 .filter(|v| matches!(Micro::of(v.micro_location, v.flags), Micro::Stacked { root, .. } if root == root_id))
                 .cloned()
                 .collect()
+        }
+        fn tile_at(&self, _macro_zone: u64, _q: u8, _r: u8, _now: u64) -> Option<CardView> {
+            self.tile.clone()
         }
     }
 
@@ -724,13 +783,16 @@ mod tests {
     const LOG: u16 = 10;
     const DUST: u16 = 20;
     const CORPUS: u16 = 30;
+    const TILE: u16 = 40;
     const TOP_BOTTOM: u8 = 0b1100;
+    const HEX: u8 = 0b0010;
 
     fn bits_for(p: u16) -> StackBits {
         match p {
             LOG => StackBits { hosts: TOP_BOTTOM, joins: TOP_BOTTOM },
             DUST => StackBits { hosts: 0, joins: TOP_BOTTOM },
-            _ => DEFAULT_BITS, // CORPUS + anything else
+            TILE => StackBits { hosts: 0, joins: HEX }, // tile: hosts nothing, joins hex
+            _ => DEFAULT_BITS, // CORPUS + anything else (hosts hex+top+bottom)
         }
     }
 
@@ -739,6 +801,51 @@ mod tests {
         c.macro_zone = with_surface(0, WORLD_LAYER);
         c.packed_definition = packed;
         c
+    }
+
+    fn tile_view(packed: u16) -> CardView {
+        CardView {
+            card_id: 0,
+            owner_id: 0,
+            micro_location: 0,
+            macro_zone: with_surface(0, WORLD_LAYER),
+            packed_definition: packed,
+            flags: 0,
+            stock: 0,
+        }
+    }
+
+    #[test]
+    fn loose_on_tile_requires_hex_host() {
+        let mz = with_surface(0, WORLD_LAYER);
+        let pl = Placement::Loose { surface: WORLD_LAYER, macro_zone: mz, q: 2, r: 2, x: 0, y: 0 };
+        // CORPUS hosts hex (DEFAULT): the tile joins its hex stack → seated loose.
+        let store = Mock::default().with(soul(1024, P)).with(card(1300, CORPUS)).with_tile(tile_view(TILE));
+        let plan = plan_place(&store, 1300, pl, P, 0, &bits_for).unwrap();
+        assert_eq!(plan.writes.len(), 1);
+        assert!(matches!(plan.writes[0].micro, Micro::Loose { .. }));
+        // DUST hosts nothing: the tile can't join it → rejected, no overlap.
+        let store = Mock::default().with(soul(1024, P)).with(card(1400, DUST)).with_tile(tile_view(TILE));
+        let err = plan_place(&store, 1400, pl, P, 0, &bits_for).unwrap_err();
+        assert!(err.contains("hex"), "{err}");
+    }
+
+    #[test]
+    fn loose_on_empty_cell_allows_non_hex_host() {
+        // No tile at the cell (Mock reports None): a host-0 card still seats — the
+        // moving-tile-card-into-open-cell edge case.
+        let mz = with_surface(0, WORLD_LAYER);
+        let store = Mock::default().with(soul(1024, P)).with(card(1400, DUST));
+        let plan = plan_place(
+            &store,
+            1400,
+            Placement::Loose { surface: WORLD_LAYER, macro_zone: mz, q: 5, r: 5, x: 0, y: 0 },
+            P,
+            0,
+            &bits_for,
+        )
+        .unwrap();
+        assert_eq!(plan.writes.len(), 1);
     }
 
     #[test]

@@ -65,7 +65,10 @@ pub enum ClientCall {
     ClaimOrLogin { name: String },
     CreateCard { owner_id: u32, surface: u8, card_key: String, macro_zone: u64, q: u8, r: u8 },
     MoveCards { caller_player_id: u32, card_ids: Vec<u32>, macro_zones: Vec<u64>, micro_locations: Vec<u32>, stack_states: Vec<u8> },
-    MoveSoul { caller_player_id: u32, soul_id: u32, soul_def: u16, from_q: i32, from_r: i32, dest_surface: u8, dest_macro_zone: u64, dest_micro_location: u32, depart_ms: u64, arrival_ms: u64 },
+    // Generic over any card with a navigation aspect (not just souls); the wire
+    // arg names stay `soul_*` so the shard reducer's by-name arg binding is
+    // unchanged.
+    MoveCard { caller_player_id: u32, soul_id: u32, soul_def: u16, from_q: i32, from_r: i32, dest_surface: u8, dest_macro_zone: u64, dest_micro_location: u32, depart_ms: u64, arrival_ms: u64 },
     ProposeAction { recipe_id: u16, surface: u8, macro_zone: u64, micro_location: u32, root: u32, bindings: Vec<Vec<u32>>, caller_player_id: u32 },
     SendChatMessage { sender_player_id: u32, sender_name: String, body: String },
     RequestZone { macro_zone: u64 },
@@ -86,7 +89,7 @@ impl ClientCall {
             ClientCall::ClaimOrLogin { .. } => "claim_or_login",
             ClientCall::CreateCard { .. } => "create_card",
             ClientCall::MoveCards { .. } => "move_cards",
-            ClientCall::MoveSoul { .. } => "move_soul",
+            ClientCall::MoveCard { .. } => "move_card",
             ClientCall::ProposeAction { .. } => "propose_action",
             ClientCall::SendChatMessage { .. } => "send_chat_message",
             ClientCall::RequestZone { .. } => "request_zone",
@@ -119,8 +122,8 @@ impl ClientCall {
                 "move_cards",
                 json!({ "client_time_ms": client_time_ms, "caller_player_id": caller_player_id, "card_ids": card_ids, "macro_zones": macro_zones, "micro_locations": micro_locations, "stack_states": stack_states }),
             ),
-            ClientCall::MoveSoul { caller_player_id, soul_id, soul_def, from_q, from_r, dest_surface, dest_macro_zone, dest_micro_location, depart_ms, arrival_ms } => (
-                "move_soul",
+            ClientCall::MoveCard { caller_player_id, soul_id, soul_def, from_q, from_r, dest_surface, dest_macro_zone, dest_micro_location, depart_ms, arrival_ms } => (
+                "move_card",
                 json!({ "client_time_ms": client_time_ms, "caller_player_id": caller_player_id, "soul_id": soul_id, "soul_def": soul_def, "from_q": from_q, "from_r": from_r, "dest": { "surface": dest_surface, "macro_zone": dest_macro_zone, "micro_location": dest_micro_location }, "depart_ms": depart_ms, "arrival_ms": arrival_ms }),
             ),
             ClientCall::ProposeAction { recipe_id, surface, macro_zone, micro_location, root, bindings, caller_player_id } => (

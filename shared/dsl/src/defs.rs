@@ -709,19 +709,19 @@ pub fn aspect_value(bundle: &Bundle, packed: u16, name: &str) -> Option<i64> {
 }
 
 /// A card's stacking bit-fields (the bundle-aware lookup behind the canonical
-/// [`resonantdust_codec::stacking`] bit math). `stack_joins` declared marks an
-/// explicit config (tiles/events join only the hex stack, `0b0010`); absent →
-/// the regular-card default (hosts `0b1110`, joins `0b1100`). `stack_hosts`
-/// defaults to 0 when only joins is set (a tile hosts nothing). Bit `i` = stack
-/// `i` (0 = loose).
+/// [`resonantdust_codec::stacking`] bit math). `stack_hosts` and `stack_joins`
+/// are honored independently — a declared value always applies. Their *defaults*
+/// when absent are coupled: a card that declares `stack_joins` is a special card
+/// (tile/event) that hosts nothing unless it says otherwise (`hosts` defaults to
+/// 0); a card that declares neither is a regular rect card (`hosts 0b1110`).
+/// `joins` defaults to `0b1100` (top+bottom). Bit `i` = stack `i` (0 = loose).
 pub fn stack_bits(bundle: &Bundle, packed: u16) -> resonantdust_codec::stacking::StackBits {
-  use resonantdust_codec::stacking::{StackBits, DEFAULT_BITS};
-  match aspect_value(bundle, packed, "stack_joins") {
-    None => DEFAULT_BITS,
-    Some(joins) => StackBits {
-      hosts: aspect_value(bundle, packed, "stack_hosts").unwrap_or(0) as u8,
-      joins: joins as u8,
-    },
+  use resonantdust_codec::stacking::StackBits;
+  let joins_decl = aspect_value(bundle, packed, "stack_joins");
+  let hosts_decl = aspect_value(bundle, packed, "stack_hosts");
+  StackBits {
+    hosts: hosts_decl.unwrap_or(if joins_decl.is_some() { 0 } else { 0b1110 }) as u8,
+    joins: joins_decl.unwrap_or(0b1100) as u8,
   }
 }
 

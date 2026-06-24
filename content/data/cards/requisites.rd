@@ -11,7 +11,7 @@
         requisite &aspect.type set
         2 &aspect.fuel set
         2 &aspect.wood set
-        12 &aspect.stack_hosts set
+        14 &aspect.stack_hosts set
         6 &aspect.stack_joins set
 
 
@@ -32,6 +32,7 @@
       @define>
         requisite &aspect.type set
         1 &aspect.aether set
+        14 &aspect.stack_hosts set
         4 &aspect.stack_joins set
 
   ; Stacking-resolver test card: hosts NO stacks (0b0000), joins top+bottom

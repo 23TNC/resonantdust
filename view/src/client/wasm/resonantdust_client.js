@@ -180,9 +180,13 @@ export class WasmClient {
     }
     /**
      * Drop a card loose at a GLOBAL world cell `(q, r)` on `(surface, owner)` —
-     * the view's drag-drop path. One-way: on success the new position arrives via
-     * the render stream; on rejection the data is unchanged, so the card simply
-     * tweens back to its origin (no ack, no prediction).
+     * the view's drag-drop path. `place` applies the move to the LOCAL world
+     * immediately (the prediction) and only puts a `move_cards` on the wire when
+     * the zone is shared/anchored; a private inventory move stays client-local.
+     * Either way the local world changed, so flag `changed` to re-emit the view —
+     * without it the renderer keeps the stale (pre-drop) cell as its tween target
+     * and the card glides back to its origin as if the move were rejected, only
+     * snapping to the dropped cell on the next pan (a fresh `emitView`).
      * @param {number} card_id
      * @param {number} surface
      * @param {number} owner
@@ -194,6 +198,7 @@ export class WasmClient {
     }
     /**
      * Drop a card onto `parent_id`'s stack in `direction` (drop-on-a-card).
+     * Flags `changed` for the same reason as [`Self::place_loose`].
      * @param {number} card_id
      * @param {number} parent_id
      * @param {number} direction
