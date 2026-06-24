@@ -183,10 +183,16 @@ current display loop already does it).
   `console.error`). `packed` is a reserved word; computed uniform-array indices are illegal in
   ES 1.00; backticks in GLSL comments close the template literal. `tsc` catches none of these.
 
-### Phase 3 — cold scaling (per-rect maps + CPU active map)
-- Replace cold uniform-array with per-rect data/color maps + CPU 32-bit active map; `LightBakeShader`
-  reads them instead of `uLightData[]`. Keep `cold_lightmap` + dirty-rect rebake.
-- Verify: >32 cold lights across the world, per-rect culling correct.
+### Phase 3 — cold scaling (per-rect lights) ✅ DONE (d4a07da)
+- **Simpler than the spec:** the bake already renders per-rect (`bakeLightRect`), so per-rect
+  *uniforms* beat per-rect *textures* — no new maps, no CPU per-pixel active map. Each rect bins
+  the world-wide cold set to its nearest ≤32 (`lightsForRect`: disk-overlaps-rect, nearest-first)
+  and sets the bake uniforms per rect; the nearest 3 cast shadows (so cold shadows scale per-rect
+  too, vs the old global 3). Falloff stays analytic; occlusion stays the 3-channel scatter.
+- The per-rect data/color *textures* from the original design are only needed for a future
+  **single-pass** bake (collapse the per-rect renders into one) — deferred, not required for scale.
+- VERIFIED: 50 cold lights across the window all bake (old global-32 cap would leave 18 dark) —
+  full grid lit to the corners; 2-demo-light scene unchanged; tree shadows intact.
 
 ### Phase 4 — integration
 - Tier migration: a dynamic light that **settles** → CPU-bake into cold (one rebake); a cold light
