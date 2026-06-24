@@ -33,11 +33,17 @@ const warmCombineBitGl = {
       uniform sampler2D uScatter0;   // fresh batch lanes 0..3 (R/G/B/A)
       uniform sampler2D uScatter1;   // fresh batch lanes 4..7
       uniform vec4 uFreshSel;        // 1 in the channel this frame's batch writes, else 0
+      uniform vec2 uPanDelta;        // UV pan since last frame — scrolls carried channels so they track the world
     `,
     // Pack the 8 thresholded lanes (LSB = lane 0) into a byte, drop it in the fresh channel,
     // keep prev elsewhere. `step(0.5, cov)` = hard shadow bit.
     main: /* glsl */ `
-      vec4 prev = texture(uPrevWarm, vUV);
+      // Scroll the carried field by the pan delta so accumulated bits stay world-aligned; the
+      // fresh batch (scatter, below) is written at current positions. Revealed edges → 0 (lit).
+      // Warm sampling is NEAREST (bits don't interpolate), which also quantizes the shift to texels.
+      vec2 puv = vUV - uPanDelta;
+      bool revealed = puv.x < 0.0 || puv.x > 1.0 || puv.y < 0.0 || puv.y > 1.0;
+      vec4 prev = revealed ? vec4(0.0) : texture(uPrevWarm, puv);
       vec4 m0 = texture(uScatter0, vUV);
       vec4 m1 = texture(uScatter1, vUV);
       float fieldByte = (step(0.5, m0.r) +  step(0.5, m0.g) * 2.0  + step(0.5, m0.b) * 4.0   + step(0.5, m0.a) * 8.0
@@ -82,6 +88,13 @@ export class WarmCombineShader extends Shader {
     u[3] = channel === 3 ? 1 : 0;
     this.resources.warmUniforms.update();
   }
+  /** UV pan delta since the previous frame (scrolls the carried channels). */
+  setPanDelta(u: number, v: number): void {
+    const d = this.resources.warmUniforms.uniforms.uPanDelta as Float32Array;
+    d[0] = u;
+    d[1] = v;
+    this.resources.warmUniforms.update();
+  }
 }
 
 export function makeWarmCombineShader(): WarmCombineShader {
@@ -97,7 +110,10 @@ export function makeWarmCombineShader(): WarmCombineShader {
       uScatter0Sampler: white.source.style,
       uScatter1: white.source,
       uScatter1Sampler: white.source.style,
-      warmUniforms: new UniformGroup({ uFreshSel: { value: new Float32Array([1, 0, 0, 0]), type: "vec4<f32>" } }),
+      warmUniforms: new UniformGroup({
+        uFreshSel: { value: new Float32Array([1, 0, 0, 0]), type: "vec4<f32>" },
+        uPanDelta: { value: new Float32Array([0, 0]), type: "vec2<f32>" },
+      }),
       textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
     },
   });

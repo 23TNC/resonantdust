@@ -363,7 +363,9 @@ export class RectComposite {
         RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }),
         RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }),
       ];
-      for (const rt of this.warmRTs) renderer.render({ container: this.empty, target: rt!, clear: true, clearColor: [0, 0, 0, 0] });
+      // NEAREST: the field is a bitfield — bilinear would interpolate bits into garbage. Also
+      // quantizes the pan-scroll to whole texels so repeated shifts stay lossless.
+      for (const rt of this.warmRTs) { rt!.source.scaleMode = "nearest"; renderer.render({ container: this.empty, target: rt!, clear: true, clearColor: [0, 0, 0, 0] }); }
       this.warmCur = 0;
       this.warmMesh?.geometry.destroy();
       const geom = makeWarmQuadGeometry(pw, ph);
@@ -515,10 +517,11 @@ export class RectComposite {
     }
   }
 
-  /** Ping-pong the warm field: read the previous buffer + the fresh scatter maps, fold this
-   *  frame's 8-light batch into channel `freshChannel` (0..3), write the other buffer. Call
-   *  after {@link buildShadowMask} (which must hold the batch's 8 lights in lanes 0..7). */
-  buildWarmField(renderer: Renderer, freshChannel: number): void {
+  /** Ping-pong the warm field: read the previous buffer (scrolled by the UV pan delta so carried
+   *  channels track the world) + the fresh scatter maps, fold this frame's 8-light batch into
+   *  channel `freshChannel` (0..3), write the other buffer. Call after {@link buildShadowMask}
+   *  (which must hold the batch's 8 lights in lanes 0..7). */
+  buildWarmField(renderer: Renderer, freshChannel: number, panDeltaU: number, panDeltaV: number): void {
     if (!this.warmRTs[0] || !this.warmRTs[1] || !this.warmMesh || this.shadowRTs.length !== SHADOW_MAPS) return;
     const prevIdx = this.warmCur;
     const curIdx = 1 - this.warmCur;
@@ -526,6 +529,7 @@ export class RectComposite {
     this.warmShader.scatter0 = this.shadowRTs[0]!;
     this.warmShader.scatter1 = this.shadowRTs[1]!;
     this.warmShader.setFresh(freshChannel);
+    this.warmShader.setPanDelta(panDeltaU, panDeltaV);
     // Full-screen quad, blendMode "none" → overwrites every pixel; no clear needed.
     renderer.render({ container: this.warmContainer, target: this.warmRTs[curIdx]!, clear: false });
     this.warmCur = curIdx;

@@ -164,6 +164,9 @@ function stackFan(flags: number): { dir: number; index: number } {
 export class WorldRenderer extends LayoutNode {
   /** Round-robin frame counter for the warm-field scatter batch (which 8 lights refresh). */
   private shadowBatch = 0;
+  /** Previous frame's pan, to scroll the (panel-space) warm field so it tracks the world. */
+  private lastShadowPanX = NaN;
+  private lastShadowPanY = NaN;
   private readonly panLayer = new Container();
   private readonly cardLayer = new Container();
   /** The detached, world-positioned container holding every visible tile's prims —
@@ -816,7 +819,14 @@ export class WorldRenderer extends LayoutNode {
       lights.push({ x, y, z: l.height, radius: l.radius });
     }
     this.albedo.buildShadowMask(renderer, lights, panX, panY);
-    this.albedo.buildWarmField(renderer, batch); // fold the 8 fresh lanes into warm channel `batch`
+    // Pan delta (UV) scrolls the carried warm channels so world-anchored shadows stay put as the
+    // camera moves; first frame → 0. (Screen lights like the cursor scroll too, but they're
+    // re-scattered each batch-0 frame so the live cross-fade masks it.)
+    const dU = Number.isNaN(this.lastShadowPanX) ? 0 : (panX - this.lastShadowPanX) / Math.max(this.width, 1);
+    const dV = Number.isNaN(this.lastShadowPanY) ? 0 : (panY - this.lastShadowPanY) / Math.max(this.height, 1);
+    this.lastShadowPanX = panX;
+    this.lastShadowPanY = panY;
+    this.albedo.buildWarmField(renderer, batch, dU, dV); // fold the 8 fresh lanes into warm channel `batch`
     const m0 = this.albedo.shadowMaskTextureAt(0);
     if (m0) this.groundShader.shadowMask = m0;
     const m1 = this.albedo.shadowMaskTextureAt(1);
