@@ -3,8 +3,8 @@ import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
 import type { Sidecar } from "../../../assets/geometry/geoTypes";
 import {
   makeShadowMaskShader, makeShadowGeometry, MAX_SHADOW_VERTS, MAX_SHADOW_CASTERS,
-  SHADOW_CHANNEL_TINT, shadowHeightScale, SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH,
-  SHADOW_MAX_LEN, type ShadowMaskShader,
+  MAX_SHADOW_LIGHTS, SHADOW_MAPS, channelForLight, shadowMapOf, shadowHeightScale,
+  SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH, SHADOW_MAX_LEN, type ShadowMaskShader,
 } from "./shadowMaskShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
@@ -171,9 +171,10 @@ export class RectComposite {
   private readonly depthQuadPool: Mesh<Geometry, ObjectDepthShader>[] = [];
 
   // ── shadows (projected-silhouette mask) ──────────────────────────────────
-  /** Panel-sized RGBA mask: each hot light's projected-silhouette coverage in one
-   *  channel (R/G/B). The display shader samples it per fragment. See `buildShadowMask`. */
-  private shadowRT: RenderTexture | null = null;
+  /** Panel-sized RGBA scatter maps: each dynamic light's projected-silhouette coverage in
+   *  one lane. `SHADOW_MAPS` maps × 4 lanes = 8 fresh lights/frame; light `i` → map `i>>2`,
+   *  lane `i&3`. The display samples them per fragment. See `buildShadowMask`. */
+  private shadowRTs: (RenderTexture | null)[] = [];
   private shadowW = 0;
   private shadowH = 0;
   /** One child mesh per hot light (tinted to its channel), all in one container rendered
@@ -247,9 +248,10 @@ export class RectComposite {
     return this.depthRT;
   }
 
-  /** The per-frame projected-silhouette shadow mask (display samples it). */
-  get shadowMaskTexture(): RenderTexture | null {
-    return this.shadowRT;
+  /** The per-frame projected-silhouette scatter map `m` (0..SHADOW_MAPS-1), display samples
+   *  it. Map `m` holds dynamic lights `m*4 .. m*4+3` in lanes R/G/B/A. */
+  shadowMaskTextureAt(m: number): RenderTexture | null {
+    return this.shadowRTs[m] ?? null;
   }
 
   /** Replace the cold (static, baked) light set + ambient. Marks the whole window's
@@ -334,9 +336,10 @@ export class RectComposite {
     // — NOT the rect-slot grid — and must resize even when the rect count is unchanged.
     const pw = Math.ceil(viewW);
     const ph = Math.ceil(viewH);
-    if (!this.shadowRT || this.shadowW !== pw || this.shadowH !== ph) {
-      this.shadowRT?.destroy(true);
-      this.shadowRT = RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution });
+    if (this.shadowRTs.length !== SHADOW_MAPS || this.shadowW !== pw || this.shadowH !== ph) {
+      for (const rt of this.shadowRTs) rt?.destroy(true);
+      this.shadowRTs = Array.from({ length: SHADOW_MAPS }, () =>
+        RenderTexture.create({ width: pw, height: ph, resolution: renderer.resolution }));
       this.shadowW = pw;
       this.shadowH = ph;
     }
@@ -450,30 +453,32 @@ export class RectComposite {
     this.tileGroups.delete(tileId);
   }
 
-  /** Rebuild the projected-silhouette shadow mask for the hot `lights` (panel px:
-   *  `{x,y,z,radius}`). Each light's nearby casters are projected through it onto the
-   *  ground and rasterized into that light's mask channel; `panX/panY` map caster world
-   *  px → panel. One container of per-light meshes, ONE render with `max` blend. */
+  /** Rebuild the projected-silhouette scatter maps for the dynamic `lights` (panel px:
+   *  `{x,y,z,radius}`), up to {@link MAX_SHADOW_LIGHTS}. Each light's nearby casters are
+   *  projected through it onto the ground and rasterized into its lane (light `i` → map
+   *  `i>>2`, lane `i&3`); `panX/panY` map caster world px → panel. One container per map,
+   *  ONE `max`-blend render each (a second render into the same RT no-ops — the depth trap). */
   buildShadowMask(renderer: Renderer, lights: { x: number; y: number; z: number; radius: number }[], panX: number, panY: number): void {
-    if (!this.shadowRT) return;
-    const n = Math.min(lights.length, SHADOW_CHANNEL_TINT.length);
-    // One mesh per light (all its in-range casters), tinted to the light's channel; ONE
-    // render, `max`-blend. Shadows are GROUND-only (the display never darkens object pixels),
-    // so no per-caster identity / self-exclusion is needed — objects always sit on top.
-    this.shadowContainer.removeChildren();
-    for (let i = 0; i < n; i++) {
-      const casters = this.gatherShadowCasters(lights[i].x - panX, lights[i].y - panY, lights[i].radius);
-      let need = 0; // total projected verts this light needs (3 per solid triangle)
-      for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
-      const slot = this.ensureShadowMesh(this.shadowMeshes, i, need);
-      let v = 0;
-      const Lz = Math.max(lights[i].z, 1);
-      for (const c of casters) v = this.projectCaster(slot.data, v, c, lights[i].x, lights[i].y, Lz, panX, panY);
-      slot.data.fill(0, v * 2); // zero the tail → degenerate (no-area) triangles
-      slot.pos.update();
-      this.shadowContainer.addChild(slot.mesh);
+    if (this.shadowRTs.length !== SHADOW_MAPS) return;
+    const n = Math.min(lights.length, MAX_SHADOW_LIGHTS);
+    // Shadows are GROUND-only (the display never darkens object pixels), so no per-caster
+    // identity / self-exclusion is needed — objects always sit on top.
+    for (let map = 0; map < SHADOW_MAPS; map++) {
+      this.shadowContainer.removeChildren();
+      for (let i = map * 4; i < n && shadowMapOf(i) === map; i++) {
+        const casters = this.gatherShadowCasters(lights[i].x - panX, lights[i].y - panY, lights[i].radius);
+        let need = 0; // total projected verts this light needs (3 per solid triangle)
+        for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
+        const slot = this.ensureShadowMesh(this.shadowMeshes, i, need);
+        let v = 0;
+        const Lz = Math.max(lights[i].z, 1);
+        for (const c of casters) v = this.projectCaster(slot.data, v, c, lights[i].x, lights[i].y, Lz, panX, panY);
+        slot.data.fill(0, v * 2); // zero the tail → degenerate (no-area) triangles
+        slot.pos.update();
+        this.shadowContainer.addChild(slot.mesh);
+      }
+      renderer.render({ container: this.shadowContainer, target: this.shadowRTs[map]!, clear: true, clearColor: [0, 0, 0, 0] });
     }
-    renderer.render({ container: this.shadowContainer, target: this.shadowRT, clear: true, clearColor: [0, 0, 0, 0] });
   }
 
   /** The `pool`'s coverage mesh at index `i`, its vertex buffer grown (DOUBLING) to hold
@@ -482,9 +487,10 @@ export class RectComposite {
     let slot = pool[i];
     if (!slot) {
       const { geometry, pos } = makeShadowGeometry();
-      const mesh = new Mesh({ geometry, shader: makeShadowMaskShader() });
+      const shader = makeShadowMaskShader();
+      shader.setChannel(channelForLight(i)); // lane = i & 3 (R/G/B/A); map = i >> 2
+      const mesh = new Mesh({ geometry, shader });
       mesh.blendMode = "max";
-      mesh.tint = SHADOW_CHANNEL_TINT[i];
       slot = { mesh, pos, data: pos.data as Float32Array, cap: MAX_SHADOW_VERTS };
       pool[i] = slot;
     }
@@ -1000,7 +1006,7 @@ export class RectComposite {
    *  {@link bakeLightRect} to stamp per rect. Cheap to rebuild — only runs when a lightmap rect
    *  is dirty (geometry or a cold light changed). Up to 3 cold lights cast (R/G/B channels). */
   private buildColdShadows(): void {
-    const n = Math.min(this.coldLights.length, SHADOW_CHANNEL_TINT.length);
+    const n = Math.min(this.coldLights.length, 3); // cold shadow is one RGB map (lightBake reads csh.rgb); Phase 3 reworks this
     this.coldShadowContainer.removeChildren();
     for (let i = 0; i < n; i++) {
       const l = this.coldLights[i];

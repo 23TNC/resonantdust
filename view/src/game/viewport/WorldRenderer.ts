@@ -525,7 +525,8 @@ export class WorldRenderer extends LayoutNode {
       { name: "normal",   texture: this.albedo.channelComposite("normal") },
       { name: "depth",    texture: this.albedo.depthTexture }, // baked sort-Y (objects only)
       { name: "lit",      texture: this.albedo.lightmapTexture }, // the baked cold-light map
-      { name: "shadow",   texture: this.albedo.shadowMaskTexture }, // hot-light shadow mask (RGB = light 0/1/2)
+      { name: "shadow",   texture: this.albedo.shadowMaskTextureAt(0) }, // scatter map 0 (lanes = lights 0..3)
+      { name: "shadow2",  texture: this.albedo.shadowMaskTextureAt(1) }, // scatter map 1 (lanes = lights 4..7)
       { name: "hotAlb",   texture: this.albedo.hotAlbedoTexture }, // per-frame mover albedo (G7 hot prims)
       { name: "hotNrm",   texture: this.albedo.hotNormalTexture }, // per-frame mover normal
       { name: "hotDep",   texture: this.albedo.hotDepthTexture }, // per-frame mover depth (feet-Y + layer)
@@ -790,10 +791,10 @@ export class WorldRenderer extends LayoutNode {
     this.buildShadowMask(renderer, panX, panY);
   }
 
-  /** Rebuild the projected-silhouette shadow mask for the hot lights (≤3 cast — one per
-   *  mask channel) and point the ground shader at it. Light positions are resolved to
-   *  panel px exactly as `packHotLights` does (cursor centres until the pointer moves;
-   *  world lights add the pan), then `RectComposite` projects the casters per light. */
+  /** Rebuild the projected-silhouette scatter maps for the dynamic lights (≤MAX_SHADOW_LIGHTS
+   *  cast — one per lane across 2 maps) and point the ground shader at them. Light positions
+   *  are resolved to panel px exactly as `packHotLights` does (cursor centres until the pointer
+   *  moves; world lights add the pan), then `RectComposite` projects the casters per light. */
   private buildShadowMask(renderer: Renderer, panX: number, panY: number): void {
     const n = Math.min(this.hotLights.length, MAX_SHADOW_LIGHTS);
     const lights: { x: number; y: number; z: number; radius: number }[] = [];
@@ -807,8 +808,10 @@ export class WorldRenderer extends LayoutNode {
       lights.push({ x, y, z: l.height, radius: l.radius });
     }
     this.albedo.buildShadowMask(renderer, lights, panX, panY);
-    const mask = this.albedo.shadowMaskTexture;
-    if (mask) this.groundShader.shadowMask = mask;
+    const m0 = this.albedo.shadowMaskTextureAt(0);
+    if (m0) this.groundShader.shadowMask = m0;
+    const m1 = this.albedo.shadowMaskTextureAt(1);
+    if (m1) this.groundShader.shadowMask2 = m1;
     const depth = this.albedo.depthTexture;
     if (depth) this.groundShader.depth = depth;
     this.groundShader.setPanelSize(this.width, this.height);

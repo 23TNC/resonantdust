@@ -10,6 +10,7 @@ import {
   Geometry,
   Buffer,
   BufferUsage,
+  UniformGroup,
 } from "pixi.js";
 
 /**
@@ -21,20 +22,35 @@ import {
  * filled triangles into ONE channel of an RGBA mask RT. The display shader samples
  * the mask and subtracts `mask[lightIndex]` from that light's contribution.
  *
- * The per-light channel rides the **mesh tint** — the only per-mesh value that binds
- * in this codebase (custom vertex attributes / float uniforms read 0 through both the
- * high-shader and hand-written GlProgram paths; see `depthShaders.ts`). Each light is
- * a separate child mesh tinted to its channel, all in one container rendered ONCE with
- * `max` blend (a second `renderer.render` into the same RT silently no-ops — the depth
- * saga's trap), so overlapping casters and other lights' channels both survive.
+ * The per-light channel is a `uChannel` vec4 UNIFORM (a 1 in one lane) output directly —
+ * NOT the mesh tint. The tint is premultiplied (rgb × worldAlpha), so it couples RGB to
+ * alpha: a tint can't write the alpha lane without also writing rgb, which is exactly why
+ * the alpha channel was unusable and the cap was 3 (R/G/B). Declaring `uChannel` in the
+ * bit binds it fine (the high-shader inserts it — see depthShaders.ts / bitfield.ts). With
+ * 4 clean lanes × {@link SHADOW_MAPS} maps we get 8 lights. Each light is a child mesh, all
+ * in one container rendered ONCE per map with `max` blend (a second `renderer.render` into
+ * the same RT silently no-ops — the depth saga's trap) so overlapping casters + other lanes
+ * all survive.
  */
 
-/** Hot lights whose shadows fit the RGBA mask's channels (one per R/G/B). Lights past
- *  this cast no shadow — rare, the cursor is the usual lone hot light. */
-export const MAX_SHADOW_LIGHTS = 3;
+/** Number of RGBA scatter maps (4 lights each). Two → 8 fresh dynamic-light shadows/frame
+ *  (docs/tiered_lighting.md Phase 1). */
+export const SHADOW_MAPS = 2;
 
-/** Per-light channel tint: light i fills mask channel i (R, G, B). */
-export const SHADOW_CHANNEL_TINT = [0xff0000, 0x00ff00, 0x0000ff];
+/** Dynamic lights whose shadows fit the scatter maps (4 channels × {@link SHADOW_MAPS}).
+ *  Lights past this cast no shadow this frame (the warm round-robin, Phase 2, cycles them). */
+export const MAX_SHADOW_LIGHTS = 4 * SHADOW_MAPS;
+
+/** Which mask (0..SHADOW_MAPS-1) light `i` writes, and its channel within that map. */
+export const shadowMapOf = (i: number): number => i >> 2;
+
+/** The channel-select vec4 for light `i`: a 1 in lane `i & 3` (R/G/B/A), 0 elsewhere. Used
+ *  as the shader output directly (NOT the premultiplied tint — tint couples RGB to worldAlpha,
+ *  which is exactly why the alpha lane was unusable and the cap was 3; see `setChannel`). */
+export function channelForLight(i: number): [number, number, number, number] {
+  const c = i & 3;
+  return [c === 0 ? 1 : 0, c === 1 ? 1 : 0, c === 2 ? 1 : 0, c === 3 ? 1 : 0];
+}
 
 /** Safety cap on casters projected per light — the NEAREST this-many to the light
  *  (sorted by distance, not map order). Set high; the light's radius is the real bound.
@@ -84,12 +100,14 @@ export function shadowHeightScale(h: number): number {
  *  ones. 1 = symmetric. South (+Y) is left untouched. (tweak + HMR) */
 export const SHADOW_NORTH_STRETCH = 1.8;
 
-// Solid-fill shadow: textureBit set `outColor` from the (white) sampler; overwrite it
-// with the channel tint (`vColor`, premultiplied). `max` blend accumulates coverage.
+// Solid-fill shadow: textureBit set `outColor` from the (white) sampler; overwrite it with
+// the per-light channel mask (`uChannel`, a 1 in one lane). `max` blend accumulates coverage
+// per lane. NOT the tint — see the file header (tint premultiply couples rgb↔alpha).
 const shadowMaskBitGl = {
   name: "shadow-mask-bit",
   fragment: {
-    main: /* glsl */ `outColor = vColor;`,
+    header: /* glsl */ `uniform vec4 uChannel;`,
+    main: /* glsl */ `outColor = uChannel;`,
   },
 };
 
@@ -104,9 +122,16 @@ function shadowProgram(): GlProgram {
   return program;
 }
 
-/** Flat-fill shadow shader: outputs the mesh tint (the per-light channel). No
- *  per-fragment data beyond the tint — the silhouette shape lives in the geometry. */
-export class ShadowMaskShader extends Shader {}
+/** Flat-fill shadow shader: outputs `uChannel` (the per-light lane). The silhouette shape
+ *  lives in the geometry; the lane is a per-mesh uniform set once via {@link setChannel}. */
+export class ShadowMaskShader extends Shader {
+  /** Point this mesh's coverage at one mask lane (a 1 in r/g/b/a, 0 elsewhere). */
+  setChannel(rgba: readonly [number, number, number, number]): void {
+    const u = this.resources.channelUniforms.uniforms;
+    (u.uChannel as Float32Array).set(rgba);
+    this.resources.channelUniforms.update();
+  }
+}
 
 export function makeShadowMaskShader(): ShadowMaskShader {
   const white = Texture.WHITE;
@@ -115,6 +140,7 @@ export function makeShadowMaskShader(): ShadowMaskShader {
     resources: {
       uTexture: white.source,
       uSampler: white.source.style,
+      channelUniforms: new UniformGroup({ uChannel: { value: new Float32Array([1, 0, 0, 0]), type: "vec4<f32>" } }),
       textureUniforms: { uTextureMatrix: { type: "mat3x3<f32>", value: new Matrix() } },
     },
   });

@@ -46,7 +46,8 @@ const groundLightBitGl = {
       uniform vec4 uLightColor[${MAX_HOT_LIGHTS}];  // rgb colour, a brightness
       uniform float uLightCount;
       uniform float uNormalYSign;                   // flip normal Y → screen convention
-      uniform sampler2D uShadowMask;                // projected-silhouette mask (RGB = light 0/1/2)
+      uniform sampler2D uShadowMask;                // scatter map 0: lanes R/G/B/A = lights 0/1/2/3
+      uniform sampler2D uShadowMask2;               // scatter map 1: lanes R/G/B/A = lights 4/5/6/7
       uniform vec2 uPanelSize;                       // panel px → mask UV
       uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
       uniform sampler2D uHotAlbedo;                 // per-frame mover albedo (premultiplied)
@@ -96,7 +97,9 @@ const groundLightBitGl = {
       if (isObject) N = normalize(vec3(N.x, N.y + SOUTH_TILT, N.z * SOUTH_Z));
       // The mask holds each hot light's projected-silhouette coverage in its own channel
       // (R = light 0, G = light 1, B = light 2; built CPU-side in RectComposite.buildShadowMask).
-      vec4 shMask = texture(uShadowMask, vScreen / uPanelSize);
+      vec2 maskUV = vScreen / uPanelSize;
+      vec4 shMask = texture(uShadowMask, maskUV);   // lights 0..3 (R/G/B/A)
+      vec4 shMask2 = texture(uShadowMask2, maskUV); // lights 4..7 (R/G/B/A)
       vec3 lightSum = texture(uLightmap, vUV).rgb;  // ambient + baked cold lights
       for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
         if (float(i) >= uLightCount) break;
@@ -114,7 +117,11 @@ const groundLightBitGl = {
         // Shadows are a GROUND effect: objects are NEVER darkened, so they always sit on
         // top of (in front of) shadows — a shadow painted on an object's camera-facing
         // front reads as the wrong side. Each point light's shadow masks only ITS own term.
-        float cov = i == 0 ? shMask.r : (i == 1 ? shMask.g : (i == 2 ? shMask.b : 0.0));
+        // Coverage for light i: lane (i&3) of map (i>>2). Selected without dynamic vec
+        // indexing (ES 1.00) — pick the map, then the lane by ladder.
+        vec4 sm = i < 4 ? shMask : shMask2;
+        int lane = i - (i < 4 ? 0 : 4);
+        float cov = lane == 0 ? sm.r : (lane == 1 ? sm.g : (lane == 2 ? sm.b : sm.a));
         float blocked = isObject ? 0.0 : cov;
         // Shadows relax the closer they are to the light (mirrors the object wrap): a shadow by
         // a bright source isn't as black as one at the edge of the radius.
@@ -195,11 +202,16 @@ export class GroundShader extends Shader {
     u.uLightCount = count;
     this.resources.lightUniforms.update();
   }
-  /** The projected-silhouette shadow mask (RGB = hot light 0/1/2 coverage), sampled
-   *  per fragment at `vScreen / uPanelSize`. Rebuilt each frame by RectComposite. */
+  /** Scatter map 0 (lanes R/G/B/A = dynamic light 0/1/2/3 coverage), sampled per fragment at
+   *  `vScreen / uPanelSize`. Rebuilt each frame by RectComposite. */
   set shadowMask(value: Texture) {
     this.resources.uShadowMask = value.source;
     this.resources.uShadowMaskSampler = value.source.style;
+  }
+  /** Scatter map 1 (lanes R/G/B/A = dynamic light 4/5/6/7 coverage). */
+  set shadowMask2(value: Texture) {
+    this.resources.uShadowMask2 = value.source;
+    this.resources.uShadowMask2Sampler = value.source.style;
   }
   /** The panel size the mask was rendered at (mask is panel-sized → UV = panel px / size). */
   setPanelSize(w: number, h: number): void {
@@ -250,6 +262,8 @@ export function makeGroundShader(): GroundShader {
       }),
       uShadowMask: empty.source,
       uShadowMaskSampler: empty.source.style,
+      uShadowMask2: empty.source,
+      uShadowMask2Sampler: empty.source.style,
       uDepth: empty.source,
       uDepthSampler: empty.source.style,
       uHotAlbedo: empty.source,
