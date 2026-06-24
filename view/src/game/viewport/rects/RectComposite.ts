@@ -149,9 +149,13 @@ export class RectComposite {
   /** The baked static-light map: `ambient + Σ cold lights·N·falloff`, one fixed slot
    *  per rect (same layout as the channels). Display does `albedo × (lightmap + hot)`. */
   private lightmap: RenderTexture | null = null;
-  /** Static lights baked into {@link lightmap} (world px). */
+  /** Static lights baked into {@link lightmap} (world px). World-wide set is unbounded; each
+   *  rect bakes only its nearest ≤{@link MAX_COLD_LIGHTS} (see {@link lightsForRect}). */
   private coldLights: ColdLight[] = [];
   private coldAmbient = 0.25;
+  /** Reusable per-rect cold-light uniform buffers (filled by {@link packColdInto} per bake). */
+  private readonly coldDataBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
+  private readonly coldColorBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
   /** Rects whose lightmap slot needs re-baking (geometry/normal changed, or a cold
    *  light in range changed). The cold-light `dirty_light` set. */
   private readonly lightDirty = new Set<string>();
@@ -1008,8 +1012,7 @@ export class RectComposite {
     const normal = this.channelComposite("normal");
     if (!this.lightmap || !normal || this.lightDirty.size === 0) return;
     this.lightBakeShader.normal = normal;
-    this.lightBakeShader.setColdLights(...this.packCold(), this.coldAmbient);
-    this.buildColdShadows(); // project the cold casters once; per-rect bake stamps the slots
+    // Cold lights + shadows are now bound PER RECT (binned) inside bakeLightRect — not once here.
     if (this.coldShadowRT) this.lightBakeShader.coldShadow = this.coldShadowRT;
     if (this.depthRT) this.lightBakeShader.depth = this.depthRT; // object gate + backlight, like hot
     let baked = 0;
@@ -1043,6 +1046,12 @@ export class RectComposite {
     const u1 = (slotX + W) / cw - hx, v1 = (slotY + H) / chh - hy;
     (this.lightBakeUv.data as Float32Array).set([u0, v0, u1, v0, u1, v1, u0, v1]);
     this.lightBakeUv.update();
+    // Per-rect cold lights: bin the world set to this rect's nearest ≤32, set the uniforms, and
+    // rebuild the nearest-3 cold shadows. (Was a global set in bakeLightDirty — this scales the
+    // world-wide cold count past 32 and makes shadows per-rect.)
+    const binned = this.lightsForRect(wc, wr);
+    this.lightBakeShader.setColdLights(this.coldDataBuf, this.coldColorBuf, this.packColdInto(binned), this.coldAmbient);
+    this.buildColdShadows(binned);
     this.lightBakeShader.setRect(rectWorldX(wc), rectWorldY(wr));
     // First stamp this rect's COLD-SHADOW slot: render the projected cold silhouettes (world
     // px) into the scratch (clipped to the rect), then blit into the cold-shadow slot — the
@@ -1056,14 +1065,14 @@ export class RectComposite {
     renderer.render({ container: this.lightBakeMesh, target: this.lightmap!, clear: false, transform: m });
   }
 
-  /** Project the cold lights' shadow casters (world px) into per-light meshes (RGB), ready for
-   *  {@link bakeLightRect} to stamp per rect. Cheap to rebuild — only runs when a lightmap rect
-   *  is dirty (geometry or a cold light changed). Up to 3 cold lights cast (R/G/B channels). */
-  private buildColdShadows(): void {
-    const n = Math.min(this.coldLights.length, 3); // cold shadow is one RGB map (lightBake reads csh.rgb); Phase 3 reworks this
+  /** Project `lights`' shadow casters (world px) into per-light meshes (R/G/B), for the current
+   *  rect's cold-shadow slot stamp in {@link bakeLightRect}. Up to 3 cast (one per channel); with
+   *  per-rect binning these are the rect's NEAREST 3, so cold shadows scale across the world. */
+  private buildColdShadows(lights: ColdLight[]): void {
+    const n = Math.min(lights.length, 3); // cold shadow is one RGB map (lightBake reads csh.rgb)
     this.coldShadowContainer.removeChildren();
     for (let i = 0; i < n; i++) {
-      const l = this.coldLights[i];
+      const l = lights[i];
       const casters = this.gatherShadowCasters(l.x, l.y, l.radius); // world px (no pan)
       let need = 0;
       for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
@@ -1077,20 +1086,39 @@ export class RectComposite {
     }
   }
 
-  /** Pack cold lights → `[data, color, count]` (data: xy world, z height, w radius). */
-  private packCold(): [Float32Array, Float32Array, number] {
-    const n = Math.min(this.coldLights.length, MAX_COLD_LIGHTS);
-    const data = new Float32Array(MAX_COLD_LIGHTS * 4);
-    const color = new Float32Array(MAX_COLD_LIGHTS * 4);
+  /** The cold lights reaching rect `(wc,wr)`, nearest-first, capped at {@link MAX_COLD_LIGHTS}.
+   *  Per-rect culling → the world-wide cold set is unbounded; each rect sums only its own ≤32.
+   *  The nearest 3 also cast shadows (R/G/B), so shadows scale per-rect too (vs the old global 3). */
+  private lightsForRect(wc: number, wr: number): ColdLight[] {
+    const rx0 = rectWorldX(wc), ry0 = rectWorldY(wr);
+    const rx1 = rx0 + rectW(), ry1 = ry0 + rectH();
+    const hits: { l: ColdLight; d2: number }[] = [];
+    for (const l of this.coldLights) {
+      const cx = Math.max(rx0, Math.min(l.x, rx1)); // closest point on the rect to the light
+      const cy = Math.max(ry0, Math.min(l.y, ry1));
+      const dx = l.x - cx, dy = l.y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < l.radius * l.radius) hits.push({ l, d2 });
+    }
+    hits.sort((a, b) => a.d2 - b.d2);
+    if (hits.length > MAX_COLD_LIGHTS) hits.length = MAX_COLD_LIGHTS;
+    return hits.map((h) => h.l);
+  }
+
+  /** Fill the reusable cold-light uniform buffers from `lights` (xy world, z height, w radius;
+   *  rgb + brightness). Returns the count. The shader loop breaks on it, so the tail is ignored. */
+  private packColdInto(lights: ColdLight[]): number {
+    const n = Math.min(lights.length, MAX_COLD_LIGHTS);
+    const data = this.coldDataBuf, color = this.coldColorBuf;
     for (let i = 0; i < n; i++) {
-      const l = this.coldLights[i];
+      const l = lights[i];
       data[i * 4] = l.x; data[i * 4 + 1] = l.y; data[i * 4 + 2] = l.height; data[i * 4 + 3] = l.radius;
       color[i * 4] = ((l.color >> 16) & 0xff) / 255;
       color[i * 4 + 1] = ((l.color >> 8) & 0xff) / 255;
       color[i * 4 + 2] = (l.color & 0xff) / 255;
       color[i * 4 + 3] = l.brightness;
     }
-    return [data, color, n];
+    return n;
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
