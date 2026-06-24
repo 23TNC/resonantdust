@@ -84,9 +84,12 @@ independently before the albedo multiply).
 - **32 lights in uniforms** (`32 × 2 vec4 = 64` — within limits). Global, because GPU scatter
   writes a light's shadow into a fixed channel across the whole map, so the channel↔light map
   is global; you can't make it per-rect (shadows cross boundaries → collision).
-- **2 scatter shadow maps** (RGBA each = 8 channels), **world/rect-space** (like `coldShadowRT`,
-  *not* the current panel-space `shadowRT`) so they pan-compose with the warm field. Built every
-  frame for this frame's 8-light batch via the existing `projectCaster` scatter + `max`-blend.
+- **2 scatter shadow maps** (RGBA each = 8 lanes), **panel-space**, built every frame for this
+  frame's 8-light batch via the existing `projectCaster` scatter + `max`-blend. The lane is a
+  `uChannel` uniform output (NOT the premultiplied tint — that couples rgb↔alpha and was why the
+  cap was 3). Panel-space is fine for the *fresh* scatter because it's rebuilt every frame; only
+  the *warm accumulation* needs pan-stability, so the **panel→world transform happens in the
+  Phase 2 ping-pong combine** (avoids per-frame per-rect blits into the torus-wrapped layout).
 - **`warm_shadowmap`** 32-bit/pixel, world/rect-space, **double-buffered**. Each frame a
   ping-pong combine pass reads `prev warm + the 8 fresh scatter channels` and writes `next warm`
   with those 8 bits updated (round-robin: 32 / 8 = **4-frame cycle**, ≤3-frame shadow lag; lag
@@ -139,11 +142,13 @@ current display loop already does it).
   `i` with the float-mod 4×8 helper, confirm all 32 read back. De-risks Phases 2–3.
 - Verify in browser.
 
-### Phase 1 — dynamic scatter (2 maps, 8 lights)
-- `shadowMaskShader`: extend to a second RGBA map (8 channels); scatter targets **world/rect
-  space** (like `coldShadowRT`), not panel-space.
-- Display the 8 freshly-scattered dynamic lights directly (no warm field yet).
-- Verify: 8 dynamic lights, each its own scattered shadow, no channel bleed.
+### Phase 1 — dynamic scatter (2 maps, 8 lights) ✅ DONE (e6a136e)
+- `shadowMaskShader`: second RGBA map (8 lanes); lane via `uChannel` uniform (decoupled from
+  the premultiplied tint — the real reason the cap was 3). Stays **panel-space** (world transform
+  deferred to the Phase 2 combine — see above).
+- Display reads all 8 lanes directly (no warm field yet).
+- VERIFIED: 8 world lights over the forest — all 8 lanes incl. both alpha lanes carry independent
+  coverage, RGB not zeroed, 8 distinct coloured pools with per-light shadows. Premultiply cleared.
 
 ### Phase 2 — dynamic pool (warm field + 32 lights)
 - `warm_shadowmap` (32-bit, double-buffered, world/rect-space) + ping-pong combine folding the 8
