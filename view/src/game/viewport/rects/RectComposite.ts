@@ -9,16 +9,11 @@ import {
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
 import { makeObjectDepthShader, makeDepthQuadGeometry, setQuadDepth, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
+import type { LightCore } from "../../lighting/lights";
 
-/** A static (baked) light, in WORLD px. Contributes to the lightmap. */
-export interface ColdLight {
-  x: number;
-  y: number;
-  height: number;
-  radius: number;
-  color: number;
-  brightness: number;
-}
+/** A static (baked) light, in WORLD px. Contributes to the lightmap. The cold tier consumes
+ *  only the core photometry; routing lives on {@link Light}. See docs/tiered_lighting.md. */
+export type ColdLight = LightCore;
 
 /** Rects of slack kept around the viewport on every side, so a pan reveals
  *  already-baked rectangles before they reach the screen edge. */
