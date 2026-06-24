@@ -79,6 +79,11 @@ export class DeferredLighting {
   /** Static + card `light` lights (registered by `LightPrim`, or a placed torch).
    *  `canBake` ones bake into the per-chunk lightmap; the cursor stays live. */
   private readonly cardLights = new Set<Light>();
+  /** The registered `^light` lights — the new tiered renderer (WorldRenderer) reads these into
+   *  its dynamic pool. The deferred bake itself is dormant; this is now just the registry. */
+  get lights(): ReadonlySet<Light> {
+    return this.cardLights;
+  }
   /** Shared light uniforms (positions in CHUNK-LOCAL px, colours). */
   private readonly lightUniforms = new UniformGroup({
     uLightData: { value: new Float32Array(MAX_LIGHTS * 4), type: "vec4<f32>", size: MAX_LIGHTS },

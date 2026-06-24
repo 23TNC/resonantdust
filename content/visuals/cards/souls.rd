@@ -11,8 +11,10 @@
         $asset::soul_white &pack set
       @init>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @update>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @destroy>
         $functions::rect_card call drop
         $functions::card_death call drop
@@ -27,8 +29,10 @@
         $asset::soul_white &pack set
       @init>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @update>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @destroy>
         $functions::rect_card call drop
         $functions::card_death call drop
@@ -43,8 +47,10 @@
         $asset::soul &pack set
       @init>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @update>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @destroy>
         $functions::rect_card call drop
         $functions::card_death call drop
@@ -59,8 +65,10 @@
         $asset::soul_white &pack set
       @init>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @update>
         $functions::rect_card call drop
+        $functions::soul_light call drop
       @destroy>
         $functions::rect_card call drop
         $functions::card_death call drop

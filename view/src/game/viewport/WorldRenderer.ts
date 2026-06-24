@@ -792,6 +792,14 @@ export class WorldRenderer extends LayoutNode {
     if (hotA) this.groundShader.hotAlbedo = hotA;
     if (hotN) this.groundShader.hotNormal = hotN;
     if (hotD) this.groundShader.hotDepth = hotD;
+    // Fold registered ^light card lights (souls, torches) into the dynamic pool, after the
+    // cursor at [0]. They're world-positioned movers, so they ride the warm round-robin. Radius
+    // is authored in px (passed straight through). The deferred bake stays dormant — its
+    // cardLights set is just the registry the LightPrims write to.
+    this.hotLights.length = 1;
+    for (const l of this.deferred.lights) {
+      this.hotLights.push({ x: l.x, y: l.y, height: l.height, radius: l.radius, color: l.color, brightness: l.brightness, screen: false });
+    }
     this.packHotLights(panX, panY);
     this.buildShadowMask(renderer, panX, panY);
   }
