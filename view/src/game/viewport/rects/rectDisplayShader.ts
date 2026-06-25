@@ -160,7 +160,13 @@ const groundLightBitGl = {
         vec3 hn = texture(uHotNormal, vUV).rgb * 2.0 - 1.0;
         vec3 Nh = normalize(vec3(hn.x, hn.y * uNormalYSign, hn.z));
         Nh = normalize(vec3(Nh.x, Nh.y + SOUTH_TILT, Nh.z * SOUTH_Z)); // pitch forward, like objects
-        vec3 hotSum = texture(uLightmap, vUV).rgb;   // ambient + baked cold (ground-normal approx)
+        // Light the card on its OWN normal (Nh) only: a flat ambient floor + the dynamic pool
+        // (below). NOT the cold lightmap — that's the cold layer's lit value (computed on the
+        // GROUND/TREE normal), so seeding from it bled the trees'/ground's normal-mapped shading
+        // through the card. Cold-light response on a mover would come via the dynamic pool.
+        // (HOT_AMBIENT should track the world ambient — a uniform later; matches the demo floor.)
+        const float HOT_AMBIENT = 0.22;
+        vec3 hotSum = vec3(HOT_AMBIENT);
         for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
           if (float(i) >= uLightCount) break;
           vec4 ld = uLightData[i];
