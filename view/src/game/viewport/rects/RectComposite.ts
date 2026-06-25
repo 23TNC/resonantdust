@@ -417,10 +417,15 @@ export class RectComposite {
     renderer.render({ container: this.empty, target: this.hotNormal, clear: true, clearColor: [0.5, 0.5, 1, 1] });
     this.hotDepth?.destroy(true);
     this.hotDepth = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    this.hotDepth.source.scaleMode = "nearest"; // depth is a SORT KEY — never interpolate the layer/feet-Y bytes
     renderer.render({ container: this.empty, target: this.hotDepth, clear: true, clearColor: [0, 0, 0, 1] });
     // Depth: same slot layout; cleared to 0 (empty = behind everything).
     this.depthRT?.destroy(true);
     this.depthRT = RenderTexture.create({ width: cw, height: ch, resolution: res });
+    // NEAREST: linear-sampling the cold depth blends an object's hard edge (BLUE_OBJECT 80) into
+    // the ground (30), passing through band-0 49..63 — above the card's BLUE_ROOT (48) — so the
+    // card lost the compare in that 1px sliver and the object's dark edge bled through as an outline.
+    this.depthRT.source.scaleMode = "nearest";
     renderer.render({ container: this.empty, target: this.depthRT, clear: true, clearColor: [0, 0, 0, 1] });
     // Light-bake quad is rect-local (0..W,0..H); placed at each slot by a transform.
     const W = rectW();
