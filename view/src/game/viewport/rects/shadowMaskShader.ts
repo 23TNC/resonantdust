@@ -67,6 +67,13 @@ export const SHADOW_DBL_CAP = 240;
  *  low light still gives long-but-sane shadows instead of screen-spanning streaks. */
 export const SHADOW_MAX_LEN = 280;
 
+/** Floor on the height a light PROJECTS shadows from (px). A light's visual height can be
+ *  tiny (a soul `^light` between the eyes sits at ~20), which makes `hUp/(lightZ−hUp)` huge →
+ *  shadows that slam into {@link SHADOW_MAX_LEN} and get hard-scaled (stubby/clipped). Flooring
+ *  the projection height lets a low light cast the same short, pointed shadows a high light does
+ *  — the cap rarely triggers. Shadows only; the light's REAL height still drives N·L lighting. */
+export const SHADOW_MIN_Z = 90;
+
 /** Initial projected-vertex capacity per light (3 per triangle). The buffer DOUBLES on
  *  demand (`RectComposite.ensureShadowCapacity`) when a dense caster set needs more, so
  *  the caster count is effectively unbounded — this is just the starting allocation. */

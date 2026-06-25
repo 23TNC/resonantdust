@@ -4,7 +4,7 @@ import type { Sidecar } from "../../../assets/geometry/geoTypes";
 import {
   makeShadowMaskShader, makeShadowGeometry, MAX_SHADOW_VERTS, MAX_SHADOW_CASTERS,
   MAX_SHADOW_LIGHTS, SHADOW_MAPS, channelForLight, shadowMapOf, shadowHeightScale,
-  SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH, SHADOW_MAX_LEN, type ShadowMaskShader,
+  SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH, SHADOW_MAX_LEN, SHADOW_MIN_Z, type ShadowMaskShader,
 } from "./shadowMaskShader";
 import { makeWarmCombineShader, makeWarmQuadGeometry, type WarmCombineShader } from "./warmCombineShader";
 import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
@@ -511,7 +511,7 @@ export class RectComposite {
         for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
         const slot = this.ensureShadowMesh(this.shadowMeshes, i, need);
         let v = 0;
-        const Lz = Math.max(lights[i].z, 1);
+        const Lz = Math.max(lights[i].z, SHADOW_MIN_Z); // floor the PROJECTION height (not the light's real z)
         for (const c of casters) v = this.projectCaster(slot.data, v, c, lights[i].x, lights[i].y, Lz, panX, panY);
         slot.data.fill(0, v * 2); // zero the tail → degenerate (no-area) triangles
         slot.pos.update();
@@ -610,13 +610,7 @@ export class RectComposite {
     let topHUp = Math.max(c.footNY - minNy, 0) * c.h * occScale;
     if (topHUp > hCap) topHUp = hCap;
     const tipD = (topHUp / (Lz - topHUp)) * dBLc;
-    // The north stretch (below) scales the Y offset AFTER `d`, so a north-going shadow's ACTUAL
-    // extent is up to SHADOW_NORTH_STRETCH × `d`. Cap the STRETCHED tip extent, not raw `d` —
-    // otherwise low lights (a soul `^light` at height 20 sits right at the cap) overshoot
-    // SHADOW_MAX_LEN by 1.8× while high lights (cursor, h110) stay under it. South/E/W unchanged.
-    const stretchY = diry < 0 ? SHADOW_NORTH_STRETCH : 1.0;
-    const tipExtent = tipD * Math.hypot(dirx, diry * stretchY);
-    const scale = tipExtent > SHADOW_MAX_LEN ? SHADOW_MAX_LEN / tipExtent : 1.0;
+    const scale = tipD > SHADOW_MAX_LEN ? SHADOW_MAX_LEN / tipD : 1.0;
     const proj = this.shadowScratch;
     let v = vStart;
     for (const pg of polys) {
@@ -1084,7 +1078,7 @@ export class RectComposite {
       for (const c of casters) for (const pg of this.shadowTris(c.stem, c.sidecar)) need += pg.tris.length;
       const slot = this.ensureShadowMesh(this.coldShadowMeshes, i, need);
       let v = 0;
-      const Lz = Math.max(l.height, 1);
+      const Lz = Math.max(l.height, SHADOW_MIN_Z); // floor the PROJECTION height (not the light's real z)
       for (const c of casters) v = this.projectCaster(slot.data, v, c, l.x, l.y, Lz, 0, 0); // pan 0 → world
       slot.data.fill(0, v * 2);
       slot.pos.update();
