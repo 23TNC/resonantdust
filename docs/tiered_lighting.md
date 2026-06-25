@@ -135,7 +135,7 @@ current display loop already does it).
 
 ## Phased implementation
 
-### Phase 0 — foundation + de-risk *(low risk, first)*
+### Phase 0 — foundation + de-risk ✅ DONE (be2f487)
 - Unify `ColdLight` + hot uniform arrays into one `Light`; one enumerator bucketing cold vs
   dynamic.
 - **Spike** the 32-bit bitfield: write a known pattern into an rgba8 RT, sample it, extract bit
@@ -159,8 +159,6 @@ current display loop already does it).
 - VERIFIED: 32 world lights → all 4 warm channels fill incl. alpha (91k/198k/205k/137k px); every
   light lit + shadowed; cursor (1 light) unchanged. Gotchas hit: `packed` is a GLSL reserved word;
   computed uniform-array index is illegal in ES 1.00; backticks in GLSL comments close the literal.
-- Not yet visually confirmed: the 1-frame cross-fade smoothing a *moving* light (mechanism in
-  place); possible faint 4-frame shadow-edge shimmer from the rotating cross-fade (polish, watch).
 
 ### Phase 2b — pan-stability ✅ DONE (f49522c)
 - The combine **scrolls** the carried channels by the UV pan delta (read uPrevWarm at
@@ -172,8 +170,6 @@ current display loop already does it).
   edge clipping; correct direction + magnitude); uPanDelta reaches the shader; static unchanged.
 - Caveat: screen lights (the cursor) scroll with the world too, but re-scatter each batch-0 frame
   so the live cross-fade masks it. Cursor-pin remains an option if it ever reads badly.
-- Still open (carried from 2a): cross-fade no-pop on a *moving* light + possible rotating shimmer
-  are eyeball-unconfirmed; no perf measurement; only tested with injected lights.
 
 ### Debug notes (gotchas that cost time)
 - `extract.pixels` returns the **DPR-scaled physical** buffer — address it by the returned
@@ -194,11 +190,31 @@ current display loop already does it).
 - VERIFIED: 50 cold lights across the window all bake (old global-32 cap would leave 18 dark) —
   full grid lit to the corners; 2-demo-light scene unchanged; tree shadows intact.
 
-### Phase 4 — integration
-- Tier migration: a dynamic light that **settles** → CPU-bake into cold (one rebake); a cold light
-  that starts moving → promote to dynamic.
-- Round-robin scheduler + priority (recently-moved first, age to avoid starvation).
-- **Optional** `warm_lightmap` cache + dirty disks — only if profiling demands it.
+### Post-phase — first real content + fixes ✅
+- Soul `^light` between the eyes, wired into the dynamic pool (b538a95) — `^light` → `LightPrim` →
+  `DeferredLighting.cardLights` (registry only; its bake is dormant) → WorldRenderer folds it in.
+- Hot prims light on their OWN normal (db84888) — no cold-lightmap bleed; see TODO #1 for the gap.
+- Shadow length cap floors the projection height for low lights (6e582b6).
+- Depth RTs are NEAREST — no object outline under cards (d2fe6a0): the byte sort-key must never
+  interpolate (linear blended an object's edge into band-0 49..63, above the card's BLUE_ROOT 48).
+
+## TODO
+
+1. **Cold lights → hot prims.** Hot prims (cards) now light on their OWN normal from a flat
+   `HOT_AMBIENT` const (0.22) — correct (the cold lightmap is the cold layer's value on the
+   ground/tree normal, and bled through cards), but cold *lights* no longer reach cards **at all**
+   and the ambient doesn't track day/night. Work the cold lights into the hot-prim lighting computed
+   on the card's normal — promote nearby cold lights into the dynamic pool, or a per-card cold
+   sample — and make `HOT_AMBIENT` a uniform fed from the world ambient.
+2. **Phase 4 — integration.** Tier migration: a dynamic light that **settles** → CPU-bake into cold
+   (one rebake); a cold light that starts **moving** → promote to dynamic. Round-robin scheduler +
+   priority (recently-moved first, age so a fast mover can't starve a slow one). Optional
+   `warm_lightmap` cache + dirty disks. Has a real consumer once souls actually move.
+3. **Verify the dynamic polish.** The 1-frame cross-fade smoothing a *moving* light (no pop) and a
+   possible rotating 4-frame shadow-edge shimmer are both eyeball-unconfirmed — need a light in
+   motion to observe.
+4. **Fix `bin/shared corpus`.** Bit-rotted (refs the deleted `resonantdust-data`) → no working `.rd`
+   validator; validate `.rd` against the Card Editor's emission until fixed.
 
 ## Preserved / superseded
 
