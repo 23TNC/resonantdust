@@ -200,12 +200,12 @@ current display loop already does it).
 
 ## TODO
 
-1. **Cold lights → hot prims.** Hot prims (cards) now light on their OWN normal from a flat
-   `HOT_AMBIENT` const (0.22) — correct (the cold lightmap is the cold layer's value on the
-   ground/tree normal, and bled through cards), but cold *lights* no longer reach cards **at all**
-   and the ambient doesn't track day/night. Work the cold lights into the hot-prim lighting computed
-   on the card's normal — promote nearby cold lights into the dynamic pool, or a per-card cold
-   sample — and make `HOT_AMBIENT` a uniform fed from the world ambient.
+1. **Cold lights → hot prims** ✅ DONE (d761d6a). Per-rect cold data/colour textures (coldLightTex.ts;
+   CPU-populated in `bakeLightRect` from the same `lightsForRect` binning); the hot-prim pass reads
+   the card's rect and evaluates cold lights on the card's OWN normal (rect-local positions → no pan
+   transform). Verified: a cyan cold light tints a soul card cyan on its own normal, no bleed.
+   *Remnants:* `HOT_AMBIENT` is still a const 0.22 (make it a uniform tracking the world ambient —
+   minor); and the 6-line WorldRenderer wiring is uncommitted (shares the file with in-progress work).
 2. **Phase 4 — integration.** Tier migration: a dynamic light that **settles** → CPU-bake into cold
    (one rebake); a cold light that starts **moving** → promote to dynamic. Round-robin scheduler +
    priority (recently-moved first, age so a fast mover can't starve a slow one). Optional
