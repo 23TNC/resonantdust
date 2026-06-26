@@ -10,6 +10,7 @@ import {
   UniformGroup,
 } from "pixi.js";
 import { BITFIELD_GLSL } from "../../lighting/bitfield";
+import { COLD_TEX_LIGHTS, COLD_POS_STEP, COLD_RADIUS_SCALE, COLD_BRIGHT_SCALE } from "./coldLightTex";
 
 /** Max DYNAMIC lights summed in the display pass (the global pool). The loop breaks on
  *  `uLightCount`, so unused slots cost nothing. 32 = 4 warm-field channels × 8 lights. */
@@ -51,6 +52,9 @@ const groundLightBitGl = {
       uniform sampler2D uShadowMask2;               // scatter map 1: fresh batch lights 4..7
       uniform sampler2D uWarmField;                 // 32-bit occlusion bitfield (bit i = light i shadowed)
       uniform float uFreshChannel;                  // warm channel (0..3) refreshed this frame = the fresh 8-light batch
+      uniform sampler2D uColdData;                  // per-rect cold lights: (x,y,z,radius) rect-local
+      uniform sampler2D uColdColor;                 // per-rect cold lights: (r,g,b,brightness)
+      uniform vec4 uColdGrid;                        // (cols, rows, rectW, rectH) — vUV → rect slot + frag-local
       uniform vec2 uPanelSize;                       // panel px → mask UV
       ${BITFIELD_GLSL}
       uniform sampler2D uDepth;                      // depth composite (B band ≥ 1 ⇒ standing object)
@@ -167,6 +171,30 @@ const groundLightBitGl = {
         // (HOT_AMBIENT should track the world ambient — a uniform later; matches the demo floor.)
         const float HOT_AMBIENT = 0.22;
         vec3 hotSum = vec3(HOT_AMBIENT);
+        // Cold lights for THIS rect, evaluated on the card's OWN normal Nh — not the cold lightmap
+        // (that's the cold layer's value on the ground/tree normal, which bled through). Derive the
+        // rect slot + the fragment's rect-local px from vUV; loop the rect's ≤32 cold lights from the
+        // data/colour textures. Positions are rect-local, so the light vector needs no pan. Both the
+        // light and the fragment are rect-local → their difference is the world-space light vector.
+        float cCols = uColdGrid.x, cRows = uColdGrid.y;
+        float gx = vUV.x * cCols, gy = vUV.y * cRows;
+        float csx = floor(gx), csy = floor(gy);
+        vec2 fragRL = vec2((gx - csx) * uColdGrid.z, (gy - csy) * uColdGrid.w);
+        for (int j = 0; j < ${COLD_TEX_LIGHTS}; j++) {
+          vec2 cuv = vec2((csx * ${COLD_TEX_LIGHTS}.0 + float(j) + 0.5) / (${COLD_TEX_LIGHTS}.0 * cCols), (csy + 0.5) / cRows);
+          vec4 cd = texture(uColdData, cuv);
+          float cradius = cd.a * 255.0 * ${COLD_RADIUS_SCALE.toFixed(1)};
+          if (cradius < 1.0) break;                  // empty slot → no more cold lights in this rect
+          vec2 lightRL = (cd.rg * 255.0 - 128.0) * ${COLD_POS_STEP.toFixed(1)};
+          vec3 toC = vec3(lightRL - fragRL, cd.b * 255.0); // .z = light height (px)
+          float cdist = length(toC.xy);
+          float cat = clamp(1.0 - cdist / cradius, 0.0, 1.0); cat *= cat;
+          if (cat <= 0.0) continue;
+          float cnl = max(dot(Nh, normalize(toC)), 0.0);
+          cnl = max(cnl, OBJECT_WRAP * cat);          // backlit billboard wrap, like the dynamic pool
+          vec4 cc = texture(uColdColor, cuv);
+          hotSum += cc.rgb * (cc.a * ${COLD_BRIGHT_SCALE.toFixed(1)} * cnl * cat);
+        }
         for (int i = 0; i < ${MAX_HOT_LIGHTS}; i++) {
           if (float(i) >= uLightCount) break;
           vec4 ld = uLightData[i];
@@ -241,6 +269,21 @@ export class GroundShader extends Shader {
     this.resources.shadowUniforms.uniforms.uFreshChannel = c;
     this.resources.shadowUniforms.update();
   }
+  /** Per-rect cold-light DATA texture (x,y,z,radius) — hot prims evaluate it on their own normal. */
+  set coldData(value: Texture) {
+    this.resources.uColdData = value.source;
+    this.resources.uColdDataSampler = value.source.style;
+  }
+  /** Per-rect cold-light COLOUR texture (r,g,b,brightness). */
+  set coldColor(value: Texture) {
+    this.resources.uColdColor = value.source;
+    this.resources.uColdColorSampler = value.source.style;
+  }
+  /** `(cols, rows, rectW, rectH)` so the shader maps `vUV` → rect slot + rect-local frag position. */
+  setColdGrid(cols: number, rows: number, rectW: number, rectH: number): void {
+    this.resources.shadowUniforms.uniforms.uColdGrid = [cols, rows, rectW, rectH];
+    this.resources.shadowUniforms.update();
+  }
   /** The panel size the mask was rendered at (mask is panel-sized → UV = panel px / size). */
   setPanelSize(w: number, h: number): void {
     this.resources.shadowUniforms.uniforms.uPanelSize = [w, h];
@@ -294,6 +337,10 @@ export function makeGroundShader(): GroundShader {
       uShadowMask2Sampler: empty.source.style,
       uWarmField: empty.source,
       uWarmFieldSampler: empty.source.style,
+      uColdData: empty.source,
+      uColdDataSampler: empty.source.style,
+      uColdColor: empty.source,
+      uColdColorSampler: empty.source.style,
       uDepth: empty.source,
       uDepthSampler: empty.source.style,
       uHotAlbedo: empty.source,
@@ -305,6 +352,7 @@ export function makeGroundShader(): GroundShader {
       shadowUniforms: new UniformGroup({
         uPanelSize: { value: new Float32Array([1, 1]), type: "vec2<f32>" },
         uFreshChannel: { value: 0, type: "f32" },
+        uColdGrid: { value: new Float32Array([1, 1, 1, 1]), type: "vec4<f32>" },
       }),
     },
   });

@@ -1,4 +1,5 @@
-import { Buffer, BufferUsage, Container, Geometry, Matrix, Mesh, RenderTexture, Sprite, Texture, earcut, type Renderer } from "pixi.js";
+import { Buffer, BufferUsage, BufferImageSource, Container, Geometry, Matrix, Mesh, RenderTexture, Sprite, Texture, earcut, type Renderer } from "pixi.js";
+import { COLD_TEX_LIGHTS, encodeColdLight } from "./coldLightTex";
 import type { GeometryStore } from "../../../assets/geometry/GeometryStore";
 import type { Sidecar } from "../../../assets/geometry/geoTypes";
 import {
@@ -156,6 +157,14 @@ export class RectComposite {
   /** Reusable per-rect cold-light uniform buffers (filled by {@link packColdInto} per bake). */
   private readonly coldDataBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
   private readonly coldColorBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
+  // ── per-rect cold-light DATA/COLOUR textures (hot prims read cold lights on their own normal) ──
+  /** rgba8 `COLD_TEX_LIGHTS·cols × rows`: light j of rect-slot (sx,sy) at texel (sx·32+j, sy).
+   *  data = (x,y,z,radius) rect-local; colour = (r,g,b,brightness). See coldLightTex.ts. */
+  private coldTexData: Uint8Array = new Uint8Array(0);
+  private coldTexColor: Uint8Array = new Uint8Array(0);
+  private coldDataTex: Texture | null = null;
+  private coldColorTex: Texture | null = null;
+  private coldTexDirty = false;
   /** Rects whose lightmap slot needs re-baking (geometry/normal changed, or a cold
    *  light in range changed). The cold-light `dirty_light` set. */
   private readonly lightDirty = new Set<string>();
@@ -274,6 +283,20 @@ export class RectComposite {
     return this.warmRTs[this.warmCur];
   }
 
+  /** Per-rect cold-light DATA texture (x,y,z,radius) — hot prims evaluate cold lights on their
+   *  own normal from it. See {@link coldGrid} for the vUV→rect mapping. */
+  get coldDataTexture(): Texture | null {
+    return this.coldDataTex;
+  }
+  /** Per-rect cold-light COLOUR texture (r,g,b,brightness). */
+  get coldColorTexture(): Texture | null {
+    return this.coldColorTex;
+  }
+  /** `[cols, rows, rectW, rectH]` — the display maps `vUV` → rect slot + rect-local frag position. */
+  get coldGrid(): [number, number, number, number] {
+    return [this.cols, this.rows, rectW(), rectH()];
+  }
+
   /** Replace the cold (static, baked) light set + ambient. Marks the whole window's
    *  lightmap dirty (cold lights change rarely — a torch lit, a day/night step). */
   setColdLights(lights: ColdLight[], ambient: number): void {
@@ -386,6 +409,19 @@ export class RectComposite {
     if (cols === this.cols && rows === this.rows && this.scratchRT) return;
     this.cols = cols;
     this.rows = rows;
+    // Cold-light data/colour textures: one texel per (rect-slot, light). NEAREST + no-premultiply
+    // (raw data — brightness rides the colour alpha, positions ride the data rgb).
+    this.coldDataTex?.destroy(true);
+    this.coldColorTex?.destroy(true);
+    const ctw = COLD_TEX_LIGHTS * cols;
+    this.coldTexData = new Uint8Array(ctw * rows * 4);
+    this.coldTexColor = new Uint8Array(ctw * rows * 4);
+    const coldTex = (buf: Uint8Array): Texture => new Texture({
+      source: new BufferImageSource({ resource: buf, width: ctw, height: rows, format: "rgba8unorm", alphaMode: "no-premultiply-alpha", scaleMode: "nearest" }),
+    });
+    this.coldDataTex = coldTex(this.coldTexData);
+    this.coldColorTex = coldTex(this.coldTexColor);
+    this.coldTexDirty = true;
     const res = renderer.resolution;
     const cw = Math.ceil(cols * rectW());
     const ch = Math.ceil(rows * rectH());
@@ -1033,6 +1069,11 @@ export class RectComposite {
       baked++;
     }
     for (const k of done) this.lightDirty.delete(k);
+    if (this.coldTexDirty) { // upload the per-rect cold data/colour once after the rect pass
+      this.coldDataTex?.source.update();
+      this.coldColorTex?.source.update();
+      this.coldTexDirty = false;
+    }
   }
 
   /** Bake one rect's lightmap slot: the rect-local quad samples this rect's normal
@@ -1056,6 +1097,7 @@ export class RectComposite {
     // world-wide cold count past 32 and makes shadows per-rect.)
     const binned = this.lightsForRect(wc, wr);
     this.lightBakeShader.setColdLights(this.coldDataBuf, this.coldColorBuf, this.packColdInto(binned), this.coldAmbient);
+    this.populateColdTex(mod(wc, this.cols), mod(wr, this.rows), binned, rectWorldX(wc), rectWorldY(wr));
     this.buildColdShadows(binned);
     this.lightBakeShader.setRect(rectWorldX(wc), rectWorldY(wr));
     // First stamp this rect's COLD-SHADOW slot: render the projected cold silhouettes (world
@@ -1124,6 +1166,20 @@ export class RectComposite {
       color[i * 4 + 3] = l.brightness;
     }
     return n;
+  }
+
+  /** Write rect-slot `(sx,sy)`'s binned cold `lights` into the data/colour texture buffers
+   *  (rect-local to `(rwx,rwy)`); empty slots get radius 0 so the display loop stops. Flags the
+   *  textures dirty — {@link bakeLightDirty} uploads once after its rect pass. */
+  private populateColdTex(sx: number, sy: number, lights: ColdLight[], rwx: number, rwy: number): void {
+    const base = sy * (COLD_TEX_LIGHTS * this.cols) + sx * COLD_TEX_LIGHTS; // first texel of the column
+    const n = Math.min(lights.length, COLD_TEX_LIGHTS);
+    for (let j = 0; j < COLD_TEX_LIGHTS; j++) {
+      const t = base + j;
+      if (j < n) encodeColdLight(this.coldTexData, this.coldTexColor, t, lights[j], rwx, rwy);
+      else this.coldTexData[t * 4 + 3] = 0; // radius 0 → empty (loop stops here)
+    }
+    this.coldTexDirty = true;
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
