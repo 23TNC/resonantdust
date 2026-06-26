@@ -169,7 +169,7 @@ const groundLightBitGl = {
         // GROUND/TREE normal), so seeding from it bled the trees'/ground's normal-mapped shading
         // through the card. Cold-light response on a mover would come via the dynamic pool.
         // (HOT_AMBIENT should track the world ambient — a uniform later; matches the demo floor.)
-        const float HOT_AMBIENT = 0.18;
+        const float HOT_AMBIENT = 0.12;
         vec3 hotSum = vec3(HOT_AMBIENT);
         // Cold lights for THIS rect, evaluated on the card's OWN normal Nh — not the cold lightmap
         // (that's the cold layer's value on the ground/tree normal, which bled through). Derive the

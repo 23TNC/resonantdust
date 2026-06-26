@@ -136,7 +136,7 @@ export function makeLightBakeShader(): LightBakeShader {
         uLightData: { value: new Float32Array(MAX_COLD_LIGHTS * 4), type: "vec4<f32>", size: MAX_COLD_LIGHTS },
         uLightColor: { value: new Float32Array(MAX_COLD_LIGHTS * 4), type: "vec4<f32>", size: MAX_COLD_LIGHTS },
         uLightCount: { value: 0, type: "f32" },
-        uAmbient: { value: 0.18, type: "f32" },
+        uAmbient: { value: 0.12, type: "f32" },
         uNormalYSign: { value: -1, type: "f32" },
       }),
     },

@@ -153,7 +153,7 @@ export class RectComposite {
   /** Static lights baked into {@link lightmap} (world px). World-wide set is unbounded; each
    *  rect bakes only its nearest ≤{@link MAX_COLD_LIGHTS} (see {@link lightsForRect}). */
   private coldLights: ColdLight[] = [];
-  private coldAmbient = 0.18;
+  private coldAmbient = 0.12;
   /** Reusable per-rect cold-light uniform buffers (filled by {@link packColdInto} per bake). */
   private readonly coldDataBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
   private readonly coldColorBuf = new Float32Array(MAX_COLD_LIGHTS * 4);
