@@ -45,7 +45,7 @@ pub enum Effect {
     surface: u8,
     macro_zone: u64,
     owner_id: u32,
-    stock: u32,
+    stock: u64,
     tag: u32,
     micro_location: Option<u32>,
   },
@@ -58,11 +58,11 @@ pub enum Effect {
   /// Mutate the synthetic tile's per-cell stock `slot` (`set_tile_stock`) — the
   /// zone-savable u4 path.
   ModifyTileStock { slot: u8, op: StockOp, delta: u8 },
-  /// Set a bound CARD's full per-card `stock` u32 to a gate-computed value
+  /// Set a bound CARD's full per-card `stock` u64 to a gate-computed value
   /// (current stock with one slot's bits replaced). The card holds the result —
-  /// the upper 28 bits are card-only (transient unless the card persists), only
+  /// the upper 60 bits are card-only (transient unless the card persists), only
   /// the bottom u4 ever round-trips to a zone tile.
-  SetCardStock { card_id: u32, stock: u32 },
+  SetCardStock { card_id: u32, stock: u64 },
 }
 
 /// Tile-stock arithmetic for [`Effect::ModifyTileStock`]. `code()` is the u8 the

@@ -22,10 +22,11 @@
   ::body_height>
     @define>
       $globals::card_height $globals::title_height sub &value set
-  ; the queue/debounce bar — a thin strip along the title bar's body edge.
+  ; the queue/debounce bar — a thin strip along the title bar's body edge,
+  ; the bottom 1/5 of the title (a function of title_height, not a magic number).
   ::queue_height>
     @define>
-      3 &value set
+      $globals::title_height 5 div &value set
 
   ; inventory rect cell — the slot a content card snaps into. A content card is
   ; body-centred on the snap point, but its full face is card_width × card_height
@@ -267,7 +268,15 @@
     ^progress call &p set
     *card_ox *band_y &p.pos vec2
     $globals::card_width $globals::title_height &p.size vec2
-    #6cf &p.tint set
+    ; The title bar IS the build bar: keep the bar at *color.title and contrast the
+    ; FILL by the title's luminance — a translucent LIGHT veil over a dark title, a
+    ; DARK veil over a bright one — so the filled portion always reads and the label
+    ; (drawn on top) stays legible. Luminance = (54·R + 183·G + 19·B)/256 (≈ Rec.601
+    ; ×256); R=(c/65536)%256, G=(c/256)%256, B=c%256. All-int ⇒ exact.
+    *color.title 65536 div 256 mod 54 mul *color.title 256 div 256 mod 183 mul add *color.title 256 mod 19 mul add 256 div &lum set
+    #ffffff &p.tint set
+    *lum 128 ge if #1a1a1a &p.tint set
+    0.6 &p.alpha set
     *d.progress.0.id &p.target set
     *d.progress.0.style &p.style set
 
@@ -283,6 +292,7 @@
     ; debounce fraction, NOT a recipe row). Engine self-hides it when no queue.
     ^progress call &q set
     1 &q.source set
+    *d.progress.0.id &q.target set                          ; the queued card (its root) — resolves the debounce window
     *card_ox *queue_y &q.pos vec2
     $globals::card_width $globals::queue_height &q.size vec2
     #ffffff &q.tint set

@@ -26,6 +26,10 @@ export class WasmClient {
   private readonly worker: Worker;
   private nextId = 1;
   private readonly pending = new Map<number, Pending>();
+  /** In-flight {@link carriedRun} requests, keyed by request id. */
+  private readonly pendingCarried = new Map<number, (ids: number[]) => void>();
+  /** In-flight {@link placeLoose}/{@link placeStack} requests, keyed by request id. */
+  private readonly pendingPlace = new Map<number, (moved: boolean) => void>();
   private readonly ready: Promise<void>;
   /** Cached from the last successful login. `-1` until then. */
   private _playerId = -1;
@@ -96,6 +100,20 @@ export class WasmClient {
           fn?.(msg.batch);
           break;
         }
+        case "carriedRun": {
+          const r = this.pendingCarried.get(msg.id);
+          if (!r) return;
+          this.pendingCarried.delete(msg.id);
+          r(msg.ids);
+          break;
+        }
+        case "placeResult": {
+          const r = this.pendingPlace.get(msg.id);
+          if (!r) return;
+          this.pendingPlace.delete(msg.id);
+          r(msg.moved);
+          break;
+        }
         case "contentChanged":
           for (const fn of this.contentChangedListeners) fn(msg.version);
           break;
@@ -155,13 +173,38 @@ export class WasmClient {
   /** Drop a card loose at a GLOBAL world cell `(q, r)` on `(surface, owner)` —
    *  the drag-drop path. Fire-and-forget: the resulting position arrives via the
    *  render feed (success → dropped cell, rejection → unchanged data → origin). */
-  placeLoose(cardId: number, surface: number, owner: number, q: number, r: number): void {
-    this.post({ type: "place", cardId, surface, owner, q, r });
+  placeLoose(cardId: number, surface: number, owner: number, q: number, r: number): Promise<boolean> {
+    return this.place({ type: "place", id: this.nextId++, cardId, surface, owner, q, r });
   }
 
-  /** Drop a card onto `parentId`'s stack in `direction` (drop-on-a-card). */
-  placeStack(cardId: number, parentId: number, direction: number): void {
-    this.post({ type: "placeStack", cardId, parentId, direction });
+  /** Drop a card onto `parentId`'s stack in `direction` (drop-on-a-card). Resolves
+   *  when the worker has applied + re-emitted the move (or rejected it). */
+  placeStack(cardId: number, parentId: number, direction: number): Promise<boolean> {
+    return this.place({ type: "placeStack", id: this.nextId++, cardId, parentId, direction });
+  }
+
+  /** Post a place/placeStack request and resolve with the worker's decision
+   *  (`moved`). The worker re-emits the affected views before replying, so the new
+   *  position is in the feed by the time this resolves. */
+  private place(msg: ToWorker & { id: number }): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      this.pendingPlace.set(msg.id, resolve);
+      this.post(msg);
+    });
+  }
+
+  /** The cards a loose drag of `cardId` lifts together — grabbed card first, then
+   *  the run the resolver carries (outward run to the first position-held card for
+   *  a stack member; the whole chain for a root). The view copies + dims this set
+   *  on pickup; the same resolver carries it on drop. Resolves `[]` before the
+   *  core boots / for an unknown card. */
+  async carriedRun(cardId: number): Promise<number[]> {
+    await this.ready;
+    const id = this.nextId++;
+    return new Promise<number[]>((resolve) => {
+      this.pendingCarried.set(id, resolve);
+      this.post({ type: "carriedRun", id, cardId });
+    });
   }
 
   /** Upload an edited master texture channel (art editor "save master"). The gate
@@ -308,6 +351,8 @@ export class WasmClient {
   dispose(): void {
     this.worker.terminate();
     this.pending.clear();
+    this.pendingCarried.clear();
+    this.pendingPlace.clear();
     this.eventListeners.clear();
     this.contentChangedListeners.clear();
     this.chatListeners.clear();

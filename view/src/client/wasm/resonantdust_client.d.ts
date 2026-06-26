@@ -18,6 +18,13 @@ export class WasmClient {
      */
     call_stats(): string;
     /**
+     * The card ids a loose drag of `card_id` lifts together (grabbed card first,
+     * then the run a loose drop carries — outward run to the first position-held
+     * card for a member, the whole chain for a root). The view copies + dims this
+     * exact set on pickup; the same resolver carries it on drop. Read-only.
+     */
+    carried_run(card_id: number): Uint32Array;
+    /**
      * The clock-discipline + RTT diagnostics as a JSON object (the view's
      * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
      * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
@@ -42,6 +49,12 @@ export class WasmClient {
      * the container card) and place there (exact snap, no collision avoidance).
      */
     give(owner: number, card_key: string, zone_owner: number, surface: number, world_q: number, world_r: number): void;
+    /**
+     * Whether a pre-fire action debounce is live — the worker re-emits the view
+     * while this holds so the queue progress bar appears/advances (queuing is
+     * client-side and never trips the row-`changed` re-emit gate).
+     */
+    has_pending_debounce(): boolean;
     /**
      * True once the WebSocket handshake completed.
      */
@@ -84,13 +97,18 @@ export class WasmClient {
      * without it the renderer keeps the stale (pre-drop) cell as its tween target
      * and the card glides back to its origin as if the move were rejected, only
      * snapping to the dropped cell on the next pan (a fresh `emitView`).
+     * Returns whether the card actually moved — `true` on a resolved move (the
+     * view awaits this before releasing the drag ghost, so it doesn't tween the
+     * card back to origin before the prediction lands), `false` if the resolver
+     * rejected it (the card stays put → the ghost snaps back).
      */
-    place_loose(card_id: number, surface: number, owner: number, q: number, r: number): void;
+    place_loose(card_id: number, surface: number, owner: number, q: number, r: number): boolean;
     /**
      * Drop a card onto `parent_id`'s stack in `direction` (drop-on-a-card).
-     * Flags `changed` for the same reason as [`Self::place_loose`].
+     * Flags `changed` for the same reason as [`Self::place_loose`]; returns whether
+     * the card moved (see [`Self::place_loose`]).
      */
-    place_stack(card_id: number, parent_id: number, direction: number): void;
+    place_stack(card_id: number, parent_id: number, direction: number): boolean;
     /**
      * The assigned player id, or `-1` before login resolves.
      */
@@ -179,9 +197,11 @@ export interface InitOutput {
     readonly __wbg_wasmclient_free: (a: number, b: number) => void;
     readonly wasmclient_add_content: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmclient_call_stats: (a: number) => [number, number];
+    readonly wasmclient_carried_run: (a: number, b: number) => [number, number];
     readonly wasmclient_clock_stats: (a: number) => [number, number];
     readonly wasmclient_connect: (a: number, b: number, c: number) => [number, number];
     readonly wasmclient_give: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+    readonly wasmclient_has_pending_debounce: (a: number) => number;
     readonly wasmclient_is_open: (a: number) => number;
     readonly wasmclient_load_content: (a: number, b: number, c: number) => [number, number];
     readonly wasmclient_login: (a: number, b: number, c: number) => void;
@@ -189,8 +209,8 @@ export interface InitOutput {
     readonly wasmclient_modify_locale: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmclient_modify_visuals: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmclient_new: () => number;
-    readonly wasmclient_place_loose: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
-    readonly wasmclient_place_stack: (a: number, b: number, c: number, d: number) => void;
+    readonly wasmclient_place_loose: (a: number, b: number, c: number, d: number, e: number, f: number) => number;
+    readonly wasmclient_place_stack: (a: number, b: number, c: number, d: number) => number;
     readonly wasmclient_player_id: (a: number) => number;
     readonly wasmclient_player_soul_id: (a: number) => number;
     readonly wasmclient_pump: (a: number) => number;

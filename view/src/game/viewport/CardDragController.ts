@@ -9,7 +9,7 @@
 //! target surface/owner. Mutually exclusive with pan via `cardAt` (a press on a
 //! card starts a drag; an empty press pans).
 
-import type { Container } from "pixi.js";
+import { Container } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import type { InputManager } from "../input/InputManager";
 import type { ViewportPanel } from "./ViewportPanel";
@@ -20,10 +20,21 @@ import { STACK_DIR_UP } from "../../server/data/packing";
 /** Per-frame easing for the ghost following the cursor (slight lag = "weighty"). */
 const GHOST_EASE = 0.4;
 
+/** Failsafe: how long the drop waits for wasm's place decision before releasing the
+ *  ghost anyway, so a hung/missing worker never strands a dragged card. */
+const PLACE_SETTLE_TIMEOUT_MS = 1000;
+
 interface Drag {
+  /** The grabbed card — the one the drop `place`s (the resolver carries the run). */
   cardId: number;
+  /** The whole pickup set (grabbed first), dimmed in place + copied into the
+   *  ghost. Grows when the core's `carriedRun` reply lands. */
+  ids: number[];
   source: ViewportPanel;
-  ghost: GenericCardFace;
+  /** Holds a {@link GenericCardFace} copy per dragged card, fanned like the stack. */
+  ghost: Container;
+  /** The grabbed card's fan offset — ghost copies sit at `cardFanDy - this`. */
+  grabbedFanDy: number;
 }
 
 export class CardDragController {
@@ -39,7 +50,7 @@ export class CardDragController {
     private readonly overlay: Container,
   ) {
     this.unsubs.push(input.on("left_drag_start", (d) => this.onStart(d.x, d.y, d.hit)));
-    this.unsubs.push(input.on("left_drag_stop", (d) => this.onStop(d.up.x, d.up.y, d.up.hit)));
+    this.unsubs.push(input.on("left_drag_stop", (d) => void this.onStop(d.up.x, d.up.y, d.up.hit)));
   }
 
   /** Per-frame: glide the ghost toward the cursor. Called by the scene. */
@@ -56,52 +67,90 @@ export class CardDragController {
     if (!source) return;
     const cardId = source.cardAt(x, y);
     if (cardId === null) return;
-    const packed = source.cardPacked(cardId);
-    if (packed === null) return;
+    if (source.cardPacked(cardId) === null) return;
 
-    const ghost = new GenericCardFace(this.ctx, 0);
-    ghost.draw(packed);
+    const ghost = new Container();
     ghost.pivot.set(global("card_width") / 2, global("body_height") / 2); // centre on cursor
     ghost.position.set(x, y);
     this.overlay.addChild(ghost);
+
+    const grabbedFanDy = source.cardFanDy(cardId);
+    // Show the grabbed card immediately (instant feedback); the rest of the carried
+    // run joins when the headless core reports the pickup set.
+    this.addGhostFace(ghost, source, cardId, grabbedFanDy);
     source.setCardDragging(cardId, true);
-    this.drag = { cardId, source, ghost };
+    this.drag = { cardId, ids: [cardId], source, ghost, grabbedFanDy };
+
+    // Ask the core which cards a loose drag lifts (grabbed + the run the resolver
+    // carries) and copy + dim the rest. Async (worker round-trip), so guard against
+    // a drag that already ended or was replaced.
+    void this.ctx.client.carriedRun(cardId).then((ids) => {
+      const drag = this.drag;
+      if (!drag || drag.ghost !== ghost) return;
+      for (const id of ids) {
+        if (id === cardId) continue;
+        drag.ids.push(id);
+        drag.source.setCardDragging(id, true);
+        this.addGhostFace(ghost, drag.source, id, drag.grabbedFanDy);
+      }
+    });
   }
 
-  private onStop(x: number, y: number, hit: unknown): void {
+  /** Add a ghost copy of card `id` to the drag ghost, offset so it fans the same
+   *  way it does in the stack (relative to the grabbed card at `baseFanDy`). */
+  private addGhostFace(ghost: Container, source: ViewportPanel, id: number, baseFanDy: number): void {
+    const packed = source.cardPacked(id);
+    if (packed === null) return;
+    const face = new GenericCardFace(this.ctx, id);
+    face.draw(packed);
+    face.position.set(0, source.cardFanDy(id) - baseFanDy);
+    ghost.addChild(face);
+  }
+
+  private async onStop(x: number, y: number, hit: unknown): Promise<void> {
     const drag = this.drag;
     if (!drag) return;
-    this.drag = null;
-    const { cardId, source, ghost } = drag;
+    this.drag = null; // stops `update` easing — the ghost freezes at the drop point
+    const { cardId, ids, source, ghost } = drag;
 
     const target = this.viewports().find((v) => v.ownsHit(hit));
     if (target) {
+      let moved: Promise<boolean>;
       const onCard = target.cardAt(x, y);
       if (onCard !== null && onCard !== cardId) {
         // Dropped on another card → stack onto it (the core resolves direction +
         // validity; a finer drop-direction resolver can refine this later).
-        this.ctx.client.placeStack(cardId, onCard, STACK_DIR_UP);
+        moved = this.ctx.client.placeStack(cardId, onCard, STACK_DIR_UP);
       } else {
+        // Dropped loose → the resolver carries the same set we lifted (shared
+        // `drag_travelers`): the grabbed card + its outward run.
         const cell = target.cellAt(x, y);
-        this.ctx.client.placeLoose(cardId, target.surfaceBand, target.ownerId, cell.q, cell.r);
+        moved = this.ctx.client.placeLoose(cardId, target.surfaceBand, target.ownerId, cell.q, cell.r);
       }
-      // Start the card at the drop point in the target so it tweens from there to
-      // whatever cell the data settles on (no-op if the place is rejected and the
-      // card never lands here).
+      // Wait for wasm to make up its mind (and re-emit the new position) before
+      // releasing the ghost — otherwise the card tweens toward its stale cell while
+      // the prediction is still in flight, flashing "back to start". The ghost stays
+      // frozen at the drop point during the wait; a failsafe timeout guards a hung
+      // worker.
+      await Promise.race([
+        moved,
+        new Promise<boolean>((r) => setTimeout(() => r(false), PLACE_SETTLE_TIMEOUT_MS)),
+      ]);
+      // Start the card at the drop point so it tweens from there to whatever cell the
+      // data settled on (the dropped cell on success, its origin on rejection).
       target.seedDropPosition(cardId, x, y);
     }
-    // Un-dim the source card; the data-driven render takes over (tween to the new
-    // cell on success, back to origin on rejection, wherever on a state change).
-    source.setCardDragging(cardId, false);
-    ghost.destroy();
+    // Un-dim every lifted card; the data-driven render takes over.
+    for (const id of ids) source.setCardDragging(id, false);
+    ghost.destroy({ children: true });
   }
 
   dispose(): void {
     for (const u of this.unsubs) u();
     this.unsubs.length = 0;
     if (this.drag) {
-      this.drag.source.setCardDragging(this.drag.cardId, false);
-      this.drag.ghost.destroy();
+      for (const id of this.drag.ids) this.drag.source.setCardDragging(id, false);
+      this.drag.ghost.destroy({ children: true });
       this.drag = null;
     }
   }

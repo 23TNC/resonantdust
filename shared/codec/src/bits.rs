@@ -36,6 +36,38 @@ pub fn set_field(word: u32, offset: u32, width: u32, value: u32) -> u32 {
   (word & !m) | ((value << offset) & m)
 }
 
+/// Mask covering the low `width` bits of a `u64`. `width == 0` -> 0,
+/// `width >= 64` -> all ones (avoids the `1 << 64` overflow trap).
+#[inline]
+fn mask64(width: u32) -> u64 {
+  if width >= 64 {
+    u64::MAX
+  } else {
+    (1u64 << width) - 1
+  }
+}
+
+/// Extract the `width`-bit field starting at `offset` from a `u64` `word`.
+/// The u64 counterpart of [`get_field`] — for the per-card `stock` word.
+///
+/// `offset + width` must be `<= 64`.
+#[inline]
+pub fn get_field64(word: u64, offset: u32, width: u32) -> u64 {
+  debug_assert!(offset + width <= 64, "field {offset}+{width} exceeds 64 bits");
+  (word >> offset) & mask64(width)
+}
+
+/// Return `word` with the `width`-bit field at `offset` replaced by `value`
+/// (masked to `width` bits). The u64 counterpart of [`set_field`].
+///
+/// `offset + width` must be `<= 64`.
+#[inline]
+pub fn set_field64(word: u64, offset: u32, width: u32, value: u64) -> u64 {
+  debug_assert!(offset + width <= 64, "field {offset}+{width} exceeds 64 bits");
+  let m = mask64(width) << offset;
+  (word & !m) | ((value << offset) & m)
+}
+
 // ---- packed definitions & tile slots ---------------------------------
 //
 // The two `u16` wire layouts the gate / client / modules share (mirrors
@@ -120,5 +152,22 @@ mod tests {
   fn full_width_mask() {
     let w = set_field(0, 0, 32, 0xDEAD_BEEF);
     assert_eq!(get_field(w, 0, 32), 0xDEAD_BEEF);
+  }
+
+  #[test]
+  fn field64_round_trips_high_bits() {
+    // a field straddling the upper half a u32 word can't hold
+    let w = set_field64(0, 40, 16, 0xBEEF);
+    assert_eq!(get_field64(w, 40, 16), 0xBEEF);
+    // independent low field survives
+    let w = set_field64(w, 0, 8, 0xAB);
+    assert_eq!(get_field64(w, 0, 8), 0xAB);
+    assert_eq!(get_field64(w, 40, 16), 0xBEEF);
+  }
+
+  #[test]
+  fn field64_full_width_mask() {
+    let w = set_field64(0, 0, 64, 0xDEAD_BEEF_CAFE_F00D);
+    assert_eq!(get_field64(w, 0, 64), 0xDEAD_BEEF_CAFE_F00D);
   }
 }

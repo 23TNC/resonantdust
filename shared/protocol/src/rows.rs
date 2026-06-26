@@ -60,7 +60,7 @@ pub struct CardRow {
     /// Non-propagating bookkeeping byte (dirty/preserve).
     pub flags_bk: u8,
     /// Per-card stock word.
-    pub stock: u32,
+    pub stock: u64,
 }
 
 impl CardRow {

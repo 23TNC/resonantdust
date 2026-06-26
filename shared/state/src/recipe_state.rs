@@ -26,9 +26,9 @@ pub struct CardView {
   pub macro_zone: u64,
   pub packed_definition: u16,
   pub flags: u32,
-  /// Per-card variable data (the `stock` u32) — decoded per the def's stock
+  /// Per-card variable data (the `stock` u64) — decoded per the def's stock
   /// schema into recipe-readable aspects.
-  pub stock: u32,
+  pub stock: u64,
 }
 
 /// Point-in-time card reads. The gate implements this over its snapshot.

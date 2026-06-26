@@ -44,10 +44,20 @@ pub fn card_flag_field_value_in(field: &str, host: u32, name: &str) -> Option<u3
 }
 
 /// Extract a named multi-bit field's value, routing to whichever host declares
-/// it (`flags` → `flags`, `stock` → `stock`). `None` if unknown.
-pub fn card_flag_field_value_any(flags: u32, stock: u32, name: &str) -> Option<u32> {
+/// it (`flags` → `flags`, `stock` → `stock`). `None` if unknown. `stock` is the
+/// full u64 per-card word, so a field above bit 31 reads correctly.
+pub fn card_flag_field_value_any(flags: u32, stock: u64, name: &str) -> Option<u64> {
   card_flag_field_value_in("flags", flags, name)
-    .or_else(|| card_flag_field_value_in("stock", stock, name))
+    .map(u64::from)
+    .or_else(|| card_flag_field_value_in_stock(stock, name))
+}
+
+/// u64-safe read of a named field from the `stock` host (its layout can run past
+/// bit 31 once lock aspects fold in from `flags`). `None` if `stock` doesn't
+/// declare `name`.
+fn card_flag_field_value_in_stock(stock: u64, name: &str) -> Option<u64> {
+  flag_field("stock", name)
+    .map(|f| resonantdust_codec::bits::get_field64(stock, f.shift as u32, f.width as u32))
 }
 
 /// The `card_type` nibble for a type name (e.g. `"tile"` → 7), or `None`.
@@ -97,9 +107,11 @@ mod tests {
     assert_eq!(card_flag_field_value_in("flags", host, "slot_claim_count"), Some(5));
     assert_eq!(card_flag_field_value_any(host, 0, "slot_claim_count"), Some(5));
     assert_eq!(card_flag_field_value_in("flags", host, "nope"), None);
-    // stock fields route to the stock host.
-    let stock = 3u32 << 2; // stock_1
+    // stock fields route to the stock host (the full u64 word).
+    let stock = 3u64 << 2; // stock_1
     assert_eq!(card_flag_field_value_any(0, stock, "stock_1"), Some(3));
+    // a field high in the u64 reads correctly (no u32 truncation).
+    assert_eq!(card_flag_field_value_any(0, 1u64 << 40, "stock_1"), Some(0));
   }
 
   #[test]

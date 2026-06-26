@@ -10,7 +10,7 @@
 
 use crate::loader::Bundle;
 use crate::parser::{Stmt, Token};
-use crate::vm::{run, Cell, Functions, Store};
+use crate::vm::{run, Cell, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -70,9 +70,12 @@ pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
   // aspects/stock schema even while several versions coexist.
   store.write("def_id", Cell::Sym(format!("card::{}", crate::loader::lineage(&name))));
 
-  // static aspects (type/cost/…) and stock declarations from :data @define
+  // static aspects (type/cost/…) and stock declarations from :data @define.
+  // Threads the bundle's `functions` so a `:data @define` can `$functions::x
+  // call` a shared helper (e.g. the lock-aspect declarations) instead of
+  // repeating it per card.
   if let Some(define) = bundle.card(&name).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) {
-    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &Functions::default());
+    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &bundle.functions);
   }
   // overlay the per-instance stock values (positional, by the schema)
   for (i, (aspect, _bits)) in stock_schema(bundle, &name).iter().enumerate() {
@@ -126,19 +129,18 @@ fn satisfies_closure(bundle: &Bundle, name: &str) -> Vec<String> {
   out
 }
 
-/// Decode a card row's packed `stock` u32 into the positional per-slot values
+/// Decode a card row's packed `stock` u64 into the positional per-slot values
 /// [`stock_schema`] / [`card_view`] expect (one entry per declared `stock`
 /// aspect, in declaration order). Each slot occupies its `bits` width at the
 /// cumulative offset of the slots before it (so the first declared aspect is the
 /// low bits — the zone-savable end). Pass the result as [`Card::stock`] to read a
 /// card's PER-INSTANCE stock aspects in a recipe.
-pub fn stock_to_vec(bundle: &Bundle, card: &str, stock: u32) -> Vec<i64> {
+pub fn stock_to_vec(bundle: &Bundle, card: &str, stock: u64) -> Vec<i64> {
   let mut out = Vec::new();
   let mut shift = 0u32;
   for (_aspect, bits) in stock_schema(bundle, card) {
-    let bits = bits.clamp(0, 32) as u32;
-    let mask = if bits >= 32 { u32::MAX } else { (1u32 << bits) - 1 };
-    out.push(((stock >> shift.min(31)) & mask) as i64);
+    let bits = bits.clamp(0, 64) as u32;
+    out.push(resonantdust_codec::bits::get_field64(stock, shift.min(63), bits) as i64);
     shift += bits;
   }
   out
@@ -152,7 +154,7 @@ pub fn stock_to_vec(bundle: &Bundle, card: &str, stock: u32) -> Vec<i64> {
 pub fn stock_defaults(bundle: &Bundle, card: &str) -> (u8, u8) {
   let mut store = Store::default();
   if let Some(define) = bundle.card(card).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) {
-    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &Functions::default());
+    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &bundle.functions);
   }
   let schema = stock_schema(bundle, card);
   let read = |i: usize| -> u8 {
@@ -166,28 +168,28 @@ pub fn stock_defaults(bundle: &Bundle, card: &str) -> (u8, u8) {
   (read(0), read(1))
 }
 
-/// The card's full default `stock` u32: each stock slot's `@define` default
+/// The card's full default `stock` u64: each stock slot's `@define` default
 /// value (`<v> &aspect.<name> set` after the `stock` declaration, else 0) packed
 /// at its cumulative bit offset. This is what a freshly-spawned card's `stock`
 /// row field is seeded to (the gate injects it at create time; the shard is
 /// content-agnostic). [`stock_defaults`] is the legacy u4×2 zone view of the same
-/// thing; this is the whole u32.
-pub fn stock_default_u32(bundle: &Bundle, card: &str) -> u32 {
+/// thing; this is the whole u64.
+pub fn stock_default_u64(bundle: &Bundle, card: &str) -> u64 {
   let mut store = Store::default();
   if let Some(define) = bundle.card(card).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) {
-    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &Functions::default());
+    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &bundle.functions);
   }
-  let mut out = 0u32;
+  let mut out = 0u64;
   let mut shift = 0u32;
   for (aspect, bits) in stock_schema(bundle, card) {
-    let width = bits.clamp(0, 32) as u32;
-    let cap: u32 = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+    let width = bits.clamp(0, 64) as u32;
+    let cap: u64 = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
     let val = store
       .read(&format!("aspect.{aspect}"))
       .map(Cell::as_int)
       .unwrap_or(0)
-      .clamp(0, cap as i64) as u32;
-    out |= (val & cap) << shift.min(31);
+      .clamp(0, cap as i64) as u64;
+    out = resonantdust_codec::bits::set_field64(out, shift.min(63), width, val);
     shift += width;
   }
   out
@@ -213,12 +215,12 @@ pub fn stock_slot_for_aspect(bundle: &Bundle, card: &str, op_aspect: &str) -> Op
 /// The `(shift, width)` of the stock-slot on `card` that a stock op on
 /// `op_aspect` targets (same sub-aspect widening as [`stock_slot_for_aspect`]).
 /// `shift` is the cumulative bit offset of the slots before it. Lets a caller
-/// read/replace just that slot's bits in a card's `stock` u32. `None` if the
+/// read/replace just that slot's bits in a card's `stock` u64. `None` if the
 /// card declares no matching stock slot.
 pub fn stock_slot_bits(bundle: &Bundle, card: &str, op_aspect: &str) -> Option<(u32, u32)> {
   let mut shift = 0u32;
   for (aspect, bits) in stock_schema(bundle, card) {
-    let width = bits.clamp(0, 32) as u32;
+    let width = bits.clamp(0, 64) as u32;
     if aspect == op_aspect || satisfies_closure(bundle, &aspect).iter().any(|a| a == op_aspect) {
       return Some((shift, width));
     }
@@ -238,29 +240,29 @@ pub fn operating_set(bundle: &Bundle, placed: &[(&str, &Card)]) -> Store {
   s
 }
 
-/// Pack a card's stock values into one `u32`, each in its schema-declared bit
+/// Pack a card's stock values into one `u64`, each in its schema-declared bit
 /// width, laid out consecutively from bit 0. The schema is fixed per definition,
-/// so the layout is stable. (Current content fits 32 bits — desert's 5×2 = 10;
-/// wider sets would need a second word.)
-pub fn pack_stock(schema: &[(String, i64)], values: &[i64]) -> u32 {
-  let mut word = 0u32;
+/// so the layout is stable. (A u64 holds up to 32 u2 slots — desert's 5×2 = 10
+/// — with headroom for the lock aspects folded in from `flags`.)
+pub fn pack_stock(schema: &[(String, i64)], values: &[i64]) -> u64 {
+  let mut word = 0u64;
   let mut off = 0u32;
   for (i, (_, bits)) in schema.iter().enumerate() {
     let w = *bits as u32;
-    let v = values.get(i).copied().unwrap_or(0) as u32;
-    word = resonantdust_codec::bits::set_field(word, off, w, v);
+    let v = values.get(i).copied().unwrap_or(0) as u64;
+    word = resonantdust_codec::bits::set_field64(word, off, w, v);
     off += w;
   }
   word
 }
 
 /// Inverse of [`pack_stock`] — read each stock value back by its schema width.
-pub fn unpack_stock(schema: &[(String, i64)], word: u32) -> Vec<i64> {
+pub fn unpack_stock(schema: &[(String, i64)], word: u64) -> Vec<i64> {
   let mut out = Vec::with_capacity(schema.len());
   let mut off = 0u32;
   for (_, bits) in schema {
     let w = *bits as u32;
-    out.push(resonantdust_codec::bits::get_field(word, off, w) as i64);
+    out.push(resonantdust_codec::bits::get_field64(word, off, w) as i64);
     off += w;
   }
   out
@@ -289,6 +291,31 @@ mod tests {
   fn stock_schema_lists_stock_aspects_in_order() {
     let b = bundle();
     assert_eq!(stock_schema(&b, "grove"), vec![("pine".to_string(), 2), ("ash".to_string(), 2)]);
+  }
+
+  #[test]
+  fn data_define_can_call_shared_function() {
+    // A shared `<functions>` def declares the lock aspects once; a card's
+    // `:data @define` calls it instead of repeating the `set`s per card.
+    let aspects = "<aspect>\n\
+      \x20 ::type>\n    @define>\n      traits &section set\n\
+      \x20 ::slot_hold>\n    @define>\n      aspects &section set\n\
+      \x20 ::position_hold>\n    @define>\n      aspects &section set\n";
+    let funcs = "<functions>\n  ::lockable>\n    1 &aspect.slot_hold set\n    1 &aspect.position_hold set\n    0 ret\n";
+    let cards = "<card>\n  ::widget>\n    :data>\n      @define>\n        tile &aspect.type set\n        $functions::lockable call drop\n";
+    let b = load(&[
+      ("a.rd".into(), aspects.into()),
+      ("f.rd".into(), funcs.into()),
+      ("c.rd".into(), cards.into()),
+    ])
+    .expect("load");
+
+    let card = Card { def_id: b.card_def_id("widget").unwrap(), stock: vec![] };
+    let v = Store::with_root(card_view(&b, &card));
+    // the shared function's writes land in the card's static aspects
+    assert_eq!(v.read("aspect.slot_hold"), Some(&Cell::Int(1)));
+    assert_eq!(v.read("aspect.position_hold"), Some(&Cell::Int(1)));
+    assert_eq!(v.read("aspect.type"), Some(&Cell::Sym("tile".into())));
   }
 
   #[test]
@@ -432,16 +459,16 @@ mod tests {
   }
 
   #[test]
-  fn stock_default_u32_packs_define_defaults() {
+  fn stock_default_u64_packs_define_defaults() {
     // grove (pine 2b, ash 2b) sets no defaults → 0.
     let b = bundle();
-    assert_eq!(stock_default_u32(&b, "grove"), 0);
+    assert_eq!(stock_default_u64(&b, "grove"), 0);
 
     // `w`: slot a (2b, default 3) then slot b (3b, default 5), packed in order.
     let aspects = "<aspect>\n  ::a>\n    @define>\n      aspects &section set\n  ::b>\n    @define>\n      aspects &section set\n";
     let cards = "<card>\n  ::w>\n    :data>\n      @define>\n        2 &aspect.a stock\n        3 &aspect.a set\n        3 &aspect.b stock\n        5 &aspect.b set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).unwrap();
     // a=3 at shift 0 (2b), b=5 at shift 2 (3b) → 3 | (5<<2) = 23.
-    assert_eq!(stock_default_u32(&b, "w"), 0b1_0111);
+    assert_eq!(stock_default_u64(&b, "w"), 0b1_0111);
   }
 }

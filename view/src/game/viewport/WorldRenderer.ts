@@ -106,7 +106,7 @@ interface CardSpec {
   offsetX: number;
   offsetY: number;
   packed: number;
-  stock: number;
+  stock: string;
   flags: number;
   sig: string;
 }
@@ -250,6 +250,13 @@ export class WorldRenderer extends LayoutNode {
   private readonly cardQueue: number[] = [];
   private readonly queuedTiles = new Set<string>();
   private readonly queuedCards = new Set<number>();
+  /** Live progress-bar windows per card, refreshed each batch and interpolated
+   *  with the local clock between batches (see {@link fillFraction}). `pt/pr` =
+   *  build window, `qt/qr` = queue window, `at` = `performance.now()` at receipt. */
+  private readonly progressTimings = new Map<
+    number,
+    { pt: number; pr: number; qt: number; qr: number; at: number }
+  >();
   private animating = false;
   /** Monotonic id source for tile ground entries in the rect composite's index. */
   private nextPrimId = 1;
@@ -300,8 +307,8 @@ export class WorldRenderer extends LayoutNode {
       whiteTexture: atlasWhite(gctx.textures, gctx.app.renderer),
       hexTexture: atlasHex(gctx.textures, gctx.app.renderer),
       seed: 0,
-      progress: () => -1,
-      queue: () => -1,
+      progress: (target) => this.fillFraction(target, false),
+      queue: (target) => this.fillFraction(target, true),
     };
 
     // Cursor light: project the global pointer into this panel's local px (the space
@@ -507,9 +514,20 @@ export class WorldRenderer extends LayoutNode {
     return this.desiredCards.get(id)?.packed ?? null;
   }
 
+  /** The y-offset (px) the DSL fan applies to card `id`'s face (0 if loose or not
+   *  rendered here) — mirrors `cardAt`'s hit-test fan (`units * dir * th`). Lets a
+   *  drag ghost copy sit at the same relative offset as the stack member. */
+  cardFanDy(id: number): number {
+    const spec = this.desiredCards.get(id);
+    if (!spec) return 0;
+    const { dir, index } = stackFan(spec.flags);
+    const units = dir > 0 ? index - 1 : index;
+    return units * dir * global("title_height");
+  }
+
   /** Full display info for a known card — packed def, absolute world hex,
    *  and the raw stock/flags words — or null. Feeds the details panel. */
-  cardInfo(id: number): { packed: number; q: number; r: number; stock: number; flags: number } | null {
+  cardInfo(id: number): { packed: number; q: number; r: number; stock: string; flags: number } | null {
     const s = this.desiredCards.get(id);
     if (!s) return null;
     return { packed: s.packed, q: s.q, r: s.r, stock: s.stock, flags: s.flags };
@@ -609,6 +627,20 @@ export class WorldRenderer extends LayoutNode {
         }
       } else {
         this.presentCards.add(item.cardId);
+        // Refresh this card's progress windows (stamped with the local clock so
+        // the bar interpolates between batches). An active window keeps the settle
+        // loop alive — a queue bar appears without a content rebuild, so it would
+        // otherwise never animate.
+        const pt = item.pTotalMs ?? 0;
+        const qt = item.qTotalMs ?? 0;
+        if (pt > 0 || qt > 0) {
+          this.progressTimings.set(item.cardId, {
+            pt, pr: item.pRemainingMs ?? 0, qt, qr: item.qRemainingMs ?? 0, at: performance.now(),
+          });
+          this.animating = true;
+        } else {
+          this.progressTimings.delete(item.cardId);
+        }
         const sig = cardContentSig(item);
         const node = this.cards.get(item.cardId);
         // Always refresh the desired spec — its `(q, r)` is the tween TARGET the
@@ -646,6 +678,7 @@ export class WorldRenderer extends LayoutNode {
       node.node.destroy({ children: true });
       this.cards.delete(id);
       this.desiredCards.delete(id);
+      this.progressTimings.delete(id);
     }
   }
 
@@ -783,6 +816,14 @@ export class WorldRenderer extends LayoutNode {
     this.groundShader.normal = nrm;
     const lm = this.albedo.lightmapTexture;
     if (lm) this.groundShader.lightmap = lm;
+    // Per-rect cold lights for the hot prims (cards evaluate cold on their OWN normal — see
+    // RectComposite.coldDataTexture). Rebound each frame; the grid maps vUV → rect.
+    const cdt = this.albedo.coldDataTexture;
+    if (cdt) this.groundShader.coldData = cdt;
+    const cct = this.albedo.coldColorTexture;
+    if (cct) this.groundShader.coldColor = cct;
+    const cg = this.albedo.coldGrid;
+    this.groundShader.setColdGrid(cg[0], cg[1], cg[2], cg[3]);
     // Hot prims (movers/cards): the display shader lights this per-frame G-buffer and
     // composites it over the lit ground, so the cards are deferred-lit (not the raw
     // `cardLayer` draw, which is retired). Same two maps `bakeHotPrims` writes.
@@ -862,7 +903,7 @@ export class WorldRenderer extends LayoutNode {
     this.albedo.setColdLights([
       { x: anchorWorldX, y: anchorWorldY, height: H, radius: 380, color: 0xffa64d, brightness: 2.2 },
       { x: anchorWorldX + 260, y: anchorWorldY + 140, height: H, radius: 380, color: 0x5aa0ff, brightness: 2.0 },
-    ], 0.22);
+    ], 0.12);
   }
 
   /** Pack the hot lights into the ground shader (panel px). The cursor light (screen)
@@ -998,6 +1039,20 @@ export class WorldRenderer extends LayoutNode {
     this.albedo.setTilePrims(node.primId, [node.bg, ...node.prims.litSprites()]);
   }
 
+  /** Live progress fraction for a tracked card, interpolated from the last
+   *  mirrored window with the local clock so the bar advances smoothly between
+   *  worker batches. `queue` selects the pre-fire debounce window (`source = 1`)
+   *  over the build window (`source = 0`). Returns `< 0` when there's no active
+   *  window, so the prim hides. */
+  private fillFraction(cardId: number, queue: boolean): number {
+    const t = this.progressTimings.get(cardId);
+    if (!t) return -1;
+    const total = queue ? t.qt : t.pt;
+    if (total <= 0) return -1;
+    const remaining = (queue ? t.qr : t.pr) - (performance.now() - t.at);
+    return Math.max(0, Math.min(1, 1 - remaining / total));
+  }
+
   private buildCard(id: number, spec: CardSpec): void {
     const center = this.grid.cellToPixel(spec.q, spec.r);
     const def = this.gctx.definitions.decode(spec.packed);
@@ -1025,7 +1080,11 @@ export class WorldRenderer extends LayoutNode {
       selected: id === this.selectedCardId ? 1 : 0,
       pending: 0,
       dragging: 0,
-      progress: [],
+      // Self-handle: `*d.progress.0.id` resolves to this card's id, which the
+      // progress prim passes back as `target`; the live fraction comes from the
+      // mirrored timing window (see `fillFraction`), not from this record. A bar
+      // tracking another row would carry that row's id here instead.
+      progress: [{ id }],
     };
     const prims = drawVisuals(spec.packed, { card_data: host }, "init");
 

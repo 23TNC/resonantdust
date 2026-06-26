@@ -127,29 +127,29 @@ pub fn state_mask() -> u32 {
     layout().state_mask
 }
 
-/// The `stock` column is a full `u32` of per-card variable data — pack it however
-/// you like (16 u2s, 4 u8s, a u8 progress counter + flags, …). Nothing is special
-/// about any bits EXCEPT this: only the **bottom 4 bits** (`STOCK_ZONE_SAVE_BITS`,
-/// the two legacy u2 slots) can be persisted back into a zone tile slot — a zone
-/// tile only stores a u4. The upper 28 bits are card-only (transient unless the
-/// card itself persists). [`stock`] / [`write_stock`] access the two u2 zone-saved
-/// slots; read/write the upper bits with your own masks.
-pub fn stock(stock: u32, slot: usize) -> u8 {
+/// The `stock` column is a full `u64` of per-card variable data — pack it however
+/// you like (32 u2s, 8 u8s, a u8 progress counter + lock aspects, …). Nothing is
+/// special about any bits EXCEPT this: only the **bottom 4 bits**
+/// (`STOCK_ZONE_SAVE_BITS`, the two legacy u2 slots) can be persisted back into a
+/// zone tile slot — a zone tile only stores a u4. The upper 60 bits are card-only
+/// (transient unless the card itself persists). [`stock`] / [`write_stock`] access
+/// the two u2 zone-saved slots; read/write the upper bits with your own masks.
+pub fn stock(stock: u64, slot: usize) -> u8 {
     let f = stock_field(slot);
-    ((stock & f.mask) >> f.shift) as u8
+    ((stock & f.mask as u64) >> f.shift) as u8
 }
 
 /// Write zone-savable stock `slot` (0 or 1, the bottom u4) into the `stock` word,
 /// returning the new word (value clamped to the 2-bit field width; all other bits
 /// preserved).
-pub fn write_stock(stock: u32, slot: usize, value: u8) -> u32 {
+pub fn write_stock(stock: u64, slot: usize, value: u8) -> u64 {
     let f = stock_field(slot);
-    (stock & !f.mask) | ((value as u32).min(f.max) << f.shift)
+    (stock & !(f.mask as u64)) | (((value as u64).min(f.max as u64)) << f.shift)
 }
 
 /// Mask of the stock bits that can be saved back to a zone tile slot (the bottom
-/// u4 — a zone tile only persists a u4). The upper 28 bits are card-only.
-pub const STOCK_ZONE_SAVE_MASK: u32 = 0x0000_000F;
+/// u4 — a zone tile only persists a u4). The upper 60 bits are card-only.
+pub const STOCK_ZONE_SAVE_MASK: u64 = 0x0000_0000_0000_000F;
 
 /// True when any refcount hold field (`touch_count`, `server_count`,
 /// `slot_claim_count`, `slot_borrow_count`, `drop_hold_count`,

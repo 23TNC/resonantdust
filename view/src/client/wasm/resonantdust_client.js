@@ -45,6 +45,20 @@ export class WasmClient {
         }
     }
     /**
+     * The card ids a loose drag of `card_id` lifts together (grabbed card first,
+     * then the run a loose drop carries — outward run to the first position-held
+     * card for a member, the whole chain for a root). The view copies + dims this
+     * exact set on pickup; the same resolver carries it on drop. Read-only.
+     * @param {number} card_id
+     * @returns {Uint32Array}
+     */
+    carried_run(card_id) {
+        const ret = wasm.wasmclient_carried_run(this.__wbg_ptr, card_id);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * The clock-discipline + RTT diagnostics as a JSON object (the view's
      * `SyncStats` shape, camelCase) for the debug HUD's "sync" tab. The view
      * adds the `Date.now()`-relative fields itself. Cheap — call each pump.
@@ -98,6 +112,16 @@ export class WasmClient {
         const ptr0 = passStringToWasm0(card_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmclient_give(this.__wbg_ptr, owner, ptr0, len0, zone_owner, surface, world_q, world_r);
+    }
+    /**
+     * Whether a pre-fire action debounce is live — the worker re-emits the view
+     * while this holds so the queue progress bar appears/advances (queuing is
+     * client-side and never trips the row-`changed` re-emit gate).
+     * @returns {boolean}
+     */
+    has_pending_debounce() {
+        const ret = wasm.wasmclient_has_pending_debounce(this.__wbg_ptr);
+        return ret !== 0;
     }
     /**
      * True once the WebSocket handshake completed.
@@ -187,24 +211,33 @@ export class WasmClient {
      * without it the renderer keeps the stale (pre-drop) cell as its tween target
      * and the card glides back to its origin as if the move were rejected, only
      * snapping to the dropped cell on the next pan (a fresh `emitView`).
+     * Returns whether the card actually moved — `true` on a resolved move (the
+     * view awaits this before releasing the drag ghost, so it doesn't tween the
+     * card back to origin before the prediction lands), `false` if the resolver
+     * rejected it (the card stays put → the ghost snaps back).
      * @param {number} card_id
      * @param {number} surface
      * @param {number} owner
      * @param {number} q
      * @param {number} r
+     * @returns {boolean}
      */
     place_loose(card_id, surface, owner, q, r) {
-        wasm.wasmclient_place_loose(this.__wbg_ptr, card_id, surface, owner, q, r);
+        const ret = wasm.wasmclient_place_loose(this.__wbg_ptr, card_id, surface, owner, q, r);
+        return ret !== 0;
     }
     /**
      * Drop a card onto `parent_id`'s stack in `direction` (drop-on-a-card).
-     * Flags `changed` for the same reason as [`Self::place_loose`].
+     * Flags `changed` for the same reason as [`Self::place_loose`]; returns whether
+     * the card moved (see [`Self::place_loose`]).
      * @param {number} card_id
      * @param {number} parent_id
      * @param {number} direction
+     * @returns {boolean}
      */
     place_stack(card_id, parent_id, direction) {
-        wasm.wasmclient_place_stack(this.__wbg_ptr, card_id, parent_id, direction);
+        const ret = wasm.wasmclient_place_stack(this.__wbg_ptr, card_id, parent_id, direction);
+        return ret !== 0;
     }
     /**
      * The assigned player id, or `-1` before login resolves.
@@ -490,6 +523,11 @@ const CLOSURE_DTORS = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(state => wasm.__wbindgen_destroy_closure(state.a, state.b));
 
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -497,6 +535,14 @@ function getArrayU8FromWasm0(ptr, len) {
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -621,6 +667,7 @@ function __wbg_finalize_init(instance, module) {
     wasmInstance = instance;
     wasm = instance.exports;
     wasmModule = module;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

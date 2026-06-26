@@ -135,9 +135,16 @@ export class ViewportPanel extends PixiPanel {
     return this.world.cardPacked(id);
   }
 
+  /** The y-offset (px) the stack fan applies to card `id`'s face (0 if loose or
+   *  not rendered here) — lets a drag ghost copy sit at the same relative position
+   *  as the stack member it mirrors. */
+  cardFanDy(id: number): number {
+    return this.world.cardFanDy(id);
+  }
+
   /** Full display info for a known card — packed def, world hex, stock/flags —
    *  or null. Feeds the details panel. */
-  cardInfo(id: number): { packed: number; q: number; r: number; stock: number; flags: number } | null {
+  cardInfo(id: number): { packed: number; q: number; r: number; stock: string; flags: number } | null {
     return this.world.cardInfo(id);
   }
 

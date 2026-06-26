@@ -44,8 +44,9 @@ export interface PrimDeps {
   progress?: (target: number) => number;
   /** Live fill fraction for a `progress` primitive with `source = 1`: the action
    *  QUEUE/debounce countdown before a recipe is proposed (0..1, or `< 0` when no
-   *  queue is active → the bar hides). Same per-frame engine fill as `progress`. */
-  queue?: () => number;
+   *  queue is active → the bar hides). `target` is the queued card (its root) —
+   *  set from `*d.progress.<i>.id` like the build bar. Same per-frame engine fill. */
+  queue?: (target: number) => number;
 }
 
 /** A reconciled, retained primitive: owns one Pixi node + its current/target
@@ -352,7 +353,7 @@ export class ProgressPrim extends BasePrim {
     const c = this.cur;
     // Live fraction from the engine: a progress row's timing (default) or the
     // action queue/debounce countdown (`source = 1`).
-    this.frac = this.source === 1 ? (this.deps.queue?.() ?? -1) : (this.deps.progress?.(this.target) ?? -1);
+    this.frac = this.source === 1 ? (this.deps.queue?.(this.target) ?? -1) : (this.deps.progress?.(this.target) ?? -1);
     if (this.frac < 0) {
       this.node.visible = false;
       return;

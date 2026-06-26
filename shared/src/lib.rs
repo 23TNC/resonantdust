@@ -439,7 +439,7 @@ pub fn card_flag_field_value_in(field: &str, host: u32, name: &str) -> Option<u3
 
 #[cfg(feature = "js")]
 #[wasm_bindgen(js_name = cardFlagFieldValueAny)]
-pub fn card_flag_field_value_any(flags: u32, stock: u32, name: &str) -> Option<u32> {
+pub fn card_flag_field_value_any(flags: u32, stock: u64, name: &str) -> Option<u64> {
     resonantdust_dsl::inspect::card_flag_field_value_any(flags, stock, name)
 }
 

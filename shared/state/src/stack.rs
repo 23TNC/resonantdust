@@ -114,11 +114,11 @@ pub fn plan_place<S: StackStore>(
     let source_micro = Micro::of(source.micro_location, source.flags);
     let carrying =
         matches!(source_micro, Micro::Stacked { .. }) && matches!(placement, Placement::Loose { .. });
-    let travelers = if carrying {
-        carried_run(store, &source, now_ms)
-    } else {
-        store.members_of(card_id, now_ms)
-    };
+    // Both LOOSE and STACK moves carry the same set the drag pickup ghosts
+    // ([`drag_travelers`] / [`drag_carry_set`]) — the source's outward run if it's a
+    // member, its full chain if it's a root. The single-branch join gate in
+    // `resolve_stack` guarantees a STACK joiner's run is one branch.
+    let travelers = drag_travelers(store, &source, now_ms);
     for m in &travelers {
         held_check(m, "descendant")?;
     }
@@ -145,58 +145,76 @@ pub fn plan_place<S: StackStore>(
     };
 
     // ── build the write plan ────────────────────────────────────────────
-    let mut writes = match resolved {
-        // Normal: the source (and its travelers) move to the resolved address.
+    // Whichever chain JOINS the other carries its single-branch run onto the host,
+    // re-indexed contiguously above its new slot, and splices the chain it left.
+    // `moved` is the joiner + its run (the cards that departed a chain) — the splice
+    // set, a no-op when the joiner was a root that took all its members.
+    let mut writes = Vec::with_capacity(2 + travelers.len());
+    let moved: Vec<u32> = match resolved {
         Resolved::Place { surface, macro_zone, micro } => {
             let full_macro = with_surface(macro_zone, surface);
-            let mut writes = Vec::with_capacity(1 + travelers.len());
             writes.push(Write { card_id, macro_zone: full_macro, micro });
-            if carrying {
-                // Drag-carry: the run re-roots onto the source (now a loose root),
-                // keeping its branch, re-indexed contiguous from 0 in run order.
-                for (k, m) in travelers.iter().enumerate() {
-                    writes.push(Write {
-                        card_id: m.card_id,
-                        macro_zone: full_macro,
-                        micro: Micro::Stacked { root: card_id, branch: stack_branch(m.flags), index: k as u8 },
-                    });
+            match micro {
+                // Loose drop: the source is the (loose) root of where it lands.
+                Micro::Loose { .. } => {
+                    if carrying {
+                        // A member lifted loose: its outward run re-roots onto the
+                        // source (now a loose root), keeping branch, re-indexed from 0.
+                        for (k, m) in travelers.iter().enumerate() {
+                            writes.push(Write {
+                                card_id: m.card_id,
+                                macro_zone: full_macro,
+                                micro: Micro::Stacked { root: card_id, branch: stack_branch(m.flags), index: k as u8 },
+                            });
+                        }
+                    } else {
+                        // A root moved loose: members travel unchanged (source stays
+                        // their root), only their macro_zone follows.
+                        for m in &travelers {
+                            writes.push(Write {
+                                card_id: m.card_id,
+                                macro_zone: full_macro,
+                                micro: Micro::of(m.micro_location, m.flags),
+                            });
+                        }
+                    }
                 }
-            } else {
-                for m in &travelers {
-                    // Stack move: members re-root onto the source's new root (keeping
-                    // their own branch/index). Loose move: source stays root, members
-                    // just travel.
-                    let m_micro = Micro::of(m.micro_location, m.flags);
-                    let new_micro = match micro {
-                        Micro::Stacked { root: new_root, .. } => match m_micro {
-                            Micro::Stacked { branch, index, .. } => Micro::Stacked { root: new_root, branch, index },
-                            loose => loose,
-                        },
-                        Micro::Loose { .. } => m_micro,
-                    };
-                    writes.push(Write { card_id: m.card_id, macro_zone: full_macro, micro: new_micro });
+                // Forward stack JOIN: the source joins the host; its single-branch run
+                // re-roots onto the host, re-indexed contiguously ABOVE the join slot.
+                Micro::Stacked { root: host_root, branch, index } => {
+                    for (k, m) in travelers.iter().enumerate() {
+                        writes.push(Write {
+                            card_id: m.card_id,
+                            macro_zone: full_macro,
+                            micro: Micro::Stacked { root: host_root, branch, index: index + 1 + k as u8 },
+                        });
+                    }
                 }
             }
-            writes
+            std::iter::once(card_id).chain(travelers.iter().map(|m| m.card_id)).collect()
         }
-        // Invert: the drop re-rooted the PARENT onto the (stationary) source — see
-        // [`resolve_stack`]. Only the parent moves; the source and its members stay
-        // put. The parent is a lone card (guaranteed by resolve_stack), so it has
-        // no members of its own to carry.
+        // Invert: the PARENT joins the (stationary) source's chain at `micro`
+        // (root = source). It carries its own single-branch run above its new slot —
+        // the gate guaranteed ≤1 branch — and splices the chain it left.
         Resolved::Invert { parent_id, macro_zone, micro } => {
-            vec![Write { card_id: parent_id, macro_zone, micro }]
+            writes.push(Write { card_id: parent_id, macro_zone, micro });
+            let parent_run = store.members_of(parent_id, now_ms);
+            if let Micro::Stacked { root: host_root, branch, index } = micro {
+                for (k, m) in parent_run.iter().enumerate() {
+                    writes.push(Write {
+                        card_id: m.card_id,
+                        macro_zone,
+                        micro: Micro::Stacked { root: host_root, branch, index: index + 1 + k as u8 },
+                    });
+                }
+            }
+            std::iter::once(parent_id).chain(parent_run.iter().map(|m| m.card_id)).collect()
         }
     };
 
-    // After a drag-carry, the chain the run left closes its gap: the survivors
-    // (the position-held terminator and everything above it) collapse to contiguous
-    // indices on the old root (Stage-2 splice over the departed cards).
-    if carrying {
-        let mut moved: Vec<u32> = Vec::with_capacity(1 + travelers.len());
-        moved.push(card_id);
-        moved.extend(travelers.iter().map(|m| m.card_id));
-        writes.extend(plan_splice(store, &moved, now_ms));
-    }
+    // Close the gap(s) the joiner left in its old chain (Stage-2 splice). No-op when
+    // the joiner was a root that carried all its members (nothing survives to collapse).
+    writes.extend(plan_splice(store, &moved, now_ms));
     Ok(Plan { writes })
 }
 
@@ -285,6 +303,56 @@ fn carried_run<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<
         expected += 1;
     }
     run
+}
+
+/// The cards a LOOSE move/drag of `source` carries **beyond itself**: its outward
+/// run (up to the first position-held card) if it's a stack member, else its whole
+/// chain if it's a loose root. The single source of truth shared by [`plan_place`]'s
+/// loose branch and [`drag_carry_set`], so the view's drag pickup ghosts EXACTLY
+/// the set the move will carry.
+fn drag_travelers<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<CardView> {
+    match Micro::of(source.micro_location, source.flags) {
+        Micro::Stacked { .. } => carried_run(store, source, now_ms),
+        Micro::Loose { .. } => store.members_of(source.card_id, now_ms),
+    }
+}
+
+/// The full set of card ids a loose drag of `card_id` lifts — the card itself plus
+/// [`drag_travelers`]. The headless client exposes this so the (dumb) view copies +
+/// dims exactly these cards on pickup; `plan_place`'s loose move carries the same
+/// set, so the visual selection always matches the data move. Empty if the card is
+/// missing. `card_id` is always first.
+pub fn drag_carry_set<S: StackStore>(store: &S, card_id: u32, now_ms: u64) -> Vec<u32> {
+    let Some(source) = store.card_at(card_id, now_ms) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::with_capacity(4);
+    ids.push(card_id);
+    ids.extend(drag_travelers(store, &source, now_ms).into_iter().map(|m| m.card_id));
+    ids
+}
+
+/// How many distinct stacks a chain root HOSTS members in — the join gate's core.
+/// A card may become a member of another (JOIN) only when this is `<= 1`: a member
+/// extends a single direction, so a root hosting members in more than one stack
+/// (e.g. hex + top) can't linearize into one slot and must invert instead. Counts
+/// the distinct `stack_branch` of its live `members_of`, PLUS the hex branch when
+/// the root sits on a tile (the tile is a synthetic member of the root's HEX stack —
+/// the root hosts it). A stacked member hosts nothing → 0.
+fn occupied_branches<S: StackStore>(store: &S, root: &CardView, now_ms: u64) -> usize {
+    use std::collections::BTreeSet;
+    let mut branches: BTreeSet<u8> = store
+        .members_of(root.card_id, now_ms)
+        .into_iter()
+        .filter(|m| !is_dead(m.flags))
+        .map(|m| stack_branch(m.flags))
+        .collect();
+    if let Micro::Loose { local_q, local_r, .. } = Micro::of(root.micro_location, root.flags) {
+        if store.tile_at(root.macro_zone, local_q, local_r, now_ms).is_some() {
+            branches.insert(STACK_HEX - 1); // the tile occupies the root's hex stack
+        }
+    }
+    branches.len()
 }
 
 /// The **destroy** side of [`plan_place`]'s member re-root: compute the writes to
@@ -521,6 +589,14 @@ fn resolve_stack<S: StackStore>(
             "place: stacking would form a cycle (source {source_id} is the root of parent {parent_id}'s chain)"
         ));
     }
+    // Reject re-dropping a card into a chain it's ALREADY a member of: dropping a
+    // stack member back onto its own root (or a sibling in the same chain) would
+    // otherwise re-stack it onto itself. Rearranging within a stack isn't a place —
+    // lift the card out loose first.
+    let source_root = chain_root_of(source);
+    if source_root != source_id && source_root == parent_root {
+        return Err(format!("place: card {source_id} is already part of {parent_id}'s stack"));
+    }
     let chain_player = owning_player(store, parent_root, now_ms).unwrap_or(WORLD_PLAYER_ID);
     if chain_player != WORLD_PLAYER_ID && chain_player != caller_player_id {
         return Err(format!(
@@ -532,20 +608,26 @@ fn resolve_stack<S: StackStore>(
     let parent_bits = bits(parent.packed_definition);
 
     if parent_root == parent_id {
-        // Parent is a root: leaf-aware branch scan over its chain (`branch =
-        // stack_id - 1`; members carry `micro_location = root`).
-        if let Some((stack, index)) =
-            open_stack(store, parent_id, parent.macro_zone, parent_bits, source_bits, direction, now_ms, bits)
-        {
-            return Ok(Resolved::Place {
-                surface: surface_of(parent.macro_zone),
-                macro_zone: parent.macro_zone,
-                micro: Micro::Stacked { root: parent_id, branch: stack - 1, index },
-            });
+        // Forward — the source joins the parent's chain. Gate: the source may only
+        // become a member if it hosts members in ≤1 stack (a member extends one
+        // direction); a multi-branch source falls through to the invert. Leaf-aware
+        // branch scan (`branch = stack_id - 1`; members carry `micro_location = root`).
+        if occupied_branches(store, source, now_ms) <= 1 {
+            if let Some((stack, index)) =
+                open_stack(store, parent_id, parent.macro_zone, parent_bits, source_bits, direction, now_ms, bits)
+            {
+                return Ok(Resolved::Place {
+                    surface: surface_of(parent.macro_zone),
+                    macro_zone: parent.macro_zone,
+                    micro: Micro::Stacked { root: parent_id, branch: stack - 1, index },
+                });
+            }
         }
-        // Invert: the parent (a lone root) re-roots onto the source, which must
-        // itself be a root to become the combined chain's root.
-        if store.members_of(parent_id, now_ms).is_empty() && chain_root_of(source) == source_id {
+        // Invert: the parent re-roots onto the source. Symmetric gate — the parent
+        // (now the joiner) must host members in ≤1 stack so it can linearize onto
+        // the source, which must itself be a root to become the combined chain's
+        // root. The parent carries its single-branch run (see `plan_place`).
+        if occupied_branches(store, &parent, now_ms) <= 1 && chain_root_of(source) == source_id {
             if let Some((stack, index)) =
                 open_stack(store, source_id, source.macro_zone, source_bits, parent_bits, direction, now_ms, bits)
             {
@@ -556,17 +638,19 @@ fn resolve_stack<S: StackStore>(
                 });
             }
         }
-    } else if let Some(stack) = match_stack(parent_bits, source_bits, direction) {
-        // Parent is a member: target that card directly (its own host bits decide
-        // the stack); append at the next index of that branch on the chain root.
-        // No invert — a member can't be re-rooted.
-        let branch = stack - 1;
-        let index = next_branch_index(store, parent_root, parent.macro_zone, branch, now_ms);
-        return Ok(Resolved::Place {
-            surface: surface_of(parent.macro_zone),
-            macro_zone: parent.macro_zone,
-            micro: Micro::Stacked { root: parent_root, branch, index },
-        });
+    } else if occupied_branches(store, source, now_ms) <= 1 {
+        if let Some(stack) = match_stack(parent_bits, source_bits, direction) {
+            // Parent is a member: target that card directly (its own host bits decide
+            // the stack); append at the next index of that branch on the chain root.
+            // No invert — a member can't be re-rooted. Same single-branch join gate.
+            let branch = stack - 1;
+            let index = next_branch_index(store, parent_root, parent.macro_zone, branch, now_ms);
+            return Ok(Resolved::Place {
+                surface: surface_of(parent.macro_zone),
+                macro_zone: parent.macro_zone,
+                micro: Micro::Stacked { root: parent_root, branch, index },
+            });
+        }
     }
 
     Err(format!(
@@ -702,18 +786,65 @@ mod tests {
     #[test]
     fn members_travel_and_reroot_on_stack_move() {
         let mz = with_surface(0, WORLD_LAYER);
-        // source 1026 is a loose root with a member 1028 stacked on it.
+        // source 1026 is a loose root with a single-branch run (1028 on its up stack).
         let store = Mock::default()
             .with(soul(1024, P))
             .with({ let mut c = loose(1025, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
             .with({ let mut c = loose(1026, 1024, WORLD_LAYER, 2, 2); c.macro_zone = mz; c })
             .with(stacked(1028, 1024, mz, 1026, STACK_DIR_UP, 0));
         let plan = plan_place(&store, 1026, Placement::Stack { parent_id: 1025, direction: STACK_DIR_DOWN }, P, 0, &|_| DEFAULT_BITS).unwrap();
-        assert_eq!(plan.writes.len(), 2, "source + its member");
-        // source becomes member of 1025; its member re-roots onto 1025 keeping branch/index.
+        assert_eq!(plan.writes.len(), 2, "source + its run");
+        // source joins 1025 going DOWN at index 0; its run follows it into the JOIN
+        // branch, re-indexed contiguously ABOVE the source's slot (DOWN, index 1) —
+        // the run is "outward" from the source regardless of its old branch.
         assert_eq!(plan.writes[0].micro, Micro::Stacked { root: 1025, branch: STACK_DIR_DOWN, index: 0 });
         let member = plan.writes.iter().find(|w| w.card_id == 1028).unwrap();
-        assert_eq!(member.micro, Micro::Stacked { root: 1025, branch: STACK_DIR_UP, index: 0 });
+        assert_eq!(member.micro, Micro::Stacked { root: 1025, branch: STACK_DIR_DOWN, index: 1 });
+    }
+
+    #[test]
+    fn stack_member_onto_card_carries_run_and_splices_old_chain() {
+        // Chain on root 1100 (up): 1101(idx0), 1102(idx1), 1103(idx2). Grab the
+        // MIDDLE member 1102 and stack it onto a separate loose card 1200. 1102 +
+        // its outward run (1103) join 1200's up stack; the old chain collapses to
+        // just 1101.
+        let mz = with_surface(0, WORLD_LAYER);
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with({ let mut c = loose(1100, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
+            .with(stacked(1101, 1024, mz, 1100, STACK_DIR_UP, 0))
+            .with(stacked(1102, 1024, mz, 1100, STACK_DIR_UP, 1))
+            .with(stacked(1103, 1024, mz, 1100, STACK_DIR_UP, 2))
+            .with({ let mut c = loose(1200, 1024, WORLD_LAYER, 5, 5); c.macro_zone = mz; c });
+        let plan = plan_place(&store, 1102, Placement::Stack { parent_id: 1200, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap();
+        // 1102 joins 1200 up@0; 1103 (its run) re-roots above it at up@1.
+        let w1102 = plan.writes.iter().find(|w| w.card_id == 1102).unwrap();
+        assert_eq!(w1102.micro, Micro::Stacked { root: 1200, branch: STACK_DIR_UP, index: 0 });
+        let w1103 = plan.writes.iter().find(|w| w.card_id == 1103).unwrap();
+        assert_eq!(w1103.micro, Micro::Stacked { root: 1200, branch: STACK_DIR_UP, index: 1 });
+        // 1101 stays on 1100 (it was below the grab — never carried); no gap to close
+        // since 1102/1103 were the outward tail, so 1101 keeps index 0 (no write).
+        assert!(plan.writes.iter().all(|w| w.card_id != 1101), "1101 unchanged at up@0");
+    }
+
+    #[test]
+    fn multi_branch_root_cannot_join_inverts_instead() {
+        // Root 1300 hosts members in TWO branches (up 1301, down 1302). Grab 1300 and
+        // drop it onto lone card 1400: 1300 can't JOIN (a stack grows one direction,
+        // so a 2-branch root can't linearize into one slot), so the drop inverts —
+        // 1400 joins 1300 instead, leaving 1300 the root of its two branches.
+        let mz = with_surface(0, WORLD_LAYER);
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with({ let mut c = loose(1300, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
+            .with(stacked(1301, 1024, mz, 1300, STACK_DIR_UP, 0))
+            .with(stacked(1302, 1024, mz, 1300, STACK_DIR_DOWN, 0))
+            .with({ let mut c = loose(1400, 1024, WORLD_LAYER, 5, 5); c.macro_zone = mz; c });
+        let plan = plan_place(&store, 1300, Placement::Stack { parent_id: 1400, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap();
+        // Invert: 1400 (the parent) re-roots onto 1300 — 1300 stays the root, keeps
+        // its two branches; only 1400 moves into 1300's chain.
+        let w1400 = plan.writes.iter().find(|w| w.card_id == 1400).unwrap();
+        assert!(matches!(w1400.micro, Micro::Stacked { root: 1300, .. }), "1400 joins 1300, not the reverse");
     }
 
     #[test]
@@ -727,6 +858,18 @@ mod tests {
             .with({ let mut c = loose(3000, 2000, WORLD_LAYER, 3, 3); c.macro_zone = mz; c }); // owned by player 9
         // self-stack
         assert!(plan_place(&store, 1025, Placement::Stack { parent_id: 1025, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).is_err());
+        // already a member: dropping member 1026 back onto its own root 1025 must reject
+        // (else it re-stacks onto itself rather than no-op).
+        let err = plan_place(&store, 1026, Placement::Stack { parent_id: 1025, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap_err();
+        assert!(err.contains("already part of"), "{err}");
+        // and dropping it onto a sibling in the same chain rejects the same way.
+        let store2 = Mock::default()
+            .with(soul(1024, P))
+            .with({ let mut c = loose(1025, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
+            .with(stacked(1026, 1024, mz, 1025, STACK_DIR_UP, 0))
+            .with(stacked(1027, 1024, mz, 1025, STACK_DIR_UP, 1));
+        let err = plan_place(&store2, 1026, Placement::Stack { parent_id: 1027, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap_err();
+        assert!(err.contains("already part of"), "{err}");
         // cycle: stacking root 1025 onto its own member 1026
         let err = plan_place(&store, 1025, Placement::Stack { parent_id: 1026, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap_err();
         assert!(err.contains("cycle"), "{err}");

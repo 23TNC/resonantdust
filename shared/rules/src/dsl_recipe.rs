@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use resonantdust_codec::card_model;
 use resonantdust_codec::packed::{pack_macro_zone_full, surface_of, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
 use resonantdust_codec::plan::{ActionPlan, Effect, HoldKinds, StockOp};
-use resonantdust_dsl::bridge::{stock_default_u32, stock_slot_bits, stock_slot_for_aspect, stock_to_vec, Card};
+use resonantdust_dsl::bridge::{stock_default_u64, stock_slot_bits, stock_slot_for_aspect, stock_to_vec, Card};
 use resonantdust_dsl::loader::Bundle;
 use resonantdust_dsl::recipe::{build_frame, Frame};
 use resonantdust_dsl::vm::{match_recipe, plan_recipe, Effect as VmEffect, Hold};
@@ -190,7 +190,7 @@ fn translate<S: CardStore>(
                         )),
                     }
                 };
-                let stock = stock_default_u32(bundle, &dk);
+                let stock = stock_default_u64(bundle, &dk);
                 synths.push(Synthetic { def_key: dk, placement, stock, alive: true, tag: 0 });
             }
             VmEffect::Move { source, target } => {
@@ -228,7 +228,7 @@ fn translate<S: CardStore>(
                     s.stock = fold_stock(bundle, &s.def_key, s.stock, aspect, *delta, *abs)?;
                 } else {
                     match frame.card_at(slot) {
-                        // A bound CARD → write its per-card `stock` u32: compute the
+                        // A bound CARD → write its per-card `stock` u64: compute the
                         // new value here (current stock with this slot's bits
                         // replaced) and emit an absolute SetCardStock. The card holds
                         // it; only the bottom u4 can later save to a zone.
@@ -342,7 +342,7 @@ fn translate<S: CardStore>(
 struct Synthetic {
     def_key: String,
     placement: Placement,
-    stock: u32,
+    stock: u64,
     alive: bool,
     tag: u32,
 }
@@ -380,22 +380,21 @@ fn parse_created(path: &str) -> Option<(usize, &str)> {
 fn fold_stock(
     bundle: &Bundle,
     card: &str,
-    stock: u32,
+    stock: u64,
     aspect: &str,
     delta: i64,
     abs: bool,
-) -> Result<u32, String> {
+) -> Result<u64, String> {
     let (shift, width) = stock_slot_bits(bundle, card, aspect)
         .ok_or_else(|| format!("card {card:?} declares no stock slot for aspect {aspect:?}"))?;
-    let cap: u32 = if width >= 32 { u32::MAX } else { (1 << width) - 1 };
-    let mask: u32 = cap << shift;
-    let cur = (stock & mask) >> shift;
+    let cap: u64 = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
+    let cur = resonantdust_codec::bits::get_field64(stock, shift, width) as i64;
     let new_val = if abs {
-        delta.clamp(0, cap as i64) as u32
+        delta.clamp(0, cap as i64) as u64
     } else {
-        (cur as i64 + delta).clamp(0, cap as i64) as u32
+        (cur + delta).clamp(0, cap as i64) as u64
     };
-    Ok((stock & !mask) | (new_val << shift))
+    Ok(resonantdust_codec::bits::set_field64(stock, shift, width, new_val))
 }
 
 /// All-false [`HoldKinds`] — the merge base.

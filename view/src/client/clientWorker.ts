@@ -49,12 +49,25 @@ ctx.onmessage = (e: MessageEvent<ToWorker>): void => {
     case "renderClose":
       views.delete(msg.viewId);
       break;
-    case "place":
-      core?.place_loose(msg.cardId, msg.surface, msg.owner, msg.q, msg.r);
+    case "place": {
+      const moved = core ? core.place_loose(msg.cardId, msg.surface, msg.owner, msg.q, msg.r) : false;
+      // Push the predicted position to the feed BEFORE replying, so the new cell is
+      // already in `desiredCards` when the drag's await resolves (no back-tween).
+      if (moved) for (const viewId of views.keys()) emitView(viewId);
+      post({ type: "placeResult", id: msg.id, moved });
       break;
-    case "placeStack":
-      core?.place_stack(msg.cardId, msg.parentId, msg.direction);
+    }
+    case "placeStack": {
+      const moved = core ? core.place_stack(msg.cardId, msg.parentId, msg.direction) : false;
+      if (moved) for (const viewId of views.keys()) emitView(viewId);
+      post({ type: "placeResult", id: msg.id, moved });
       break;
+    }
+    case "carriedRun": {
+      const ids = core ? Array.from(core.carried_run(msg.cardId)) : [];
+      post({ type: "carriedRun", id: msg.id, ids });
+      break;
+    }
     case "uploadMaster":
       core?.upload_master(msg.aspect, msg.faction, msg.variant, msg.channel, msg.data);
       break;
@@ -158,7 +171,10 @@ function startPump(): void {
     // thread BEFORE re-emitting, so the redraw uses the new defs.
     const version = core.take_content_changed();
     if (version !== undefined) void handleContentChanged(version);
-    if (changed) for (const viewId of views.keys()) emitView(viewId);
+    // Re-emit on row changes, OR while a pre-fire debounce is live so the queue
+    // progress bar appears + advances (queuing is client-side and doesn't flip
+    // `changed`). The build bar rides `changed` — the hold it sets IS a row change.
+    if (changed || core.has_pending_debounce()) for (const viewId of views.keys()) emitView(viewId);
     // The player_soul card_id lands a pump or two after login (the discovery
     // walk), so the login reply often carried -1. Notify the main thread the
     // instant it resolves (or changes) so the view opens the player's inventory

@@ -92,10 +92,16 @@ export type ToWorker =
   | { type: "renderOpen"; viewId: number; region: RenderRegion }
   | { type: "renderUpdate"; viewId: number; region: RenderRegion }
   | { type: "renderClose"; viewId: number }
-  // Drag-drop: place a card loose at a global cell, or stack it on a card. Fire-
-  // and-forget — the outcome streams back through the render feed (no ack).
-  | { type: "place"; cardId: number; surface: number; owner: number; q: number; r: number }
-  | { type: "placeStack"; cardId: number; parentId: number; direction: number }
+  // Drag-drop: place a card loose at a global cell, or stack it on a card. The
+  // worker applies the move, re-emits the affected views, then replies
+  // `placeResult` (correlated by `id`) so the drag can wait for the decision before
+  // releasing the ghost — without the wait the card tweens toward its stale cell
+  // before the prediction streams back.
+  | { type: "place"; id: number; cardId: number; surface: number; owner: number; q: number; r: number }
+  | { type: "placeStack"; id: number; cardId: number; parentId: number; direction: number }
+  // Drag pickup: ask the headless core which cards a loose drag of `cardId` lifts
+  // (the grabbed card + the run the resolver carries). Correlated reply by `id`.
+  | { type: "carriedRun"; id: number; cardId: number }
   // Art authoring: upload an edited master texture channel (base64 PNG) to the
   // gate, which writes it to the texture R2 bucket. Fire-and-forget.
   | { type: "uploadMaster"; aspect: string; faction: string; variant: string; channel: string; data: string }
@@ -126,6 +132,12 @@ export type FromWorker =
   | { type: "reply"; id: number; ok: false; error: string }
   | { type: "event"; event: ClientEvent }
   | { type: "renderBatch"; batch: RenderBatch }
+  // Reply to a `carriedRun` request: the drag pickup set (grabbed card first).
+  | { type: "carriedRun"; id: number; ids: number[] }
+  // Reply to a `place`/`placeStack` request: whether the card moved. The affected
+  // views were re-emitted just before this, so the new position is already in the
+  // feed when the drag's await resolves.
+  | { type: "placeResult"; id: number; moved: boolean }
   // The gate hot-swapped its content corpus; the worker has reloaded its matcher
   // bundle. The main thread refreshes its render-side `Content`/`Locales` and
   // redraws. `version` is the new corpus fingerprint (for logging/dedupe).
