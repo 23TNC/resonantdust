@@ -6,6 +6,7 @@
 //! effect value types). No dependency on the DSL — the SpacetimeDB modules link
 //! only this; `dsl` and `state` build on top.
 
+pub mod aspects;
 pub mod bits;
 pub mod card_model;
 pub mod flags;
