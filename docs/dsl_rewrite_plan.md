@@ -27,11 +27,25 @@ Progress:
   `despair/strike/gloom` magnetic recipes (recipes/03_status.rd) so the dangling
   refs resolve; the whole shared workspace now passes. (Stubs resolve the magnet
   via `data.dead inc` — replace with real outcomes when magnetic gameplay ports.)
-- ⬜ **Shard reducers** (`spacetime` submodule) — the runtime semantics behind the
-  4 gateway TODOs (per-effect future-stamping, holds-as-stock, dead-as-stock
-  reaping, runtime tile holds). Needs the harness; where the temporal op-log
-  becomes load-bearing.
-- ⬜ **Deferred** — the temporal op-log / GC / subscription split.
+- 🟡 **Gate + shard runtime** (`d535c9a`; gateway + spacetime submodules) —
+  recipe application implemented + verified:
+  - ✅ **Per-effect future-stamping** — `apply_action` gains `*_times`; each effect
+    fires at `now + at*1000` (acquire@0 / release@window on separate rows).
+  - ✅ **Holds-as-stock** (cards) — claim/touch persist on the card stock,
+    written by `SetCardStock`, read back by `@input` `can_claim`.
+  - ✅ **dead → reaping** — the gate translates `data.dead inc` to the dead FLAG
+    (`Destroy`), since the shard is content-agnostic; the existing reaper acts on it.
+  - ⬜ **Runtime tile holds** — dropped (a tile's claim/touch has no zone storage);
+    tile-cut concurrency exclusion remains a limitation.
+  - ⬜ **dead-READ concurrency guard** — `card_view` flag→`data.dead` bridge not yet
+    wired (single-action correct; a concurrent claim of an already-dead card isn't
+    rejected).
+  - **Verified:** rules unit test (dead→Destroy@10, claim→SetCardStock@0,
+    spawn→Create@10); claude env redeployed, world loads + renders with the new
+    reducer. A live recipe-fire wasn't triggered (no in-game card-spawn tool;
+    `cut_tree` needs corpus+axe cards).
+- ⬜ **Deferred** — the temporal op-log / GC / subscription split (makes the
+  hold-release scheduling crash-safe).
 
 ## What's changing (the rulings we locked)
 
