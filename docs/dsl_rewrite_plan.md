@@ -12,9 +12,17 @@ Progress:
 - ✅ **D/E** new recipe model — predicate `@input`, `sys.time` timeline, holds/dead
   as `Stock`, `^create`/`^macro_zone` runtime, codec `ActionPlan` reshape, rules
   `translate()` rewrite (`b02d8e5`). All shared crates green.
-- ⬜ **Gateway integration** — `gateway/src/{apply,propose}.rs` against the new
-  `ActionPlan` (time-stamped effects, holds-as-stock, future-stamping). Separate
-  submodule; needs the multi-client harness for runtime verification.
+- 🟡 **Gateway integration** — `gateway/src/{apply,propose}.rs` now **compile**
+  against the new `ActionPlan` (gateway `05203e9`): effects map to the existing
+  `apply_action` reducer (Create/SetCardStock/ModifyTileStock); `@input` is the
+  hold authority (propose `wants_exclusive=false`). Runtime gaps documented as
+  TODOs — they need **`spacetime` shard reducer changes + harness verification**:
+  - per-effect future-stamping (all effects apply at `completion_ms`, ignoring `at`);
+  - holds-as-stock enforcement (bound_masks=0; claim/touch writes don't yet keep a
+    card alive or gate concurrent claims);
+  - dead-as-stock reaping (destroy is `data.dead inc`; reaper must act on the bit;
+    soul-stat decrement not re-derived);
+  - runtime tile holds (tile hold mask=0; regions DB has no runtime tile-hold field).
 - ⬜ **status.rd** — 6 pre-existing dangling recipes (`despair_*`/`strike_*`/
   `gloom_*` from the deleted 01.rd/03_chorus_story.rd) keep the corpus red.
 - ⬜ **Deferred** — the temporal op-log / GC / subscription split.
