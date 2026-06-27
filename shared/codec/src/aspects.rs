@@ -100,6 +100,27 @@ impl StockAspect {
     self as u8
   }
 
+  /// Resolve a DSL aspect path to its global `StockAspect`, or `None` if the
+  /// path is a per-def / non-global aspect (regular schema stock, or `visual.*`).
+  /// The dotted paths (`touch.user` / `touch.server`) are the touch refcounts;
+  /// `pstyle` / `stack_hosts` / `stack_joins` are deliberately NOT global.
+  /// This is the single switch translate/bridge use to route a write/read to the
+  /// op-log global region vs a schema slot.
+  pub fn from_name(name: &str) -> Option<Self> {
+    use StockAspect::*;
+    Some(match name {
+      "claim" => Claim,
+      "borrow" => Borrow,
+      "pos_hold" => PosHold,
+      "drop_hold" => DropHold,
+      "touch.user" => TouchUser,
+      "touch.server" => TouchServer,
+      "dead" => Dead,
+      "reap" => Reap,
+      _ => return None,
+    })
+  }
+
   /// Resolve an `aspect_id` back to its aspect, or `None` if undefined.
   pub fn from_id(id: u8) -> Option<Self> {
     use StockAspect::*;
@@ -211,6 +232,18 @@ mod tests {
     assert_eq!(count(s, Borrow), 0, "neighbours untouched");
     let s = dec(s, Claim);
     assert_eq!(count(s, Claim), 1);
+  }
+
+  #[test]
+  fn from_name_maps_global_aspects_only() {
+    assert_eq!(StockAspect::from_name("dead"), Some(StockAspect::Dead));
+    assert_eq!(StockAspect::from_name("claim"), Some(StockAspect::Claim));
+    assert_eq!(StockAspect::from_name("touch.user"), Some(StockAspect::TouchUser));
+    assert_eq!(StockAspect::from_name("touch.server"), Some(StockAspect::TouchServer));
+    // per-def / non-global aspects resolve to None → regular schema stock.
+    assert_eq!(StockAspect::from_name("pine"), None);
+    assert_eq!(StockAspect::from_name("pstyle"), None);
+    assert_eq!(StockAspect::from_name("stack_hosts"), None);
   }
 
   #[test]
