@@ -23,8 +23,14 @@ Progress:
   - dead-as-stock reaping (destroy is `data.dead inc`; reaper must act on the bit;
     soul-stat decrement not re-derived);
   - runtime tile holds (tile hold mask=0; regions DB has no runtime tile-hold field).
-- ⬜ **status.rd** — 6 pre-existing dangling recipes (`despair_*`/`strike_*`/
-  `gloom_*` from the deleted 01.rd/03_chorus_story.rd) keep the corpus red.
+- ✅ **status.rd / corpus green** (`a7157ef`) — added placeholder new-model
+  `despair/strike/gloom` magnetic recipes (recipes/03_status.rd) so the dangling
+  refs resolve; the whole shared workspace now passes. (Stubs resolve the magnet
+  via `data.dead inc` — replace with real outcomes when magnetic gameplay ports.)
+- ⬜ **Shard reducers** (`spacetime` submodule) — the runtime semantics behind the
+  4 gateway TODOs (per-effect future-stamping, holds-as-stock, dead-as-stock
+  reaping, runtime tile holds). Needs the harness; where the temporal op-log
+  becomes load-bearing.
 - ⬜ **Deferred** — the temporal op-log / GC / subscription split.
 
 ## What's changing (the rulings we locked)
