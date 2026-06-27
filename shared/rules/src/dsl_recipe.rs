@@ -51,7 +51,7 @@ pub fn run<S: CardStore>(
             let def_id = bundle
                 .card_def_id(name)
                 .ok_or_else(|| format!("tile {name:?} not in DSL bundle"))?;
-            Some(Card { def_id, stock: vec![s0 as i64, s1 as i64] })
+            Some(Card { def_id, stock: vec![s0 as i64, s1 as i64], stock_raw: 0 })
         }
         None => None,
     };
@@ -61,7 +61,7 @@ pub fn run<S: CardStore>(
         let c = store.card_at(id, now_ms)?;
         let name = bundle.name_for_packed(c.packed_definition)?;
         let def_id = bundle.card_def_id(name)?;
-        Some(Card { def_id, stock: stock_to_vec(bundle, name, c.stock) })
+        Some(Card { def_id, stock: stock_to_vec(bundle, name, c.stock), stock_raw: c.stock })
     };
 
     let mut frame = build_frame(bundle, recipe, root, bindings, synth_card.as_ref(), &lookup);

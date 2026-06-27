@@ -339,7 +339,7 @@ mod tests {
   }
 
   fn card_of(b: &Bundle, name: &str) -> Card {
-    Card { def_id: b.card_def_id(name).unwrap(), stock: vec![] }
+    Card { def_id: b.card_def_id(name).unwrap(), stock: vec![], stock_raw: 0 }
   }
 
   fn recipe_node(src: &str) -> Node {

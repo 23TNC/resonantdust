@@ -21,6 +21,12 @@ use std::collections::HashSet;
 pub struct Card {
   pub def_id: u16,
   pub stock: Vec<i64>,
+  /// The raw per-card `stock` u64. `stock` (above) is its per-def schema slots
+  /// decoded positionally; `stock_raw` keeps the whole word so the view can also
+  /// read the GLOBAL-aspect region (op-log-materialized `dead`/holds, bits 42-63)
+  /// that the schema decode doesn't cover. Defaults to 0 (test fixtures with no
+  /// global aspects).
+  pub stock_raw: u64,
 }
 
 /// Run a card's `:data @define` into a fresh store. Schema-by-execution: because
@@ -93,6 +99,16 @@ pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
       store.write(&format!("data.{aspect}"), Cell::Int(*v));
     }
   }
+  // Overlay GLOBAL op-log aspects from the fixed stock region (not the schema).
+  // Only `dead` for now: its write goes through the op-log (apply_delta writes
+  // the global Dead field), so `can_claim`'s `*a.dead` must read there — this is
+  // what closes the dead-READ gap at the matcher level. The holds are NOT
+  // overlaid yet: they still write the schema slot, so reading them from the
+  // (zero) global region would break `can_claim`. Add them here in lockstep with
+  // routing their writes to LogOp.
+  let dead = resonantdust_codec::aspects::count(card.stock_raw, resonantdust_codec::aspects::StockAspect::Dead);
+  store.write("data.dead", Cell::Int(dead as i64));
+
   store.drop_key("__schema"); // sidecar is schema-only; keep the matched frame clean
   fold_aspects(&mut store, bundle);
   store.into_root()
@@ -352,7 +368,7 @@ mod tests {
     ])
     .expect("load");
 
-    let card = Card { def_id: b.card_def_id("widget").unwrap(), stock: vec![] };
+    let card = Card { def_id: b.card_def_id("widget").unwrap(), stock: vec![], stock_raw: 0 };
     let v = Store::with_root(card_view(&b, &card));
     // the shared function's writes land in the card's static aspects
     assert_eq!(v.read("data.slot_hold"), Some(&Cell::Int(1)));
@@ -364,7 +380,7 @@ mod tests {
   fn card_view_overlays_stock_and_folds_satisfies() {
     let b = bundle();
     // a grove instance: pine=3, ash=2 (positional, matching the schema)
-    let card = Card { def_id: b.card_def_id("grove").unwrap(), stock: vec![3, 2] };
+    let card = Card { def_id: b.card_def_id("grove").unwrap(), stock: vec![3, 2], stock_raw: 0 };
     let v = Store::with_root(card_view(&b, &card));
 
     assert_eq!(v.read("def_id"), Some(&Cell::Sym("card::grove".into())));
@@ -406,7 +422,7 @@ mod tests {
   #[test]
   fn unknown_def_id_is_empty() {
     let b = bundle();
-    assert_eq!(card_view(&b, &Card { def_id: 0, stock: vec![] }), Cell::Map(Vec::new()));
+    assert_eq!(card_view(&b, &Card { def_id: 0, stock: vec![], stock_raw: 0 }), Cell::Map(Vec::new()));
   }
 
   #[test]
@@ -428,7 +444,7 @@ mod tests {
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into()), ("r.rd".into(), recipes.into())]).unwrap();
 
     // a stored corpus instance, placed at slot.1.0, drives the matcher
-    let corpus = Card { def_id: b.card_def_id("corpus").unwrap(), stock: vec![] };
+    let corpus = Card { def_id: b.card_def_id("corpus").unwrap(), stock: vec![], stock_raw: 0 };
     let mut frame = operating_set(&b, &[("slot.1.0", &corpus)]);
     let input = &b.recipe("use_corpus").unwrap().hook("input").unwrap().body;
     let plan = match_recipe(input, &mut frame, &b.catalog, &b.functions).unwrap();
@@ -475,8 +491,8 @@ mod tests {
 
     // card_view emits the LINEAGE symbol for either version, but reads the
     // version-SPECIFIC cost — so old + new instances coexist correctly.
-    let a0 = Card { def_id: b.card_def_id("apple.0").unwrap(), stock: vec![] };
-    let a1 = Card { def_id: b.card_def_id("apple.1").unwrap(), stock: vec![] };
+    let a0 = Card { def_id: b.card_def_id("apple.0").unwrap(), stock: vec![], stock_raw: 0 };
+    let a1 = Card { def_id: b.card_def_id("apple.1").unwrap(), stock: vec![], stock_raw: 0 };
     let v0 = Store::with_root(card_view(&b, &a0));
     let v1 = Store::with_root(card_view(&b, &a1));
     assert_eq!(v0.read("def_id"), Some(&Cell::Sym("card::apple".into())));
@@ -493,7 +509,7 @@ mod tests {
     }
 
     // an unrelated lineage (corpus) does NOT match.
-    let corpus = Card { def_id: b.card_def_id("corpus").unwrap(), stock: vec![] };
+    let corpus = Card { def_id: b.card_def_id("corpus").unwrap(), stock: vec![], stock_raw: 0 };
     let mut frame = operating_set(&b, &[("slot.1.0", &corpus)]);
     let plan = match_recipe(input, &mut frame, &b.catalog, &b.functions).unwrap();
     assert!(!plan.matched, "corpus must not match $card::apple");

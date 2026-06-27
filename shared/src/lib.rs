@@ -478,11 +478,11 @@ mod tests {
         let c = content();
         let id = c.card_def_id("corpus").expect("corpus id");
         let plan = c
-            .match_recipe(&[("slot.1.0".into(), Card { def_id: id, stock: vec![] })], "use_corpus")
+            .match_recipe(&[("slot.1.0".into(), Card { def_id: id, stock: vec![], stock_raw: 0 })], "use_corpus")
             .expect("matched");
         assert!(plan.matched);
         let out = c
-            .plan_recipe(&[("slot.1.0".into(), Card { def_id: id, stock: vec![] })], "use_corpus")
+            .plan_recipe(&[("slot.1.0".into(), Card { def_id: id, stock: vec![], stock_raw: 0 })], "use_corpus")
             .expect("planned");
         assert_eq!(out.duration, 10);
     }
