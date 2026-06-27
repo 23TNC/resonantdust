@@ -74,9 +74,9 @@ impl CardRow {
         Micro::of(self.micro_location, self.flags)
     }
 
-    /// `dead` state bit set?
+    /// Marked dead? (Reads the `Dead` stock aspect — the op-log's home for it.)
     pub fn is_dead(&self) -> bool {
-        card_model::is_dead(self.flags)
+        card_model::is_dead(self.stock)
     }
 }
 

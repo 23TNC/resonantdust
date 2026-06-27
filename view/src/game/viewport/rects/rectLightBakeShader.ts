@@ -52,6 +52,12 @@ const lightBakeBitGl = {
       const float SOUTH_TILT = 1.8;
       const float SOUTH_Z = 0.18;
       const float OBJECT_WRAP = 0.45;
+      // Diffuse wrap (half-Lambert): ndotl = max((N·L + w)/(1+w), 0). w=0 is plain
+      // Lambert; w>0 softens the terminator so exaggerated normal relief adds
+      // CONTRAST without clipping the away-facing surface to black (which is what
+      // sank the mean brightness when normal strength went to 2x). KEEP IN SYNC with
+      // the display shader's LIGHT_WRAP — cold + hot light the same surface. (tweak + HMR)
+      const float LIGHT_WRAP = 0.4;
       bool isObject = texture(uDepth, vUV).b * 255.0 > 12.0;
       if (isObject) N = normalize(vec3(N.x, N.y + SOUTH_TILT, N.z * SOUTH_Z));
       vec4 csh = texture(uColdShadow, vUV);          // this slot's cold-shadow coverage, per light
@@ -63,7 +69,7 @@ const lightBakeBitGl = {
         float dist = length(toLight.xy);
         float atten = clamp(1.0 - dist / max(ld.w, 1.0), 0.0, 1.0);
         atten *= atten;
-        float ndotl = max(dot(N, normalize(toLight)), 0.0);
+        float ndotl = max((dot(N, normalize(toLight)) + LIGHT_WRAP) / (1.0 + LIGHT_WRAP), 0.0);
         if (isObject) ndotl = max(ndotl, OBJECT_WRAP * atten); // backlit objects catch some near light
         // First 3 cold lights (R/G/B) lose their term where occluded; objects are never shadowed.
         float sh = isObject ? 0.0 : (i == 0 ? csh.r : (i == 1 ? csh.g : (i == 2 ? csh.b : 0.0)));

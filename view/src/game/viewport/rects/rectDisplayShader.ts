@@ -97,6 +97,14 @@ const groundLightBitGl = {
       const float OBJECT_WRAP = 0.45;                // max back-light an object catches when a light
                                                      // is RIGHT on it; scaled by proximity (atten)
                                                      // so the floor rises the closer the light sits.
+      // Diffuse wrap (half-Lambert): ndotl = max((N·L + w)/(1+w), 0). Softens the
+      // terminator so exaggerated normal relief deepens CONTRAST without clipping the
+      // away-facing surface to black (the mean-brightness loss from 2x normal strength).
+      // KEEP IN SYNC with rectLightBakeShader's LIGHT_WRAP. (tweak + HMR)
+      const float LIGHT_WRAP = 0.4;
+      // Final exposure gain on the lit result — the "brighten" knob, applied after the
+      // light is summed (lifts ambient + cold + hot together). 1.0 = unchanged. (tweak + HMR)
+      const float EXPOSURE = 1.15;
       vec4 dpx = texture(uDepth, vUV);
       // Object ⇔ the depth-blue (layer) byte is set. Standing objects bake BLUE_OBJECT (80),
       // which PIXI sRGB-converts on the tint to ≈25 in the map; ground/tiles write no depth (0).
@@ -125,7 +133,7 @@ const groundLightBitGl = {
         float atten = clamp(1.0 - dist / max(ld.w, 1.0), 0.0, 1.0);
         atten *= atten;
         if (atten <= 0.0) continue;                 // outside radius → no light, no shadow
-        float ndotl = max(dot(N, normalize(toLight)), 0.0);
+        float ndotl = max((dot(N, normalize(toLight)) + LIGHT_WRAP) / (1.0 + LIGHT_WRAP), 0.0);
         // Backlit object catches some near light around its far side (steep near-field).
         if (isObject) ndotl = max(ndotl, OBJECT_WRAP * atten);
         float blockedWarm = bf_bit(bf_byte(warm, c), b); // 1 = shadowed (cached, possibly stale)
@@ -146,7 +154,7 @@ const groundLightBitGl = {
         lightSum += uLightColor[i].rgb * lit;
       }
       vec4 alb = texture(uAlbedo, vUV);
-      outColor = vec4(alb.rgb * lightSum, alb.a);
+      outColor = vec4(alb.rgb * lightSum * EXPOSURE, alb.a);
 
       // ── hot prims (movers/cards): light the per-frame G-buffer + composite OVER ──
       // Sample the hot albedo/normal at the SAME slot UV. Movers are standing billboards
@@ -190,7 +198,7 @@ const groundLightBitGl = {
           float cdist = length(toC.xy);
           float cat = clamp(1.0 - cdist / cradius, 0.0, 1.0); cat *= cat;
           if (cat <= 0.0) continue;
-          float cnl = max(dot(Nh, normalize(toC)), 0.0);
+          float cnl = max((dot(Nh, normalize(toC)) + LIGHT_WRAP) / (1.0 + LIGHT_WRAP), 0.0);
           cnl = max(cnl, OBJECT_WRAP * cat);          // backlit billboard wrap, like the dynamic pool
           vec4 cc = texture(uColdColor, cuv);
           hotSum += cc.rgb * (cc.a * ${COLD_BRIGHT_SCALE.toFixed(1)} * cnl * cat);
@@ -202,11 +210,11 @@ const groundLightBitGl = {
           float d = length(toL.xy);
           float at = clamp(1.0 - d / max(ld.w, 1.0), 0.0, 1.0); at *= at;
           if (at <= 0.0) continue;
-          float nl = max(dot(Nh, normalize(toL)), 0.0);
+          float nl = max((dot(Nh, normalize(toL)) + LIGHT_WRAP) / (1.0 + LIGHT_WRAP), 0.0);
           nl = max(nl, OBJECT_WRAP * at);            // backlit billboard catches some near light
           hotSum += uLightColor[i].rgb * (uLightColor[i].a * nl * at);
         }
-        vec3 litHot = hotA.rgb * hotSum;             // hotA premultiplied → already × alpha
+        vec3 litHot = hotA.rgb * hotSum * EXPOSURE;  // hotA premultiplied → already × alpha
         outColor = vec4(litHot + outColor.rgb * (1.0 - hotA.a), hotA.a + outColor.a * (1.0 - hotA.a));
       }
     `,

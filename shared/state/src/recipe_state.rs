@@ -114,10 +114,10 @@ fn check_card(card: &CardView, card_id: u32, wants_exclusive: bool) -> Result<()
   // Verb-independent baseline (dead or exclusively claimed) — the SAME predicate
   // the client matcher applies (`bind_blocked`), so the matcher never proposes a
   // binding the gate would reject here.
-  if bind_blocked(card.flags) {
+  if bind_blocked(card.flags, card.stock) {
     return Err(format!(
       "card {card_id} unavailable: {}",
-      if is_dead(card.flags) { "dead" } else { "exclusively held by another in-flight action" }
+      if is_dead(card.stock) { "dead" } else { "exclusively held by another in-flight action" }
     ));
   }
   if wants_exclusive && hold_count(card.flags, HoldField::SlotBorrow) > 0 {
@@ -183,7 +183,10 @@ mod tests {
 
   #[test]
   fn dead_rejected() {
-    let s = store(&[card(50, 0, state_bit("dead"))]);
+    // `dead` now lives in the stock global-aspect region, not the flag bit.
+    let mut c = card(50, 0, 0);
+    c.stock = resonantdust_codec::aspects::inc(0, resonantdust_codec::aspects::StockAspect::Dead);
+    let s = store(&[c]);
     let err = validate_bindings(&s, 1, 0, &[vec![50]], 7, 0, no_excl).unwrap_err();
     assert!(err.contains("dead"), "{err}");
   }

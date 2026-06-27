@@ -96,7 +96,7 @@ pub fn plan_place<S: StackStore>(
     let source = store
         .card_at(card_id, now_ms)
         .ok_or_else(|| format!("place: card {card_id} not found"))?;
-    if is_dead(source.flags) {
+    if is_dead(source.stock) {
         return Err(format!("place: card {card_id} is dead"));
     }
     let source_owner = owning_player(store, card_id, now_ms).unwrap_or(WORLD_PLAYER_ID);
@@ -286,7 +286,7 @@ fn carried_run<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<
         .members_of(root, now_ms)
         .into_iter()
         .filter(|m| {
-            stack_branch(m.flags) == branch && !is_dead(m.flags) && stack_index(m.flags) > src_idx
+            stack_branch(m.flags) == branch && !is_dead(m.stock) && stack_index(m.flags) > src_idx
         })
         .collect();
     sibs.sort_by_key(|m| stack_index(m.flags));
@@ -344,7 +344,7 @@ fn occupied_branches<S: StackStore>(store: &S, root: &CardView, now_ms: u64) -> 
     let mut branches: BTreeSet<u8> = store
         .members_of(root.card_id, now_ms)
         .into_iter()
-        .filter(|m| !is_dead(m.flags))
+        .filter(|m| !is_dead(m.stock))
         .map(|m| stack_branch(m.flags))
         .collect();
     if let Micro::Loose { local_q, local_r, .. } = Micro::of(root.micro_location, root.flags) {
@@ -396,7 +396,7 @@ pub fn plan_splice<S: StackStore>(store: &S, destroyed: &[u32], now_ms: u64) -> 
         let mut members: Vec<CardView> = store
             .members_of(root_id, now_ms)
             .into_iter()
-            .filter(|m| !gone.contains(&m.card_id) && !is_dead(m.flags))
+            .filter(|m| !gone.contains(&m.card_id) && !is_dead(m.stock))
             .collect();
 
         // Resolve the surviving root + the macro_zone the chain lives at.
@@ -514,7 +514,7 @@ fn open_stack<S: StackStore>(
         let leaf = store
             .members_of(root_id, now_ms)
             .into_iter()
-            .filter(|m| m.macro_zone == root_zone && stack_branch(m.flags) == branch && !is_dead(m.flags))
+            .filter(|m| m.macro_zone == root_zone && stack_branch(m.flags) == branch && !is_dead(m.stock))
             .max_by_key(|m| stack_index(m.flags));
         let host = leaf.map(|m| bits(m.packed_definition)).unwrap_or(root_bits);
         host.hosts & stack_bit(stack) != 0
@@ -577,7 +577,7 @@ fn resolve_stack<S: StackStore>(
     let parent = store
         .card_at(parent_id, now_ms)
         .ok_or_else(|| format!("place: parent card {parent_id} not found"))?;
-    if is_dead(parent.flags) {
+    if is_dead(parent.stock) {
         return Err(format!("place: parent card {parent_id} is dead"));
     }
     if drop_hold_count(parent.flags) > 0 {

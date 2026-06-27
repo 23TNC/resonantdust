@@ -195,9 +195,13 @@ pub fn drop_hold_count(flags: u32) -> u8 {
     layout().drop_hold.read(flags) as u8
 }
 
-/// `flags.dead` set?
-pub fn is_dead(flags: u32) -> bool {
-    flags & layout().dead != 0
+/// Is this card marked dead? Reads the `Dead` count in the global-aspect region
+/// of the `stock` word (the op-log materializes it there). Superseded the old
+/// `flags.dead` bit read — `dead` is now a stock aspect (`aspects::stock_is_dead`),
+/// so every reader takes `stock`, not `flags`. The `flags` dead bit is still
+/// written in parallel during the migration but no longer read here.
+pub fn is_dead(stock: u64) -> bool {
+    crate::aspects::stock_is_dead(stock)
 }
 
 /// `flags.pos_need` — the server REQUIRES this card's position (a spawn or an
@@ -219,8 +223,8 @@ pub fn pos_want(flags: u32) -> bool {
 /// skips such cards so it never proposes what the gate would reject. (A borrow
 /// hold only blocks *exclusive* claims, so it's verb-dependent and lives in
 /// `check_card`, not here.)
-pub fn bind_blocked(flags: u32) -> bool {
-    is_dead(flags) || hold_count(flags, HoldField::SlotClaim) > 0
+pub fn bind_blocked(flags: u32, stock: u64) -> bool {
+    is_dead(stock) || hold_count(flags, HoldField::SlotClaim) > 0
 }
 // `player_owned` flag RETIRED (bit 24 reclaimed): the player_soul is identified
 // by its DEFINITION now (`packed::is_player_soul`, the reserved 0xFFF0..=0xFFFF
@@ -401,10 +405,12 @@ mod tests {
 
     #[test]
     fn apply_preserves_state_and_holds() {
-        // A state bit and a hold count survive a placement write.
+        // A state bit and a hold count survive a placement write. (Uses the raw
+        // dead FLAG bit as a sample state bit; `is_dead` now reads stock, so check
+        // the flag mask directly rather than via the helper.)
         let base = layout().dead | increment_hold(0, HoldField::Touch);
         let (_ml, f) = Micro::snap(0, 0).apply(base);
-        assert!(is_dead(f));
+        assert_ne!(f & layout().dead, 0);
         assert_eq!(hold_count(f, HoldField::Touch), 1);
     }
 
