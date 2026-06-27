@@ -223,8 +223,12 @@ pub fn pos_want(flags: u32) -> bool {
 /// skips such cards so it never proposes what the gate would reject. (A borrow
 /// hold only blocks *exclusive* claims, so it's verb-dependent and lives in
 /// `check_card`, not here.)
-pub fn bind_blocked(flags: u32, stock: u64) -> bool {
-    is_dead(stock) || hold_count(flags, HoldField::SlotClaim) > 0
+pub fn bind_blocked(stock: u64) -> bool {
+    use crate::aspects::{count, StockAspect};
+    // Both `dead` and the exclusive `claim` hold now live in the stock global
+    // region (op-log materialized), so this reads stock only — the `flags`
+    // refcounts the old version read are no longer written.
+    is_dead(stock) || count(stock, StockAspect::Claim) > 0
 }
 // `player_owned` flag RETIRED (bit 24 reclaimed): the player_soul is identified
 // by its DEFINITION now (`packed::is_player_soul`, the reserved 0xFFF0..=0xFFFF

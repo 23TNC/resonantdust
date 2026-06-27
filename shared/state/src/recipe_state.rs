@@ -11,7 +11,7 @@
 //! gathered snapshot. Flag reads delegate to [`resonantdust_codec::card_model`] (the single
 //! owner of the bit layout) — this module keeps no layout of its own.
 
-use resonantdust_codec::card_model::{bind_blocked, drop_hold_count, hold_count, is_dead, HoldField};
+use resonantdust_codec::card_model::{bind_blocked, is_dead};
 use resonantdust_codec::packed::is_player_soul;
 use std::collections::BTreeSet;
 
@@ -114,21 +114,23 @@ fn check_card(card: &CardView, card_id: u32, wants_exclusive: bool) -> Result<()
   // Verb-independent baseline (dead or exclusively claimed) — the SAME predicate
   // the client matcher applies (`bind_blocked`), so the matcher never proposes a
   // binding the gate would reject here.
-  if bind_blocked(card.flags, card.stock) {
+  if bind_blocked(card.stock) {
     return Err(format!(
       "card {card_id} unavailable: {}",
       if is_dead(card.stock) { "dead" } else { "exclusively held by another in-flight action" }
     ));
   }
-  if wants_exclusive && hold_count(card.flags, HoldField::SlotBorrow) > 0 {
+  // Holds (borrow/touch/drop) now live in the stock global region, not flags.
+  use resonantdust_codec::aspects::{count, StockAspect};
+  if wants_exclusive && count(card.stock, StockAspect::Borrow) > 0 {
     return Err(format!("card {card_id} is borrow-held by another in-flight action; cannot claim"));
   }
-  if u32::from(hold_count(card.flags, HoldField::Touch)) >= TOUCH_COUNT_CLIENT_CAP {
+  if u32::from(count(card.stock, StockAspect::TouchUser)) >= TOUCH_COUNT_CLIENT_CAP {
     return Err(format!(
       "card {card_id} has too many concurrent in-flight actions (cap {TOUCH_COUNT_CLIENT_CAP})"
     ));
   }
-  if drop_hold_count(card.flags) > 0 {
+  if count(card.stock, StockAspect::DropHold) > 0 {
     return Err(format!("card {card_id} blocks stacking (drop_hold_count > 0)"));
   }
   Ok(())
@@ -139,7 +141,7 @@ fn check_card(card: &CardView, card_id: u32, wants_exclusive: bool) -> Result<()
 #[cfg(test)]
 mod tests {
   use super::*;
-  use resonantdust_codec::flags::{flag_bit, flag_field};
+  use resonantdust_codec::flags::flag_bit;
   use std::collections::HashMap;
 
   // Build flag values from the real layout (the same source card_model reads),
@@ -147,9 +149,8 @@ mod tests {
   fn state_bit(name: &str) -> u32 {
     1u32 << flag_bit("flags", name).unwrap()
   }
-  fn hold_one(field: &str) -> u32 {
-    let f = flag_field("flags", field).unwrap();
-    (1u32 << f.shift) & f.mask()
+  fn hold_stock(aspect: resonantdust_codec::aspects::StockAspect) -> u64 {
+    resonantdust_codec::aspects::inc(0, aspect)
   }
 
   struct Mock(HashMap<u32, CardView>);
@@ -201,14 +202,18 @@ mod tests {
 
   #[test]
   fn exclusive_held_always_rejected() {
-    let s = store(&[card(50, 0, hold_one("slot_claim_count"))]);
+    let mut c = card(50, 0, 0);
+    c.stock = hold_stock(resonantdust_codec::aspects::StockAspect::Claim);
+    let s = store(&[c]);
     let err = validate_bindings(&s, 1, 0, &[vec![50]], 7, 0, no_excl).unwrap_err();
     assert!(err.contains("exclusively held"), "{err}");
   }
 
   #[test]
   fn borrow_held_rejected_only_when_claiming_exclusive() {
-    let s = store(&[card(50, 0, hold_one("slot_borrow_count"))]);
+    let mut c = card(50, 0, 0);
+    c.stock = hold_stock(resonantdust_codec::aspects::StockAspect::Borrow);
+    let s = store(&[c]);
     // not claiming exclusive → borrow hold is fine
     validate_bindings(&s, 1, 0, &[vec![50]], 7, 0, no_excl).expect("borrow ok");
     // claiming exclusive on 50 → conflict
