@@ -148,6 +148,21 @@ mod tests {
   }
 
   #[test]
+  fn checkpoint_preserves_future_folds() {
+    // The op-log GC collapses settled ops (time <= watermark) into one Set
+    // checkpoint at the watermark. That must not change any fold at or after the
+    // watermark — the invariant the shard `compact` relies on.
+    let all = [Op::inc(0, 1), Op::inc(5, 1), Op::dec(20, 1), Op::inc(8, 1)];
+    let watermark = 10;
+    let cp = fold(&all, watermark); // settled value as-of the watermark
+    let mut compacted = vec![Op::set(watermark, cp)];
+    compacted.extend(all.iter().filter(|o| o.time > watermark).copied());
+    for t in [10, 15, 20, 21, 999] {
+      assert_eq!(fold(&compacted, t), fold(&all, t), "fold diverged at t={t}");
+    }
+  }
+
+  #[test]
   fn fold_clamped_bounds_the_field() {
     assert_eq!(fold_clamped(&[Op::dec(0, 3)], 0, 7), 0, "over-release clamps to 0");
     assert_eq!(fold_clamped(&[Op::set(0, 99)], 0, 7), 7, "over-max clamps to max");
