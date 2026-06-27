@@ -7,6 +7,7 @@
   ::human>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         soul &data.type set
         2 &data.soul set
         1 &data.builder set
@@ -20,6 +21,7 @@
   ::human_builder>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         soul &data.type set
         2 &data.soul set
         1 &data.builder set
@@ -33,6 +35,7 @@
   ::player_soul>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         soul &data.type set
         ; Pin the def_id to the top of the soul type → packed_definition 0xFFFF
         ; (reserved player-soul range 0xFFF0..=0xFFFF). The player_soul is then
@@ -49,6 +52,7 @@
   ::chord_soul>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         soul &data.type set
         2 &data.soul set
         1 &data.chord set

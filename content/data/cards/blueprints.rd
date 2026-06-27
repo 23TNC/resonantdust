@@ -5,6 +5,7 @@
   ::blueprint_nd_furnace>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         blueprint &data.type set
 
   ; A reusable blueprint: placed in the world and fed dust (stacked on top of it),
@@ -15,5 +16,6 @@
   ::blueprint_chord_soul>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         blueprint &data.type set
         14 &data.stack_hosts set

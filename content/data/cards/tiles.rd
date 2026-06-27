@@ -18,6 +18,7 @@
   ::inventory>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         10 &data.cost set
@@ -25,6 +26,7 @@
   ::empty>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         10 &data.cost set
@@ -32,6 +34,7 @@
   ::concrete>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         10 &data.cost set
@@ -45,6 +48,7 @@
         ; declare one. Stone is a mountain/desert aspect, not a forest one.
         2    &data.pine stock
         2    &data.flora stock
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         30   &data.cost set
@@ -98,6 +102,7 @@
       @define>
         2 &data.flora stock
         2 &data.berry stock
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         5 &data.cost set
@@ -137,6 +142,7 @@
         2    &data.water stock
         2    &data.food  stock
         2    &data.fuel  stock
+        &data $data_func::aspect_flags call drop
         tile &data.type  set
         12   &data.cost  set
       @init>
@@ -176,6 +182,7 @@
         2 &data.stone stock
         1 &data.flora stock
         2 &data.metal stock
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         15 &data.cost set
@@ -212,22 +219,27 @@
   ::building_nd_furnace>
     :data>
       @define>
+        ; `fire` is the building's zone-savable gameplay stock — declare it BEFORE
+        ; aspect_flags so it stays in the bottom slots.
+        2 &data.fire stock
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
-        2 &data.fire stock
         50 &data.cost set
 
   ::building_workbench>
     :data>
       @define>
+        2 &data.fire stock
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
-        2 &data.fire stock
         50 &data.cost set
 
   ::alter>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         1 &data.level set
@@ -236,6 +248,7 @@
   ::anima_fountain>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         1 &data.anima set
@@ -244,6 +257,7 @@
   ::aether_fountain>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         1 &data.aether set
@@ -252,6 +266,7 @@
   ::table>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         tile &data.type set
         2 &data.stack_joins set
         30 &data.cost set

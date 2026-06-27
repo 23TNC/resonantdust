@@ -8,17 +8,20 @@
   ::dread>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         revery &data.type set
 
   ::test>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         event &data.type set
         2 &data.stack_joins set
 
   ::despair>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         event &data.type set
         2 &data.stack_joins set
         12 &data.stack_hosts set
@@ -30,6 +33,7 @@
   ::strike>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         event &data.type set
         2 &data.stack_joins set
         12 &data.stack_hosts set
@@ -45,6 +49,7 @@
   ::gloom>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         event &data.type set
         2 &data.stack_joins set
         12 &data.stack_hosts set

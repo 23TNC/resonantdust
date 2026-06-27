@@ -8,6 +8,7 @@
   ::log>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         2 &data.fuel set
         2 &data.wood set
@@ -18,6 +19,7 @@
   ::stick>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.fuel set
         1 &data.wood set
@@ -25,11 +27,13 @@
   ::stone>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
 
   ::dust>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.aether set
         14 &data.stack_hosts set
@@ -41,6 +45,7 @@
   ::test_dust>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.aether set
         0 &data.stack_hosts set
@@ -49,18 +54,21 @@
   ::food>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.food set
 
   ::reliquary>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.anima set
 
   ::corpse>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.corpse set
         1 &data.inventory set
@@ -68,6 +76,7 @@
   ::corpse_chorus>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.corpse set
         1 &data.inventory set
@@ -76,6 +85,7 @@
   ::corpse_chord>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.corpse set
         1 &data.inventory set
@@ -84,6 +94,7 @@
   ::corpse_resonance>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.corpse set
         1 &data.inventory set
@@ -92,11 +103,13 @@
   ::axe>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
 
   ::pickaxe>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
 
   ; Test card for the per-card stock model: an 8-bit `progress` counter in stock
@@ -107,6 +120,7 @@
   ::tally>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         8 &data.progress stock
         1 &data.progress set
@@ -121,16 +135,19 @@
   ::anvil>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         1 &data.forged stock
         0 &data.forged set
   ::widget>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
         8 &data.progress stock
         1 &data.progress set
   ::pip>
     :data>
       @define>
+        &data $data_func::aspect_flags call drop
         requisite &data.type set
