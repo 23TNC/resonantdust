@@ -129,7 +129,7 @@ fn translate<S: CardStore>(
     }
 
     // Cards created in THIS plan are folded: each `create … as h` becomes a
-    // synthetic payload that same-card `&h.aspect.x set` / `&h destroy` mutate in
+    // synthetic payload that same-card `&h.data.x set` / `&h destroy` mutate in
     // place, so a created card is one `Effect::Create` row, never a follow-up
     // `SetCardStock`. A created card referencing another (nesting via
     // `&parent.inventory create`) is the only cross-create link; the parent gets a
@@ -494,12 +494,12 @@ mod tests {
         let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  \
             ::progress>\n    @define>\n      traits &section set\n";
         let cards = "<card>\n\
-            \x20 ::human>\n    :data>\n      @define>\n        requisite &aspect.type set\n\
-            \x20 ::log>\n    :data>\n      @define>\n        requisite &aspect.type set\n        \
-                8 &aspect.progress stock\n        1 &aspect.progress set\n\
-            \x20 ::pip>\n    :data>\n      @define>\n        requisite &aspect.type set\n";
+            \x20 ::human>\n    :data>\n      @define>\n        requisite &data.type set\n\
+            \x20 ::log>\n    :data>\n      @define>\n        requisite &data.type set\n        \
+                8 &data.progress stock\n        1 &data.progress set\n\
+            \x20 ::pip>\n    :data>\n      @define>\n        requisite &data.type set\n";
         let recipe = "<recipe>\n  ::make>\n    @input>\n      &slot.0.0 use\n    @output>\n      \
-            $card::log &slot.0.0.inventory create &h as\n      4 &h.aspect.progress set\n      \
+            $card::log &slot.0.0.inventory create &h as\n      4 &h.data.progress set\n      \
             $card::pip &h.inventory create\n";
         load(&[
             ("a.rd".into(), aspects.into()),
@@ -568,8 +568,8 @@ mod tests {
         let b = {
             let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
             let cards = "<card>\n\
-                \x20 ::human>\n    :data>\n      @define>\n        requisite &aspect.type set\n\
-                \x20 ::log>\n    :data>\n      @define>\n        requisite &aspect.type set\n";
+                \x20 ::human>\n    :data>\n      @define>\n        requisite &data.type set\n\
+                \x20 ::log>\n    :data>\n      @define>\n        requisite &data.type set\n";
             let recipe = "<recipe>\n  ::poof>\n    @input>\n      &slot.0.0 use\n    @output>\n      \
                 $card::log &slot.0.0.inventory create &h as\n      &h destroy\n";
             load(&[
