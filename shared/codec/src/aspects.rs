@@ -203,6 +203,16 @@ pub fn dec(stock: u64, aspect: StockAspect) -> u64 {
   f.set(stock, v)
 }
 
+/// `true` when ANY hold is active on the card (claim/borrow/pos_hold/drop_hold/
+/// touch). Excludes `dead`/`reap` (lifecycle, not holds). The stock-region
+/// replacement for `card_model::has_active_holds`'s flag read.
+pub fn has_active_holds(stock: u64) -> bool {
+  use StockAspect::*;
+  [Claim, Borrow, PosHold, DropHold, TouchUser, TouchServer]
+    .iter()
+    .any(|&a| count(stock, a) > 0)
+}
+
 /// `true` when the card is marked dead (`Dead` count `> 0`). The content-free
 /// reaper predicate over `stock` — the eventual replacement for
 /// `card_model::is_dead`'s `flags`-bit read.

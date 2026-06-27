@@ -14,8 +14,9 @@
 //! points at the root, each carrying a `branch` + `index`. Stacking a card makes
 //! it (and its own members) members of the target's root.
 
+use resonantdust_codec::aspects;
 use resonantdust_codec::card_model::{
-    drop_hold_count, hold_count, is_dead, stack_branch, stack_index, HoldField, Micro,
+    is_dead, stack_branch, stack_index, Micro,
 };
 use resonantdust_codec::packed::{
     owner_of, surface_of, with_surface, STACK_DIR_DOWN, STACK_DIR_HEX, STACK_DIR_UP,
@@ -248,13 +249,13 @@ pub fn can_seat_on_tile<S: StackStore>(
 
 /// Reject if `view` is held by an in-flight action (claim / borrow / position).
 fn held_check(view: &CardView, what: &str) -> Result<(), String> {
-    if hold_count(view.flags, HoldField::SlotClaim) > 0 {
+    if aspects::count(view.stock, aspects::StockAspect::Claim) > 0 {
         return Err(format!("place: {what} {} is exclusively held by an in-flight action", view.card_id));
     }
-    if hold_count(view.flags, HoldField::SlotBorrow) > 0 {
+    if aspects::count(view.stock, aspects::StockAspect::Borrow) > 0 {
         return Err(format!("place: {what} {} is borrow-held by an in-flight action", view.card_id));
     }
-    if hold_count(view.flags, HoldField::PositionHold) > 0 {
+    if aspects::count(view.stock, aspects::StockAspect::PosHold) > 0 {
         return Err(format!("place: {what} {} is position-held by an in-flight action", view.card_id));
     }
     Ok(())
@@ -296,7 +297,7 @@ fn carried_run<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<
         if stack_index(m.flags) != expected {
             break; // a gap ends the contiguous run (shouldn't happen post-collapse)
         }
-        if hold_count(m.flags, HoldField::PositionHold) > 0 {
+        if aspects::count(m.stock, aspects::StockAspect::PosHold) > 0 {
             break; // a position-held card can't be carried — it (and above) stay
         }
         run.push(m);
@@ -580,7 +581,7 @@ fn resolve_stack<S: StackStore>(
     if is_dead(parent.stock) {
         return Err(format!("place: parent card {parent_id} is dead"));
     }
-    if drop_hold_count(parent.flags) > 0 {
+    if aspects::count(parent.stock, aspects::StockAspect::DropHold) > 0 {
         return Err(format!("place: parent card {parent_id} blocks stacking (drop_hold_count > 0)"));
     }
     let parent_root = chain_root_of(&parent);
@@ -1181,11 +1182,10 @@ mod tests {
         // root 100; top: 200@0, 201@1, 202@2 (POSITION-HELD), 203@3. Move 200 loose:
         // the run carries 201 only (it stops at the held 202); 202+203 stay and
         // collapse to 0,1 on root 100. Mirrors jim moving axe1 with dust locked.
-        use resonantdust_codec::card_model::{increment_hold, HoldField};
         let mz = with_surface(0, WORLD_LAYER);
         let held = {
             let mut c = stacked(202, 1024, mz, 100, STACK_DIR_UP, 2);
-            c.flags = increment_hold(c.flags, HoldField::PositionHold);
+            c.stock = aspects::inc(c.stock, aspects::StockAspect::PosHold);
             c
         };
         let store = Mock::default()
