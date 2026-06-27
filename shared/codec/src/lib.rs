@@ -10,6 +10,7 @@ pub mod aspects;
 pub mod bits;
 pub mod card_model;
 pub mod flags;
+pub mod oplog;
 pub mod packed;
 pub mod plan;
 pub mod stacking;

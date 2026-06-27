@@ -1,14 +1,14 @@
 {
-  "build": 236,
-  "generated": "2026-06-27T16:06:47Z",
+  "build": 241,
+  "generated": "2026-06-27T17:28:47Z",
   "components": {
-    "shared": { "hash": "5f8796321bb0f82237628d194b4a5ce011e7586312bcb44253f024423be102f1", "seq": 232, "ts": "2026-06-27T16:06:14Z" },
-    "shard": { "hash": "9a13d89741bac3b856652a114e4abe569b500d47f6d3466cfdbcf57ad431e370", "seq": 233, "ts": "2026-06-27T16:06:14Z" },
-    "players": { "hash": "e2467c63066e81e087be6ae1c61c4916617bf586bd1bccb8839f14b14906ef32", "seq": 234, "ts": "2026-06-27T16:06:14Z" },
+    "shared": { "hash": "e01d4837e25c7f8ccc73853c7ae3da9daf7201af197043c26544bb90bac322a3", "seq": 237, "ts": "2026-06-27T17:28:47Z" },
+    "shard": { "hash": "a1faaac82a8c50c8c8326300cb66c4653394eb7a5daa07cdfab298f0e607a9c2", "seq": 238, "ts": "2026-06-27T17:28:47Z" },
+    "players": { "hash": "c2e6a5df0933b9d5a4813302d0b3278e677380d71346a941c0ac910da7c69a38", "seq": 239, "ts": "2026-06-27T17:28:47Z" },
     "chat": { "hash": "327dc9fae578063b1728feafcc5ff92e811c67a1897ffadee7a8407cd5918aa7", "seq": 4, "ts": "2026-06-13T19:52:27Z" },
     "regionindex": { "hash": "88b165b5ce2062da6deb5d4a81355eb92bb89f18864941849e4b99eafb45b5c5", "seq": 5, "ts": "2026-06-13T19:52:27Z" },
-    "gate": { "hash": "2d577b504e5d8004042ccc80be8bb653210454f38d4d26869e3eef5cd5b67912", "seq": 235, "ts": "2026-06-27T16:06:14Z" },
-    "content": { "hash": "f3355de88f89ddd26d0882a739aa3573488770af1bd221362fb0afd99a50ec2f", "seq": 236, "ts": "2026-06-27T16:06:14Z" },
+    "gate": { "hash": "e16dee8b40a302f88badf500068138d77f528bbc76f178d5d02635b96c9982ce", "seq": 240, "ts": "2026-06-27T17:28:47Z" },
+    "content": { "hash": "2239d3e3d14631887cad5175988693a94df93c2244d53f0e473b9f6f038d86a6", "seq": 241, "ts": "2026-06-27T17:28:47Z" },
     "client": { "hash": "cbab38684f3c6e5665d09312efb03225001e6be285fa61ce6baaa9095f094c43", "seq": 221, "ts": "2026-06-26T15:00:05Z" },
     "view": { "hash": "849ab8027a03b1abe9e7ed9a2d63dc7754843961515c600016f271bbef6fbfb8", "seq": 222, "ts": "2026-06-26T15:00:05Z" }
   }

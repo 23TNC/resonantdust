@@ -115,6 +115,36 @@ Because compaction doesn't change the *materialized value*, **no card row change
 so nothing reaches the client** — the whole churn-on-subscription problem
 disappears. Reads fold checkpoint + live tail.
 
+## Chosen mechanism (locked)
+
+The op-log is built, **not** a generalized in-place `propagate_hold_forward`. The
+forward-prop trick only works for **commutative** deltas (`±δ` is base-independent,
+so rewriting materialized rows is correct regardless of arrival order). It cannot
+fold a **value-dependent** op (`set`/`mul`): re-folding a changed base needs the
+op *type* per entry, which only a log records. Since `@output` can already express
+a future-stamped `set` timeline, the log is the only general answer.
+
+**The fold is an ordered replay.** `value_as_of(at)` = replay every op with
+`time ≤ at` in time order (`set` resets, `inc`/`dec` add/sub). Commutative logs
+reduce to the Σ; the ordering is what makes `set` correct. GC collapses settled
+ops into one `set` checkpoint so the replay never walks all history.
+
+**Relationship to the materialized card rows (ST-only).** The log is the
+authoritative delta record; the **card row's `stock` field is the materialized
+fold**, written at each relevant `valid_at` so the existing card subscription fans
+current + future-stamped rows to the client unchanged. Appending an op folds the
+`(card, aspect)` window and rewrites the affected card rows' aspect field — for
+the commutative case this is exactly today's `propagate_hold_forward` row-rewrite,
+now *backed by* the log (which adds value-dependent re-fold + the checkpoint/GC the
+in-place version can't do).
+
+**Scope (first cut).** The log carries the **global** aspects (holds + `dead`/
+`reap`), identified by `aspect_id:u4` → the codec stock-prefix registry
+(`aspects.rs`). Per-def magnitudes stay single-stamp `SetCardStock` (one stamp has
+no out-of-order fold). A per-def *multi-stamp value-dependent* write would extend
+the row to carry explicit `(shift, width)` instead of an `aspect_id` — deferred
+until a recipe needs it.
+
 ## Implementation plan
 
 Server-side (shard) + rules/codec translate + gate. Each phase unit-testable.
