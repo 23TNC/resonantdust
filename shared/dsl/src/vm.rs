@@ -724,19 +724,25 @@ const PRIM_KINDS: &[&str] = &["hex", "rect", "sprite", "text", "progress", "mask
 #[derive(Default, Debug)]
 pub struct Functions {
   map: HashMap<String, Vec<Stmt>>,
+  /// `<data_func>` bodies — pure aspect-mutating helpers, a registry DISTINCT
+  /// from `functions` (called `$data_func::name`, args passed on the operand
+  /// stack + retrieved with `pop`, returning one value). Kept separate so a
+  /// `data_func` and a `functions` def may share a name without colliding.
+  data: HashMap<String, Vec<Stmt>>,
 }
 impl Functions {
-  /// Register every `::name>` function from each `<functions>` bucket, keyed by
-  /// the bare def name (version included, e.g. `ring_objects` / `ring_objects.1`).
+  /// Register every `::name>` def from each `<functions>` / `<data_func>` bucket,
+  /// keyed by the bare def name (version included, e.g. `ring_objects.1`).
   pub fn add(&mut self, root: &Node) {
     for b in &root.children {
       let Header::Bucket(bucket) = &b.header else { continue };
-      if bucket == "functions" {
-        // canonical: `<functions>` with code-bodied `::name>` defs.
+      if bucket == "functions" || bucket == "data_func" {
+        // canonical: code-bodied `::name>` defs. `data_func` → its own registry.
+        let dst = if bucket == "data_func" { &mut self.data } else { &mut self.map };
         for d in &b.children {
           if let Header::Def(fname) = &d.header {
             if !d.body.is_empty() {
-              self.map.insert(fname.clone(), d.body.clone());
+              dst.insert(fname.clone(), d.body.clone());
             }
           }
         }
@@ -749,19 +755,28 @@ impl Functions {
       }
     }
   }
-  /// Resolve a function body by name: exact (covers a bare `ring_objects` and an
-  /// explicit `ring_objects.2` pin), else the lineage **head** — so a call to
+  /// Resolve a `functions` body by name: exact (covers a bare `ring_objects` and
+  /// an explicit `ring_objects.2` pin), else the lineage **head** — so a call to
   /// `$functions::ring_objects` against a versioned lineage runs the latest.
   fn get(&self, name: &str) -> Option<&Vec<Stmt>> {
-    self.map.get(name).or_else(|| {
-      self
-        .map
-        .iter()
-        .filter(|(k, _)| crate::loader::lineage(k) == name)
-        .max_by_key(|(k, _)| crate::loader::version_of(k))
-        .map(|(_, v)| v)
-    })
+    head_of(&self.map, name)
   }
+  /// Resolve a `data_func` body by name (same lineage-head rule as [`get`]).
+  fn get_data(&self, name: &str) -> Option<&Vec<Stmt>> {
+    head_of(&self.data, name)
+  }
+}
+
+/// Exact lookup, else the highest-version lineage head — shared by `functions`
+/// and `data_func` resolution.
+fn head_of<'a>(map: &'a HashMap<String, Vec<Stmt>>, name: &str) -> Option<&'a Vec<Stmt>> {
+  map.get(name).or_else(|| {
+    map
+      .iter()
+      .filter(|(k, _)| crate::loader::lineage(k) == name)
+      .max_by_key(|(k, _)| crate::loader::version_of(k))
+      .map(|(_, v)| v)
+  })
 }
 
 /// A hold a recipe `@input` line acquires on a bound slot. The four verbs encode
@@ -836,7 +851,7 @@ pub struct Plan {
 /// biome/seed); `cat` is for ref-following derefs; `funcs` for `$functions:x call`.
 pub fn run(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog, funcs: &Functions) -> Result<(), String> {
   let mut plan = Plan::default();
-  exec(body, store, host, cat, funcs, &mut plan, Mode::Data, 0).map(|_| ())
+  exec(body, store, host, cat, funcs, &mut plan, Mode::Data, 0, Vec::new()).map(|_| ())
 }
 
 /// Evaluate a recipe's `@input` against a positioned operating-set `store`.
@@ -846,7 +861,7 @@ pub fn run(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Cata
 /// store, and slides the frame by re-calling with successive positions.
 pub fn match_recipe(input: &[Stmt], store: &mut Store, cat: &Catalog, funcs: &Functions) -> Result<Plan, String> {
   let mut plan = Plan::default();
-  exec(input, store, &[], cat, funcs, &mut plan, Mode::Input, 0)?;
+  exec(input, store, &[], cat, funcs, &mut plan, Mode::Input, 0, Vec::new())?;
   let expected = input.iter().filter(|s| matches!(s, Stmt::Instr(_))).count();
   plan.matched = plan.holds.len() == expected && expected > 0;
   Ok(plan)
@@ -857,12 +872,12 @@ pub fn match_recipe(input: &[Stmt], store: &mut Store, cat: &Catalog, funcs: &Fu
 pub fn plan_recipe(output: &[Stmt], store: &mut Store, cat: &Catalog, funcs: &Functions) -> Result<Plan, String> {
   let mut plan = Plan::default();
   plan.matched = true;
-  exec(output, store, &[], cat, funcs, &mut plan, Mode::Output, 0)?;
+  exec(output, store, &[], cat, funcs, &mut plan, Mode::Output, 0, Vec::new())?;
   Ok(plan)
 }
 
 /// Returns the body's return value (`<val> ret`, or `Val(0)` on fall-through).
-fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog, funcs: &Functions, plan: &mut Plan, mode: Mode, depth: u32) -> Result<Item, String> {
+fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog, funcs: &Functions, plan: &mut Plan, mode: Mode, depth: u32, mut args: Vec<Item>) -> Result<Item, String> {
   if depth > 64 {
     return Err("call depth exceeded".into());
   }
@@ -1075,19 +1090,34 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               break 'line;
             }
             // global function — run inline over the same store; push its return.
-            // Strip the `functions` namespace from the ref (`$functions::ring`
-            // → `ring`; legacy single-colon `$functions:ring` too), leaving the
-            // lineage name `funcs.get` resolves to head.
             Some(Item::Sym(s)) => {
-              let name = s
-                .strip_prefix("functions::")
-                .or_else(|| s.strip_prefix("functions:"))
-                .unwrap_or(&s);
-              let r = match funcs.get(name) {
-                Some(fbody) => exec(fbody, store, host, cat, funcs, plan, mode, depth + 1)?,
-                None => Item::Val(0),
-              };
-              st.push(r);
+              if let Some(name) = s.strip_prefix("data_func::").or_else(|| s.strip_prefix("data_func:")) {
+                // `$data_func::name` — a pure helper. Its args are whatever
+                // remains on THIS line's operand stack below the callee sym,
+                // passed in push order and retrieved with `pop`. An address arg
+                // (`&slot.1.0.aspect`) becomes a `Ref` the callee aliases, so the
+                // helper reads/writes THROUGH to the bound card. Returns one
+                // value (`<v> ret`). Distinct registry from `functions`.
+                let call_args = std::mem::take(&mut st);
+                let r = match funcs.get_data(name) {
+                  Some(fbody) => exec(fbody, store, host, cat, funcs, plan, mode, depth + 1, call_args)?,
+                  None => Item::Val(0),
+                };
+                st.push(r);
+              } else {
+                // `$functions::ring` (legacy `$functions:ring` too) — strip the
+                // namespace, leaving the lineage name `funcs.get` heads. No
+                // operand args; shares the store.
+                let name = s
+                  .strip_prefix("functions::")
+                  .or_else(|| s.strip_prefix("functions:"))
+                  .unwrap_or(&s);
+                let r = match funcs.get(name) {
+                  Some(fbody) => exec(fbody, store, host, cat, funcs, plan, mode, depth + 1, Vec::new())?,
+                  None => Item::Val(0),
+                };
+                st.push(r);
+              }
             }
             // `^r2`: resolve a texture STEM from the manifest. The DSL pushes
             // `<category> <object> <part> <index> <seed>` (via `*pack.*`/`*part`/
@@ -1321,6 +1351,18 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               .ok_or_else(|| format!("`as` ({addr:?}) with no preceding create"))?;
             store.write(&addr, Cell::Ref(handle));
           }
+          // `pop` — retrieve the next call argument (FIFO: first pushed by the
+          // caller is first popped). An address arg becomes a `Ref` so the
+          // callee aliases the caller's slot (`pop &a set`, then `*a.dead` /
+          // `&a.claim inc` read/write THROUGH to the bound card); other args
+          // pass through unchanged. Empty arg list → `0` (a void call).
+          "pop" => {
+            let it = if args.is_empty() { Item::Val(0) } else { args.remove(0) };
+            st.push(match it {
+              Item::Addr(p) => Item::Cell(Cell::Ref(p)),
+              other => other,
+            });
+          }
           "rtl" | "ltr" => st.push(Item::Sym(w.clone())),
           other => st.push(Item::Sym(other.to_string())),
         },
@@ -1365,6 +1407,59 @@ mod tests {
       ])),
       ("seed".into(), Cell::Int(99)),
     ]
+  }
+
+  // --- Phase A: <data_func> + pop/ret ABI ---
+
+  #[test]
+  fn data_func_call_aliases_arg_through_ref() {
+    // `pop &a set` turns the passed address into a Ref alias, so a write through
+    // `a` lands on the caller's bound slot.
+    let src = "\
+<data_func>
+  ::stamp>
+    pop &a set
+    7 &a.claim set
+    0 ret
+<card>
+  ::c>
+    :data>
+      @init>
+        &target $data_func::stamp call drop
+";
+    let root = parse(src).unwrap();
+    let mut funcs = Functions::default();
+    funcs.add(&root);
+    let mut store = Store::with_root(Cell::Map(vec![(
+      "target".into(),
+      Cell::Map(vec![("claim".into(), Cell::Int(0))]),
+    )]));
+    run(find(&root, "init").unwrap(), &mut store, &[], &Catalog::default(), &funcs).unwrap();
+    assert_eq!(store.read("target.claim"), Some(&Cell::Int(7)));
+  }
+
+  #[test]
+  fn data_func_pop_is_fifo_and_returns() {
+    // Two args: first pushed is first popped (FIFO); the function returns one
+    // value the caller consumes.
+    let src = "\
+<data_func>
+  ::pick>
+    pop &x set
+    pop &y set
+    *x *y add ret
+<card>
+  ::c>
+    :data>
+      @init>
+        3 4 $data_func::pick call &result set
+";
+    let root = parse(src).unwrap();
+    let mut funcs = Functions::default();
+    funcs.add(&root);
+    let mut store = Store::default();
+    run(find(&root, "init").unwrap(), &mut store, &[], &Catalog::default(), &funcs).unwrap();
+    assert_eq!(store.read("result"), Some(&Cell::Int(7)));
   }
 
   #[test]

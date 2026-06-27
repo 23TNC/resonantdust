@@ -70,6 +70,8 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
     "call" => (1, 1),
     "ret" => (1, 0),
     "drop" => (1, 0),
+    // `pop` retrieves one call argument onto the stack (see vm `pop`).
+    "pop" => (0, 1),
     "rtl" | "ltr" => (0, 1),
     _ => return None,
   };
@@ -136,12 +138,21 @@ fn check_body(node: &Node, path: &str, diags: &mut Vec<Diagnostic>) {
     };
 
     // --- stack neutrality ---
+    // A `$data_func::x call` drains its args: at runtime the call consumes the
+    // whole line's operand stack (callee sym + every pushed arg) and leaves one
+    // return. So on such a line, model `call` as "consume the stack, push the
+    // return" rather than the arity-uniform (1,1). (Detected by the data_func
+    // ref being present; a line never mixes a data_func and a legacy call.)
+    let data_func_call = toks
+      .iter()
+      .any(|t| matches!(t, Token::Const(s) if s.starts_with("data_func:")));
     let mut depth: i64 = 0;
     let mut underflowed = false;
     for tok in toks {
       // A bare word is an op if known; otherwise a literal constant (an
       // enum/type token like `faculty`/`rtl`) that pushes one value.
       let (pops, pushes) = match tok {
+        Token::Word(w) if w == "call" && data_func_call => (depth.max(0) as u32, 1),
         Token::Word(w) => op_effect(w).unwrap_or((0, 1)),
         Token::System(s) => sys_effect(s),
         _ => (0, 1),

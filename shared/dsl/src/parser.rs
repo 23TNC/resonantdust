@@ -227,11 +227,14 @@ fn parse_structural(lines: &[LexLine], i: &mut usize, parent_indent: i64) -> Res
       Raw::Angle(name) => {
         let name = name.clone();
         *i += 1;
-        if name == "functions" {
-          // `<functions>` holds code-bodied `::name>` defs — each a function
-          // (its body is a flat instruction stream, like a hook). Same `<>`/`::`
-          // grammar as every other space, so functions catalogue + version like
-          // cards. (`<card>`/`<recipe>` `::` defs nest structurally instead.)
+        if name == "functions" || name == "data_func" {
+          // `<functions>` / `<data_func>` hold code-bodied `::name>` defs — each
+          // a function (its body is a flat instruction stream, like a hook).
+          // Same `<>`/`::` grammar as every other space, so they catalogue +
+          // version like cards. (`<card>`/`<recipe>` `::` defs nest structurally
+          // instead.) `data_func` is a DISTINCT registry from `functions` (pure
+          // aspect-mutating helpers, called `$data_func::name`); the parse shape
+          // is identical, the loader keys them apart.
           let c = parse_function_defs(lines, i, line_indent)?;
           Node { header: Header::Bucket(name), children: c, body: Vec::new() }
         } else if name.starts_with("functions:") {
