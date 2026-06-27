@@ -111,20 +111,28 @@ fn translate<S: CardStore>(
                         .ok_or_else(|| format!("stock op: unknown handle created.{idx}"))?;
                     s.stock = fold_stock(bundle, &s.def_key, s.stock, aspect, *delta, *abs)?;
                 } else if let Some(card_id) = frame.card_at(slot) {
-                    // A bound CARD → write its per-card `stock` u64 (current value
-                    // with this slot's bits replaced), as an absolute SetCardStock
-                    // stamped at `at`.
-                    let c = store
-                        .card_at(card_id, now_ms)
-                        .ok_or_else(|| format!("stock op: bound card {card_id} not found"))?;
-                    let name = bundle
-                        .name_for_packed(c.packed_definition)
-                        .ok_or_else(|| format!("stock op: card {card_id} packed not in bundle"))?;
-                    let new_stock = fold_stock(bundle, name, c.stock, aspect, *delta, *abs)?;
-                    ap.effects.push(TimedEffect {
-                        at,
-                        effect: Effect::SetCardStock { card_id, stock: new_stock },
-                    });
+                    // `data.dead inc` on a bound card → mark it dead (the dead FLAG
+                    // the reaper acts on). The shard is content-agnostic, so the
+                    // gate does the dead-aspect → flag translation here.
+                    if aspect == "dead" && !*abs && *delta > 0 {
+                        ap.effects.push(TimedEffect { at, effect: Effect::Destroy { card_id } });
+                    } else {
+                        // Any other aspect (holds claim/touch/…, gameplay, pstyle)
+                        // → write the card's per-card `stock` u64 (current value
+                        // with this slot's bits replaced), as an absolute
+                        // SetCardStock stamped at `at`.
+                        let c = store
+                            .card_at(card_id, now_ms)
+                            .ok_or_else(|| format!("stock op: bound card {card_id} not found"))?;
+                        let name = bundle
+                            .name_for_packed(c.packed_definition)
+                            .ok_or_else(|| format!("stock op: card {card_id} packed not in bundle"))?;
+                        let new_stock = fold_stock(bundle, name, c.stock, aspect, *delta, *abs)?;
+                        ap.effects.push(TimedEffect {
+                            at,
+                            effect: Effect::SetCardStock { card_id, stock: new_stock },
+                        });
+                    }
                 } else {
                     // Unplaced → the synthetic tile (the zone-savable u4 path).
                     let tile = synth
@@ -467,5 +475,60 @@ mod tests {
             !ap.effects.iter().any(|t| matches!(t.effect, Effect::SetCardStock { .. })),
             "created-card stock must fold into Create, not emit SetCardStock"
         );
+    }
+
+    // The new-model timeline translation: a hold (`data.claim inc`) at sys.time 0
+    // becomes a SetCardStock @at=0; a `data.dead inc` becomes a Destroy (the dead
+    // FLAG the reaper acts on, since the shard is content-agnostic); a spawn at
+    // sys.time 10 is a Create @at=10. Verifies dead→Destroy, holds→stock, and
+    // per-effect `at` stamping.
+    #[test]
+    fn dead_to_destroy_holds_to_stock_timed() {
+        let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  \
+            ::claim>\n    @define>\n      traits &section set\n  \
+            ::dead>\n    @define>\n      traits &section set\n";
+        let cards = "<card>\n\
+            \x20 ::host>\n    :data>\n      @define>\n        requisite &data.type set\n        \
+                3 &data.claim stock\n        3 &data.dead stock\n\
+            \x20 ::widget>\n    :data>\n      @define>\n        requisite &data.type set\n";
+        let recipe = "<recipe>\n  ::act>\n    @input>\n      0 ret\n    @output>\n      \
+            0 &sys.time set\n      \
+            &slot.0.0.data.claim inc\n      \
+            10 &sys.time set\n      \
+            &slot.0.0.data.dead inc\n      \
+            &slot.0.0 1 0 0 ^macro_zone call &z set\n      \
+            *z $card::widget &slot.0.0 ^create call drop\n";
+        let b = load(&[
+            ("a.rd".into(), aspects.into()),
+            ("c.rd".into(), cards.into()),
+            ("r.rd".into(), recipe.into()),
+        ])
+        .expect("load");
+
+        let root = 7000u32;
+        let host = b.packed_def("host").expect("host def");
+        let store = Mock(HashMap::from([(
+            root,
+            CardView {
+                card_id: root,
+                owner_id: 0,
+                micro_location: 0,
+                macro_zone: 0,
+                packed_definition: host,
+                flags: 0,
+                stock: 0,
+            },
+        )]));
+        let ap = run(&b, &store, "act", root, &[], None, 0).expect("run");
+
+        // claim acquire is a SetCardStock @at=0; dead is a Destroy @at=10; the
+        // spawn is a Create @at=10.
+        let claim = ap.effects.iter().find(|t| matches!(t.effect, Effect::SetCardStock { .. }));
+        assert!(matches!(claim, Some(TimedEffect { at: 0, effect: Effect::SetCardStock { card_id, .. } }) if *card_id == root),
+            "claim → SetCardStock @0 on root, got {:?}", claim);
+        assert!(ap.effects.iter().any(|t| matches!(t, TimedEffect { at: 10, effect: Effect::Destroy { card_id } } if *card_id == root)),
+            "dead → Destroy @10 on root, effects: {:?}", ap.effects);
+        assert!(ap.effects.iter().any(|t| matches!(&t.effect, Effect::Create { def_key, .. } if def_key == "widget") && t.at == 10),
+            "spawn → Create @10, effects: {:?}", ap.effects);
     }
 }
