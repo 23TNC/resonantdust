@@ -100,6 +100,22 @@ impl StockAspect {
     self as u8
   }
 
+  /// The DSL aspect path for this aspect — the inverse of [`from_name`], used to
+  /// overlay the materialized global value into the matcher's `data.*` store.
+  pub fn name(self) -> &'static str {
+    use StockAspect::*;
+    match self {
+      Claim => "claim",
+      Borrow => "borrow",
+      PosHold => "pos_hold",
+      DropHold => "drop_hold",
+      TouchUser => "touch.user",
+      TouchServer => "touch.server",
+      Dead => "dead",
+      Reap => "reap",
+    }
+  }
+
   /// Resolve a DSL aspect path to its global `StockAspect`, or `None` if the
   /// path is a per-def / non-global aspect (regular schema stock, or `visual.*`).
   /// The dotted paths (`touch.user` / `touch.server`) are the touch refcounts;

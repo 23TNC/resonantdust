@@ -99,15 +99,18 @@ pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
       store.write(&format!("data.{aspect}"), Cell::Int(*v));
     }
   }
-  // Overlay GLOBAL op-log aspects from the fixed stock region (not the schema).
-  // Only `dead` for now: its write goes through the op-log (apply_delta writes
-  // the global Dead field), so `can_claim`'s `*a.dead` must read there — this is
-  // what closes the dead-READ gap at the matcher level. The holds are NOT
-  // overlaid yet: they still write the schema slot, so reading them from the
-  // (zero) global region would break `can_claim`. Add them here in lockstep with
-  // routing their writes to LogOp.
-  let dead = resonantdust_codec::aspects::count(card.stock_raw, resonantdust_codec::aspects::StockAspect::Dead);
-  store.write("data.dead", Cell::Int(dead as i64));
+  // Overlay GLOBAL op-log aspects from the fixed stock region (bits 42-63), not
+  // the schema. The op-log materializes holds (claim/borrow/pos_hold/touch.*) +
+  // lifecycle (dead/reap) there; the schema decode above doesn't cover them, so
+  // `@input can_claim`'s `*a.dead` / `*a.claim` / `*a.touch.user` must read here.
+  // Overwrites any same-named schema slot (vestigial). Writes paired with routing
+  // these aspects' writes to `Effect::LogOp` in `dsl_recipe::translate`.
+  for id in 0..=resonantdust_codec::aspects::MAX_ASPECT_ID {
+    if let Some(asp) = resonantdust_codec::aspects::StockAspect::from_id(id) {
+      let v = resonantdust_codec::aspects::count(card.stock_raw, asp);
+      store.write(&format!("data.{}", asp.name()), Cell::Int(v as i64));
+    }
+  }
 
   store.drop_key("__schema"); // sidecar is schema-only; keep the matched frame clean
   fold_aspects(&mut store, bundle);

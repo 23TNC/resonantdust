@@ -36,9 +36,16 @@ pub enum Effect {
   /// zone-savable u4 path.
   ModifyTileStock { slot: u8, op: StockOp, delta: u8 },
   /// Set a bound CARD's full per-card `stock` u64 to a gate-computed value
-  /// (current stock with one slot's bits replaced) — the universal mutation:
-  /// holds, dead, pstyle, gameplay aspects all route here.
+  /// (current stock with one slot's bits replaced) — the PER-DEF mutation
+  /// (wood/pine/pstyle/…). GLOBAL aspects (holds / dead / reap) go through
+  /// [`Effect::LogOp`] instead.
   SetCardStock { card_id: u32, stock: u64 },
+  /// Append an op-log delta for a GLOBAL aspect (holds / `dead` / `reap`) and
+  /// materialize its stock value — the op-log path that supersedes
+  /// `SetCardStock`/`Destroy` for those. `aspect_id` is
+  /// [`crate::aspects::StockAspect::id`]; `op` is [`crate::oplog::AspectOp::code`].
+  /// The shard applies it via `oplog::apply_op` at this effect's stamp.
+  LogOp { card_id: u32, aspect_id: u8, op: u8, modifier: i64 },
 }
 
 /// Tile-stock arithmetic for [`Effect::ModifyTileStock`]. `code()` is the u8 the

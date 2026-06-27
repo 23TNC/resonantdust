@@ -111,16 +111,29 @@ fn translate<S: CardStore>(
                         .ok_or_else(|| format!("stock op: unknown handle created.{idx}"))?;
                     s.stock = fold_stock(bundle, &s.def_key, s.stock, aspect, *delta, *abs)?;
                 } else if let Some(card_id) = frame.card_at(slot) {
-                    // `data.dead inc` on a bound card → mark it dead (the dead FLAG
-                    // the reaper acts on). The shard is content-agnostic, so the
-                    // gate does the dead-aspect → flag translation here.
-                    if aspect == "dead" && !*abs && *delta > 0 {
-                        ap.effects.push(TimedEffect { at, effect: Effect::Destroy { card_id } });
+                    // GLOBAL aspect (holds claim/borrow/pos_hold/touch/dead/reap) →
+                    // op-log: append the ±delta and let the shard materialize the
+                    // stock global region (bits 42-63), commutative + forward-
+                    // propagated. The content-agnostic shard reads `aspect_id` →
+                    // fixed bits with no content. This supersedes the old dead→flag
+                    // Destroy and the holds-as-SetCardStock paths.
+                    if let Some(asp) = resonantdust_codec::aspects::StockAspect::from_name(aspect) {
+                        use resonantdust_codec::oplog::AspectOp;
+                        let (op, modifier) = if *abs {
+                            (AspectOp::Set, *delta)
+                        } else if *delta < 0 {
+                            (AspectOp::Dec, -*delta)
+                        } else {
+                            (AspectOp::Inc, *delta)
+                        };
+                        ap.effects.push(TimedEffect {
+                            at,
+                            effect: Effect::LogOp { card_id, aspect_id: asp.id(), op: op.code(), modifier },
+                        });
                     } else {
-                        // Any other aspect (holds claim/touch/…, gameplay, pstyle)
-                        // → write the card's per-card `stock` u64 (current value
-                        // with this slot's bits replaced), as an absolute
-                        // SetCardStock stamped at `at`.
+                        // Per-def aspect (gameplay wood/pine, pstyle) → write the
+                        // card's per-card `stock` u64 (current value with this
+                        // slot's bits replaced), absolute SetCardStock stamped @at.
                         let c = store
                             .card_at(card_id, now_ms)
                             .ok_or_else(|| format!("stock op: bound card {card_id} not found"))?;
@@ -483,7 +496,7 @@ mod tests {
     // sys.time 10 is a Create @at=10. Verifies dead→Destroy, holds→stock, and
     // per-effect `at` stamping.
     #[test]
-    fn dead_to_destroy_holds_to_stock_timed() {
+    fn global_aspects_route_to_logop_timed() {
         let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  \
             ::claim>\n    @define>\n      traits &section set\n  \
             ::dead>\n    @define>\n      traits &section set\n";
@@ -521,13 +534,17 @@ mod tests {
         )]));
         let ap = run(&b, &store, "act", root, &[], None, 0).expect("run");
 
-        // claim acquire is a SetCardStock @at=0; dead is a Destroy @at=10; the
-        // spawn is a Create @at=10.
-        let claim = ap.effects.iter().find(|t| matches!(t.effect, Effect::SetCardStock { .. }));
-        assert!(matches!(claim, Some(TimedEffect { at: 0, effect: Effect::SetCardStock { card_id, .. } }) if *card_id == root),
-            "claim → SetCardStock @0 on root, got {:?}", claim);
-        assert!(ap.effects.iter().any(|t| matches!(t, TimedEffect { at: 10, effect: Effect::Destroy { card_id } } if *card_id == root)),
-            "dead → Destroy @10 on root, effects: {:?}", ap.effects);
+        // Global aspects route to the op-log: claim acquire → LogOp(Claim,Inc) @0;
+        // dead → LogOp(Dead,Inc) @10; the spawn is a Create @10.
+        use resonantdust_codec::aspects::StockAspect;
+        use resonantdust_codec::oplog::AspectOp;
+        let claim = ap.effects.iter().find(|t| matches!(&t.effect, Effect::LogOp { aspect_id, .. } if *aspect_id == StockAspect::Claim.id()));
+        assert!(matches!(claim, Some(TimedEffect { at: 0, effect: Effect::LogOp { card_id, op, modifier, .. } })
+                if *card_id == root && *op == AspectOp::Inc.code() && *modifier == 1),
+            "claim → LogOp(Claim,Inc) @0 on root, got {:?}", claim);
+        assert!(ap.effects.iter().any(|t| matches!(&t.effect, Effect::LogOp { card_id, aspect_id, .. }
+                if *card_id == root && *aspect_id == StockAspect::Dead.id()) && t.at == 10),
+            "dead → LogOp(Dead) @10 on root, effects: {:?}", ap.effects);
         assert!(ap.effects.iter().any(|t| matches!(&t.effect, Effect::Create { def_key, .. } if def_key == "widget") && t.at == 10),
             "spawn → Create @10, effects: {:?}", ap.effects);
     }
