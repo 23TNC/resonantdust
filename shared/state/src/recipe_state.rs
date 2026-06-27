@@ -66,11 +66,11 @@ pub fn owning_player<S: CardStore>(store: &S, card_id: u32, now_ms: u64) -> Opti
 /// Stack-vs-world validation over the gathered snapshot. `Ok(())` means every
 /// bound card passes; `Err` names the failing card + reason.
 ///
-/// `wants_exclusive(card_id)` — does *this* recipe claim an exclusive (`use` /
-/// `claim`) hold on the card? The gate derives it from the DSL plan's per-card
-/// [`resonantdust_codec::plan::HoldKinds::slot_hold`]. When true, a card already *borrow*-held
-/// by another action is a conflict ("cannot claim"); an exclusive (claim) hold by
-/// another action always conflicts regardless.
+/// `wants_exclusive(card_id)` — does *this* recipe claim an exclusive hold on the
+/// card? In the new model holds are `data.claim`/`data.borrow` stock writes the
+/// recipe's `@output` emits (via `can_*`/`set_*` data_funcs); the gate derives the
+/// conflict from those aspect deltas. A card already *borrow*-held by another
+/// action is a conflict ("cannot claim"); an exclusive claim always conflicts.
 ///
 /// NB: over a gathered snapshot the hold-count gates are best-effort (a TOCTOU
 /// window exists vs. concurrent gates); the per-shard dedup + lease reducers are

@@ -52,15 +52,9 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
     "scatter" => (5, 0), // input, lo, hi, seed, addr -> band-relative count + jitter
     "stock" => (2, 0),
     "array" => (2, 0),
-    "destroy" => (1, 0),
-    "create" => (2, 0),
-    // `&source &target move` — pops the moved card + its destination, pushes none.
-    "move" => (2, 0),
-    // `as` names the card the preceding `create` made (tracked in a register, so
-    // `create` stays stack-neutral and bare creates still validate): pops the
-    // name address, pushes nothing.
-    "as" => (1, 0),
-    "borrow" | "use" | "claim" | "share" => (1, 0),
+    // (The hold/destroy/create/move/as VERBS are retired — holds are data_func
+    // inc/dec on claim/touch/…, destroy is `data.dead inc`, create + binding are
+    // the `^create` syscall + `&h set`.)
     "if" | "!if" => (1, 0),
     "goto" => (1, 0),
     // `call` runs a function or `^system` call and leaves its return on the
@@ -243,10 +237,11 @@ mod tests {
 <recipe>
   ::triple_corpus>
   @input>
-    $card::corpus *slot.1.0.def_id eq if &slot.1.0 use
+    $card::corpus *slot.1.0.def_id eq !if 1 ret
+    0 ret
   @output>
-    10 &sys.duration set
-    &slot.1.0 destroy
+    10 &sys.time set
+    &slot.1.0.data.dead inc
 ";
     assert_eq!(diags(src), vec![]);
   }

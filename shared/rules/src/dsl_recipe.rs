@@ -8,30 +8,26 @@
 //!   - **rows → `Card`**: a stored row's `packed_definition` is decoded to a card
 //!     **name** via the [`Bundle`] and re-id'd to the bound `Card` the vm reads.
 //!   - **frame**: [`build_frame`] places the bound cards at their slot paths.
-//!   - **match + plan**: the vm matches `@input` and runs `@output`.
-//!   - **`vm::Plan` → `ActionPlan`**: holds, effects, styles, duration mapped to
-//!     the shape consumers apply. Owner-walk for `create` / unlock targets
-//!     resolves against the store here.
-//!
-//! State validation (ownership / not-dead / holds / dedup) lives in
-//! [`resonantdust_state::recipe_state::validate_bindings`]; this module is recipe
-//! *semantics* only.
-
-use std::collections::BTreeMap;
+//!   - **match + plan**: the vm matches `@input` (a `0`-ret predicate) and runs
+//!     the `@output` timeline.
+//!   - **`vm::Plan` → `ActionPlan`**: each time-stamped effect maps to a stock
+//!     write (bound card / synthetic tile) or a `Create`, with owner-walk target
+//!     resolution against the store. Holds, lifecycle (dead) and pstyle are all
+//!     `Stock` effects now — there is no separate hold list.
 
 use resonantdust_codec::card_model;
-use resonantdust_codec::packed::{pack_macro_zone_full, surface_of, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
-use resonantdust_codec::plan::{ActionPlan, Effect, HoldKinds, StockOp};
+use resonantdust_codec::packed::{pack_macro_zone_full, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
+use resonantdust_codec::plan::{ActionPlan, Effect, StockOp, TimedEffect};
 use resonantdust_dsl::bridge::{stock_default_u64, stock_slot_bits, stock_slot_for_aspect, stock_to_vec, Card};
 use resonantdust_dsl::loader::Bundle;
 use resonantdust_dsl::recipe::{build_frame, Frame};
-use resonantdust_dsl::vm::{match_recipe, plan_recipe, Effect as VmEffect, Hold};
+use resonantdust_dsl::vm::{match_recipe, plan_recipe, Effect as VmEffect};
 use resonantdust_state::recipe_state::CardStore;
 
 /// Evaluate `recipe_name`'s DSL recipe against the card `store` and bound cards,
 /// returning the [`ActionPlan`] to apply. Errors if the recipe is unknown or its
-/// `@input` predicates don't hold against the bindings (the match step replaces
-/// the legacy `validate_input`). `now_ms` is the read time for `store.card_at`.
+/// `@input` predicate rejects the bindings. `now_ms` is the read time for
+/// `store.card_at`.
 pub fn run<S: CardStore>(
     bundle: &Bundle,
     store: &S,
@@ -61,9 +57,6 @@ pub fn run<S: CardStore>(
     };
 
     // Bridge a bound card_id → typed Card (decode packed → name → bound Card).
-    // Per-instance `stock` u32 is decoded per the def's stock schema so a card's
-    // live stock aspects (build progress, etc.) read in matching — not just its
-    // static `@define` defaults.
     let lookup = |id: u32| -> Option<Card> {
         let c = store.card_at(id, now_ms)?;
         let name = bundle.name_for_packed(c.packed_definition)?;
@@ -73,7 +66,7 @@ pub fn run<S: CardStore>(
 
     let mut frame = build_frame(bundle, recipe, root, bindings, synth_card.as_ref(), &lookup);
 
-    // Match @input (the conjunction verdict) then run @output.
+    // Match @input (the `0`-ret predicate) then run @output.
     let input = recipe.hook("input").map(|h| h.body.as_slice()).unwrap_or(&[]);
     let mp = match_recipe(input, &mut frame.store, &bundle.catalog, &bundle.functions)?;
     if !mp.matched {
@@ -82,140 +75,31 @@ pub fn run<S: CardStore>(
     let output = recipe.hook("output").map(|h| h.body.as_slice()).unwrap_or(&[]);
     let pp = plan_recipe(output, &mut frame.store, &bundle.catalog, &bundle.functions)?;
 
-    translate(bundle, store, &frame, &mp.holds, &pp.styles, &pp.effects, pp.duration, &synth_card, now_ms)
+    translate(bundle, store, &frame, &pp.effects, pp.duration, &synth_card, now_ms)
 }
 
-/// `vm::Plan` parts → [`ActionPlan`]. Holds split into per-card and the
-/// synthetic tile's (`tile_holds`); effects map 1:1 with owner-walk target
-/// resolution; styles + duration carry through.
-#[allow(clippy::too_many_arguments)]
+/// `vm::Plan` effects → [`ActionPlan`]. Each timed effect becomes a stock write
+/// (bound card → `SetCardStock`; synthetic tile → `ModifyTileStock`) or a
+/// `Create`. Created-card stock sets fold into the `Create` (no extra effect);
+/// a created card whose owner is another created card gets a transient TAG.
 fn translate<S: CardStore>(
     bundle: &Bundle,
     store: &S,
     frame: &Frame,
-    holds: &[(String, Hold)],
-    styles: &[(String, String)],
-    effects: &[VmEffect],
+    effects: &[resonantdust_dsl::vm::TimedEffect],
     duration: i64,
     synth: &Option<Card>,
     now_ms: u64,
 ) -> Result<ActionPlan, String> {
-    let mut ap = ActionPlan {
-        styles: BTreeMap::new(),
-        duration: duration.max(0) as u32,
-        effects: Vec::new(),
-        holds: BTreeMap::new(),
-        tile_holds: None,
-    };
+    let mut ap = ActionPlan { duration: duration.max(0) as u32, effects: Vec::new() };
 
-    // Holds: a path with a placed card → per-card; an unplaced path is the
-    // synthetic tile (addressed positionally by apply) → tile_holds.
-    for (path, hold) in holds {
-        let k = kinds(hold);
-        match frame.card_at(path) {
-            Some(cid) => merge(ap.holds.entry(cid).or_insert(ZERO), &k),
-            None => {
-                let mut t = ap.tile_holds.take().unwrap_or(ZERO);
-                merge(&mut t, &k);
-                ap.tile_holds = Some(t);
-            }
-        }
-    }
-
-    for (path, style) in styles {
-        if let Some(cid) = frame.card_at(path) {
-            ap.styles.insert(cid, style_code(style));
-        }
-    }
-
-    // Cards created in THIS plan are folded: each `create … as h` becomes a
-    // synthetic payload that same-card `&h.data.x set` / `&h destroy` mutate in
-    // place, so a created card is one `Effect::Create` row, never a follow-up
-    // `SetCardStock`. A created card referencing another (nesting via
-    // `&parent.inventory create`) is the only cross-create link; the parent gets a
-    // transient TAG the shard resolves to the minted id. Handles are `created.N`
-    // = the Nth `create` in tape order (matches the VM's `Cell::Ref("created.N")`),
-    // so `synths[N]` indexes by tape position; a destroyed one stays as a dead
-    // slot to keep the indices aligned.
+    // Cards created in THIS plan, folded so same-card stock sets don't become
+    // extra effects. Handles are `created.N` = the Nth `^create` in tape order.
     let mut synths: Vec<Synthetic> = Vec::new();
 
-    for eff in effects {
-        match eff {
-            VmEffect::Destroy { slot } => {
-                if let Some((idx, rem)) = parse_created(slot) {
-                    if !rem.is_empty() {
-                        return Err(format!("destroy {slot:?}: cannot destroy a sub-path of a handle"));
-                    }
-                    synths
-                        .get_mut(idx)
-                        .ok_or_else(|| format!("destroy: unknown handle created.{idx}"))?
-                        .alive = false;
-                } else {
-                    let cid = frame
-                        .card_at(slot)
-                        .ok_or_else(|| format!("destroy: {slot:?} is not a bound card"))?;
-                    ap.effects.push(Effect::Destroy { card_id: cid });
-                }
-            }
-            VmEffect::Create { def, target } => {
-                let dk = def_key(def);
-                // Where the created card lands: a sibling created card's inventory
-                // (`created.M.inventory`), a real bound card's `.inventory`, or a
-                // bound card's `.location` (its exact world cell — the blueprint
-                // spot the chord soul takes).
-                let placement = if let Some((m, rem)) = parse_created(target) {
-                    if rem != "inventory" {
-                        return Err(format!("create into {target:?}: handle target must end in .inventory"));
-                    }
-                    Placement::Inventory(OwnerRef::Synth(m))
-                } else {
-                    let (card, container) = resolve_target(frame, store, target, now_ms)?;
-                    match container.as_deref() {
-                        Some("inventory") => Placement::Inventory(OwnerRef::Real(card)),
-                        Some("location") => {
-                            // `card` is the bound card itself — spawn at its zone+cell,
-                            // re-owned by ITS owner (a world soul owns its world cards).
-                            let c = store
-                                .card_at(card, now_ms)
-                                .ok_or_else(|| format!("create at {target:?}: card {card} not found"))?;
-                            Placement::At {
-                                surface: surface_of(c.macro_zone),
-                                macro_zone: c.macro_zone,
-                                micro_location: c.micro_location,
-                                owner_id: c.owner_id,
-                            }
-                        }
-                        _ => return Err(format!(
-                            "create target must end in .inventory or .location; got {target:?}"
-                        )),
-                    }
-                };
-                let stock = stock_default_u64(bundle, &dk);
-                synths.push(Synthetic { def_key: dk, placement, stock, alive: true, tag: 0 });
-            }
-            VmEffect::Move { source, target } => {
-                let card_id = frame
-                    .card_at(source)
-                    .ok_or_else(|| format!("move: source {source:?} is not a bound card"))?;
-                let (dest, container) = resolve_target(frame, store, target, now_ms)?;
-                let (surface, macro_zone, owner_id) = match container.as_deref() {
-                    Some("inventory") => (
-                        INVENTORY_LAYER,
-                        pack_macro_zone_full(dest, INVENTORY_LAYER, 0, 0),
-                        dest,
-                    ),
-                    Some("location") => {
-                        let c = store
-                            .card_at(dest, now_ms)
-                            .ok_or_else(|| format!("move to {target:?}: card {dest} not found"))?;
-                        (surface_of(c.macro_zone), c.macro_zone, c.owner_id)
-                    }
-                    _ => return Err(format!(
-                        "move target must end in .inventory or .location; got {target:?}"
-                    )),
-                };
-                ap.effects.push(Effect::Move { card_id, surface, macro_zone, owner_id });
-            }
+    for te in effects {
+        let at = te.at;
+        match &te.effect {
             VmEffect::Stock { slot, aspect, delta, abs } => {
                 if let Some((idx, rem)) = parse_created(slot) {
                     // Fold into the created card's synthetic payload — no effect.
@@ -226,67 +110,77 @@ fn translate<S: CardStore>(
                         .get_mut(idx)
                         .ok_or_else(|| format!("stock op: unknown handle created.{idx}"))?;
                     s.stock = fold_stock(bundle, &s.def_key, s.stock, aspect, *delta, *abs)?;
+                } else if let Some(card_id) = frame.card_at(slot) {
+                    // A bound CARD → write its per-card `stock` u64 (current value
+                    // with this slot's bits replaced), as an absolute SetCardStock
+                    // stamped at `at`.
+                    let c = store
+                        .card_at(card_id, now_ms)
+                        .ok_or_else(|| format!("stock op: bound card {card_id} not found"))?;
+                    let name = bundle
+                        .name_for_packed(c.packed_definition)
+                        .ok_or_else(|| format!("stock op: card {card_id} packed not in bundle"))?;
+                    let new_stock = fold_stock(bundle, name, c.stock, aspect, *delta, *abs)?;
+                    ap.effects.push(TimedEffect {
+                        at,
+                        effect: Effect::SetCardStock { card_id, stock: new_stock },
+                    });
                 } else {
-                    match frame.card_at(slot) {
-                        // A bound CARD → write its per-card `stock` u64: compute the
-                        // new value here (current stock with this slot's bits
-                        // replaced) and emit an absolute SetCardStock. The card holds
-                        // it; only the bottom u4 can later save to a zone.
-                        Some(card_id) => {
-                            let c = store
-                                .card_at(card_id, now_ms)
-                                .ok_or_else(|| format!("stock op: bound card {card_id} not found"))?;
-                            let name = bundle.name_for_packed(c.packed_definition).ok_or_else(|| {
-                                format!("stock op: card {card_id} packed not in bundle")
-                            })?;
-                            let new_stock = fold_stock(bundle, name, c.stock, aspect, *delta, *abs)?;
-                            ap.effects.push(Effect::SetCardStock { card_id, stock: new_stock });
-                        }
-                        // Unplaced → the synthetic tile (the zone-savable u4 path),
-                        // addressed positionally by apply via the proposal cell.
-                        None => {
-                            let tile = synth
-                                .as_ref()
-                                .ok_or_else(|| "tile stock op but no synthetic tile".to_string())?;
-                            let tile_name = bundle
-                                .card_name(tile.def_id)
-                                .ok_or_else(|| "tile def has no name".to_string())?;
-                            let idx = stock_slot_for_aspect(bundle, tile_name, aspect).ok_or_else(|| {
-                                format!("tile {tile_name:?} declares no stock slot for aspect {aspect:?}")
-                            })?;
-                            let (op, mag) = if *abs {
-                                (StockOp::Set, *delta)
-                            } else if *delta < 0 {
-                                (StockOp::Sub, -*delta)
-                            } else {
-                                (StockOp::Add, *delta)
-                            };
-                            ap.effects.push(Effect::ModifyTileStock {
-                                slot: idx as u8,
-                                op,
-                                delta: mag.clamp(0, 255) as u8,
-                            });
-                        }
-                    }
+                    // Unplaced → the synthetic tile (the zone-savable u4 path).
+                    let tile = synth
+                        .as_ref()
+                        .ok_or_else(|| "tile stock op but no synthetic tile".to_string())?;
+                    let tile_name = bundle
+                        .card_name(tile.def_id)
+                        .ok_or_else(|| "tile def has no name".to_string())?;
+                    let idx = stock_slot_for_aspect(bundle, tile_name, aspect).ok_or_else(|| {
+                        format!("tile {tile_name:?} declares no stock slot for aspect {aspect:?}")
+                    })?;
+                    let (op, mag) = if *abs {
+                        (StockOp::Set, *delta)
+                    } else if *delta < 0 {
+                        (StockOp::Sub, -*delta)
+                    } else {
+                        (StockOp::Add, *delta)
+                    };
+                    ap.effects.push(TimedEffect {
+                        at,
+                        effect: Effect::ModifyTileStock { slot: idx as u8, op, delta: mag.clamp(0, 255) as u8 },
+                    });
                 }
+            }
+            VmEffect::Create { def, owner, zone_owner, surface, q, r } => {
+                let dk = def_key(def);
+                let owner_ref = resolve_owner(frame, store, owner, now_ms)?;
+                let zone_ref = resolve_owner(frame, store, zone_owner, now_ms)?;
+                let stock = stock_default_u64(bundle, &dk);
+                synths.push(Synthetic {
+                    def_key: dk,
+                    owner_ref,
+                    zone_ref,
+                    surface: *surface as u8,
+                    q: *q,
+                    r: *r,
+                    stock,
+                    alive: true,
+                    tag: 0,
+                    at,
+                });
             }
         }
     }
 
-    // Assign a transient tag to every surviving synthetic that another surviving
-    // synthetic nests in (lazily — an unreferenced created card carries tag 0 and
-    // never enters the table). A child always appears AFTER its parent in tape
-    // order (a handle can't be referenced before its `as`), so tape order is a
-    // valid causal order and there are no cycles to resolve here — owner refs only
-    // point backwards. (When a created card can reference another's shard-minted
-    // position, that backward-only guarantee breaks and a topological sort +
-    // cycle check belong at this point.)
+    // Assign a transient tag to every surviving synthetic another surviving
+    // synthetic nests in (as its owner OR its zone owner). A child always appears
+    // AFTER its parent in tape order (a handle can't be referenced before its
+    // `^create`), so tape order is a valid causal order — owner refs point
+    // backwards only, no cycles.
     let mut next_tag = TAG_ID_MIN;
     for i in 0..synths.len() {
         if !synths[i].alive {
             continue;
         }
-        if let Placement::Inventory(OwnerRef::Synth(m)) = synths[i].placement {
+        for m in [synths[i].owner_ref.synth(), synths[i].zone_ref.synth()].into_iter().flatten() {
             if !synths.get(m).map(|s| s.alive).unwrap_or(false) {
                 return Err(format!("created.{i} nests in created.{m}, which was destroyed or absent"));
             }
@@ -301,64 +195,100 @@ fn translate<S: CardStore>(
     }
 
     // Emit one `Create` per surviving synthetic, in tape (= causal) order, so the
-    // shard fills `tag -> id` for a parent before it writes a child. A nested
-    // child's `owner_id` is the parent's tag (the shard rebuilds the inventory
-    // `macro_zone` from the resolved owner); a real-owner child carries the real
-    // id and final zone.
+    // shard fills `tag -> id` for a parent before it writes a child. An owner /
+    // zone-owner that is a created card resolves to that card's tag.
     for i in 0..synths.len() {
         let s = &synths[i];
         if !s.alive {
             continue;
         }
-        let (surface, macro_zone, owner_id, micro_location) = match &s.placement {
-            Placement::Inventory(OwnerRef::Real(id)) => {
-                (INVENTORY_LAYER, pack_macro_zone_full(*id, INVENTORY_LAYER, 0, 0), *id, None)
-            }
-            Placement::Inventory(OwnerRef::Synth(m)) => {
-                let tag = synths[*m].tag; // assigned above (nonzero — it's referenced)
-                (INVENTORY_LAYER, pack_macro_zone_full(tag, INVENTORY_LAYER, 0, 0), tag, None)
-            }
-            Placement::At { surface, macro_zone, micro_location, owner_id } => {
-                (*surface, *macro_zone, *owner_id, Some(*micro_location))
-            }
+        let owner_id = s.owner_ref.id(&synths);
+        let zone_owner_id = s.zone_ref.id(&synths);
+        // Inventory (surface == INVENTORY_LAYER) lands on the first free cell
+        // (micro_location None); a world surface keeps the requested cell coords.
+        let macro_zone = if s.surface == INVENTORY_LAYER {
+            pack_macro_zone_full(zone_owner_id, s.surface, 0, 0)
+        } else {
+            pack_macro_zone_full(zone_owner_id, s.surface, s.q as i16, s.r as i16)
         };
-        ap.effects.push(Effect::Create {
-            def_key: s.def_key.clone(),
-            surface,
-            macro_zone,
-            owner_id,
-            stock: s.stock,
-            tag: s.tag,
-            micro_location,
+        ap.effects.push(TimedEffect {
+            at: s.at,
+            effect: Effect::Create {
+                def_key: s.def_key.clone(),
+                surface: s.surface,
+                macro_zone,
+                owner_id,
+                stock: s.stock,
+                tag: s.tag,
+                micro_location: None,
+            },
         });
     }
 
     Ok(ap)
 }
 
-/// A card created in this plan, folded so same-card modifies don't become extra
-/// effects. `placement` is where it lands; `tag` (0 = none) is set when another
-/// synthetic nests in this one.
+/// A card created in this plan, folded so same-card stock sets don't become extra
+/// effects. `owner_ref`/`zone_ref` are the ownership + placement targets (a real
+/// bound card or a sibling created card); `tag` (0 = none) is set when another
+/// synthetic nests in this one. `at` is the `sys.time` of its `^create`.
 struct Synthetic {
     def_key: String,
-    placement: Placement,
+    owner_ref: OwnerRef,
+    zone_ref: OwnerRef,
+    surface: u8,
+    q: i64,
+    r: i64,
     stock: u64,
     alive: bool,
     tag: u32,
+    at: i64,
 }
 
-/// Where a created card lands: into an owner's inventory (first free cell), or at
-/// an exact world cell (the `create … .location` path — a bound card's spot).
-enum Placement {
-    Inventory(OwnerRef),
-    At { surface: u8, macro_zone: u64, micro_location: u32, owner_id: u32 },
-}
-
-/// Whose inventory a created card nests in: a real bound card, or a sibling
-/// created card (index into the synthetics, addressed `created.M` in the recipe).
+/// Whose card an owner/zone path resolves to: a real bound card_id, or a sibling
+/// created card (index into the synthetics, addressed `created.M`).
+#[derive(Clone, Copy)]
 enum OwnerRef {
     Real(u32),
     Synth(usize),
+}
+
+impl OwnerRef {
+    fn synth(self) -> Option<usize> {
+        match self {
+            OwnerRef::Synth(m) => Some(m),
+            OwnerRef::Real(_) => None,
+        }
+    }
+    /// The concrete owner value the `Create` effect carries: a real id, or the
+    /// referenced synthetic's transient tag (assigned before this is called).
+    fn id(self, synths: &[Synthetic]) -> u32 {
+        match self {
+            OwnerRef::Real(id) => id,
+            OwnerRef::Synth(m) => synths[m].tag,
+        }
+    }
+}
+
+/// Resolve an owner/zone path to an [`OwnerRef`]: a `created.N` handle → that
+/// synthetic; otherwise walk the path (`.owner`/`.parent`) to a bound card_id.
+fn resolve_owner<S: CardStore>(
+    frame: &Frame,
+    store: &S,
+    path: &str,
+    now_ms: u64,
+) -> Result<OwnerRef, String> {
+    if let Some((idx, rem)) = parse_created(path) {
+        if !rem.is_empty() {
+            return Err(format!("owner handle {path:?} must be a bare created.N"));
+        }
+        return Ok(OwnerRef::Synth(idx));
+    }
+    let (id, container) = resolve_target(frame, store, path, now_ms)?;
+    if let Some(c) = container {
+        return Err(format!("owner path {path:?} must resolve to a card, not a {c:?} container"));
+    }
+    Ok(OwnerRef::Real(id))
 }
 
 /// Split a `created.N[.rest]` handle path into its synthetic index and remainder
@@ -397,35 +327,6 @@ fn fold_stock(
     Ok(resonantdust_codec::bits::set_field64(stock, shift, width, new_val))
 }
 
-/// All-false [`HoldKinds`] — the merge base.
-const ZERO: HoldKinds = HoldKinds { slot_hold: false, position_hold: false, slot_share: false };
-
-/// DSL [`Hold`] → [`HoldKinds`] (`slot_hold` true → exclusive; false →
-/// `slot_share`; `position_hold` from the verb's pin).
-fn kinds(h: &Hold) -> HoldKinds {
-    match h {
-        Hold::Use => HoldKinds { slot_hold: true, slot_share: false, position_hold: false },
-        Hold::Claim => HoldKinds { slot_hold: true, slot_share: false, position_hold: true },
-        Hold::Share => HoldKinds { slot_hold: false, slot_share: true, position_hold: true },
-        Hold::Borrow => HoldKinds { slot_hold: false, slot_share: true, position_hold: false },
-    }
-}
-
-fn merge(into: &mut HoldKinds, k: &HoldKinds) {
-    into.slot_hold |= k.slot_hold;
-    into.slot_share |= k.slot_share;
-    into.position_hold |= k.position_hold;
-}
-
-/// Map the DSL style constant to the progress-style code (none=0, ltr=1, rtl=2).
-fn style_code(style: &str) -> u8 {
-    match style {
-        "ltr" => 1,
-        "rtl" => 2,
-        _ => 0,
-    }
-}
-
 /// `card::corpus_dim` → the bare key (`corpus_dim`).
 fn def_key(def: &str) -> String {
     def.rsplit("::").next().unwrap_or(def).to_string()
@@ -433,7 +334,7 @@ fn def_key(def: &str) -> String {
 
 /// Resolve a slot-path target to a concrete card_id, walking `.owner` / `.parent`
 /// past the longest placed-card prefix via the store. Returns the resolved card
-/// and any trailing container word (`inventory`).
+/// and any trailing container word (`inventory`/`location`).
 fn resolve_target<S: CardStore>(
     frame: &Frame,
     store: &S,
@@ -486,21 +387,25 @@ mod tests {
         }
     }
 
-    // Minimal corpus: a `type`/`progress` aspect, an owner `human`, a `log` with
-    // an 8-bit `progress` stock (default 1), a childless `pip`, and a `make`
+    // Minimal corpus: `type`/`progress`/`dead` aspects, an owner `human`, a `log`
+    // with an 8-bit `progress` stock (default 1), a childless `pip`, and a `make`
     // recipe that creates a log into the human's inventory, bumps its progress to
-    // 4, then nests a pip inside the log.
+    // 4, then nests a pip inside the log (surface 1 = inventory).
     fn bundle() -> Bundle {
         let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  \
-            ::progress>\n    @define>\n      traits &section set\n";
+            ::progress>\n    @define>\n      traits &section set\n  \
+            ::dead>\n    @define>\n      traits &section set\n";
         let cards = "<card>\n\
             \x20 ::human>\n    :data>\n      @define>\n        requisite &data.type set\n\
             \x20 ::log>\n    :data>\n      @define>\n        requisite &data.type set\n        \
                 8 &data.progress stock\n        1 &data.progress set\n\
             \x20 ::pip>\n    :data>\n      @define>\n        requisite &data.type set\n";
-        let recipe = "<recipe>\n  ::make>\n    @input>\n      &slot.0.0 use\n    @output>\n      \
-            $card::log &slot.0.0.inventory create &h as\n      4 &h.data.progress set\n      \
-            $card::pip &h.inventory create\n";
+        let recipe = "<recipe>\n  ::make>\n    @input>\n      0 ret\n    @output>\n      \
+            &slot.0.0 1 0 0 ^macro_zone call &hz set\n      \
+            *hz $card::log &slot.0.0 ^create call &log set\n      \
+            4 &log.data.progress set\n      \
+            &log 1 0 0 ^macro_zone call &lz set\n      \
+            *lz $card::pip &log ^create call drop\n";
         load(&[
             ("a.rd".into(), aspects.into()),
             ("c.rd".into(), cards.into()),
@@ -530,12 +435,13 @@ mod tests {
         let b = bundle();
         let root = 5000u32;
         let ap = run(&b, &root_store(&b, root), "make", root, &[], None, 0).expect("run");
+        let creates: Vec<&Effect> = ap.effects.iter().map(|t| &t.effect).collect();
         assert_eq!(
-            ap.effects,
+            creates,
             vec![
-                // log: real owner, default progress(1) overwritten by abs set(4),
-                // tagged 1 because pip nests in it.
-                Effect::Create {
+                // log: real owner (root), default progress(1) overwritten by abs
+                // set(4), tagged 1 because pip nests in it.
+                &Effect::Create {
                     def_key: "log".into(),
                     surface: INVENTORY_LAYER,
                     macro_zone: pack_macro_zone_full(root, INVENTORY_LAYER, 0, 0),
@@ -544,8 +450,8 @@ mod tests {
                     tag: 1,
                     micro_location: None,
                 },
-                // pip: owner is log's tag (shard resolves), no own tag, no stock.
-                Effect::Create {
+                // pip: owner + zone are log's tag (shard resolves), no own tag.
+                &Effect::Create {
                     def_key: "pip".into(),
                     surface: INVENTORY_LAYER,
                     macro_zone: pack_macro_zone_full(1, INVENTORY_LAYER, 0, 0),
@@ -558,30 +464,8 @@ mod tests {
         );
         // No SetCardStock — the created card's stock folded into its Create.
         assert!(
-            !ap.effects.iter().any(|e| matches!(e, Effect::SetCardStock { .. })),
+            !ap.effects.iter().any(|t| matches!(t.effect, Effect::SetCardStock { .. })),
             "created-card stock must fold into Create, not emit SetCardStock"
         );
-    }
-
-    #[test]
-    fn destroy_of_created_handle_collapses() {
-        let b = {
-            let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-            let cards = "<card>\n\
-                \x20 ::human>\n    :data>\n      @define>\n        requisite &data.type set\n\
-                \x20 ::log>\n    :data>\n      @define>\n        requisite &data.type set\n";
-            let recipe = "<recipe>\n  ::poof>\n    @input>\n      &slot.0.0 use\n    @output>\n      \
-                $card::log &slot.0.0.inventory create &h as\n      &h destroy\n";
-            load(&[
-                ("a.rd".into(), aspects.into()),
-                ("c.rd".into(), cards.into()),
-                ("r.rd".into(), recipe.into()),
-            ])
-            .expect("load")
-        };
-        let root = 5000u32;
-        let ap = run(&b, &root_store(&b, root), "poof", root, &[], None, 0).expect("run");
-        // create-then-destroy of the same handle leaves nothing on the wire.
-        assert!(ap.effects.is_empty(), "expected no effects, got {:?}", ap.effects);
     }
 }

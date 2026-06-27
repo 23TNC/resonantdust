@@ -792,47 +792,35 @@ fn head_of<'a>(map: &'a HashMap<String, Vec<Stmt>>, name: &str) -> Option<&'a Ve
 /// position-pinned (the default), `share` = non-exclusive + pinned, `borrow` =
 /// existence-only (no exclusivity, no pin). The gate maps these to the cards-DB
 /// acquire reducers; the VM only records *which* hold each slot needs.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Hold {
-  Use,
-  Claim,
-  Share,
-  Borrow,
-}
-impl Hold {
-  fn from_word(w: &str) -> Option<Hold> {
-    match w {
-      "use" => Some(Hold::Use),
-      "claim" => Some(Hold::Claim),
-      "share" => Some(Hold::Share),
-      "borrow" => Some(Hold::Borrow),
-      _ => None,
-    }
-  }
-}
-
-/// A server-side mutation a recipe `@output` emits, in source order. Slot/target
-/// fields are unresolved path strings (`slot.1.0`, `slot.1.0.owner.inventory`) —
-/// the gate resolves them against the operating set to concrete card ids, then
-/// decomposes each into a cards/regions-DB reducer call at completion time.
+/// A server-side mutation a recipe `@output` emits. Slot/owner fields are
+/// unresolved path strings (`slot.1.0`, `slot.2.0.owner`) — the gate resolves
+/// them against the operating set to concrete card ids. The new model is uniform:
+/// holds (claim/touch/…), lifecycle (dead/reap), gameplay (wood/…) and progress
+/// style (pstyle) are ALL `Stock` mutations on `data.*` aspects; spawning is the
+/// only non-stock effect.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
-  /// `&slot destroy` — mark the bound card dead.
-  Destroy { slot: String },
-  /// `$card::x &target create` — spawn `def` into `target` (`…owner.inventory`,
-  /// or `…location` to spawn at a bound card's world cell).
-  Create { def: String, target: String },
-  /// `&source &target move` — relocate the bound card `source` to `target`
-  /// (`…owner.inventory`). The consumed-blueprint-back-to-inventory verb.
-  Move { source: String, target: String },
-  /// `&slot.data.x dec`/`inc`/`set` — per-row tile-stock mutation. `delta` is
-  /// the signed change for inc/dec; `set` carries the absolute value with abs=true.
+  /// `&slot.data.x inc`/`dec`/`set` — change one of a bound card's stock aspects
+  /// (or the synthetic tile's). `delta` is the signed change for inc/dec; `set`
+  /// carries the absolute value with `abs = true`.
   Stock { slot: String, aspect: String, delta: i64, abs: bool },
+  /// `<zone> $card::def &owner ^create` — spawn `def` owned by `owner` at the
+  /// macro_zone resolved from `^macro_zone(zone_owner, surface, q, r)`.
+  Create { def: String, owner: String, zone_owner: String, surface: i64, q: i64, r: i64 },
 }
 
-/// What `exec` is running, so the recipe verbs know how to behave. `Data` is the
-/// card/function hooks (verbs unused); `Input` records holds + tracks match;
-/// `Output` records effects, styles, and duration.
+/// One `@output` effect with the `sys.time` it's stamped at. The gate
+/// future-stamps each at `start + at` ms — acquire holds at `at = 0`, mutate +
+/// release at the action's window. Replaces the single `sys.duration` scalar.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TimedEffect {
+  pub at: i64,
+  pub effect: Effect,
+}
+
+/// What `exec` is running. `Data` = card/function hooks; `Input` = a recipe
+/// predicate (`@input` returns `0` to match, nonzero to reject; read-only w.r.t.
+/// card data); `Output` = the effect timeline (`@output`).
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
   Data,
@@ -840,17 +828,14 @@ enum Mode {
   Output,
 }
 
-/// The result of evaluating a recipe against one positioned operating-set frame
-/// — the gate's IO contract (mirrors the old `ActionPlan`). `matched` is the
-/// `@input` conjunction verdict; the rest is the `@output` tape.
+/// The result of evaluating a recipe against one positioned operating-set frame.
+/// `matched` is the `@input` verdict (its `ret` was `0`); `effects` is the
+/// `@output` timeline; `duration` is the max `sys.time` stamp.
 #[derive(Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Plan {
   pub matched: bool,
-  pub holds: Vec<(String, Hold)>,
   pub duration: i64,
-  /// `(slot, style)` — progress-bar style (`rtl`/`ltr`) per bound card.
-  pub styles: Vec<(String, String)>,
-  pub effects: Vec<Effect>,
+  pub effects: Vec<TimedEffect>,
 }
 
 /// Run a hook/function body against `store`. `host` is the system-call table
@@ -868,9 +853,12 @@ pub fn run(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Cata
 /// store, and slides the frame by re-calling with successive positions.
 pub fn match_recipe(input: &[Stmt], store: &mut Store, cat: &Catalog, funcs: &Functions) -> Result<Plan, String> {
   let mut plan = Plan::default();
-  exec(input, store, &[], cat, funcs, &mut plan, Mode::Input, 0, Vec::new())?;
-  let expected = input.iter().filter(|s| matches!(s, Stmt::Instr(_))).count();
-  plan.matched = plan.holds.len() == expected && expected > 0;
+  let ret = exec(input, store, &[], cat, funcs, &mut plan, Mode::Input, 0, Vec::new())?;
+  // `@input` is a guard-clause predicate: a failed guard does `1 ret` (reject),
+  // and the body ends with `0 ret` (match). So `ret == 0` is the verdict. An
+  // input with no instructions never matches.
+  let has_body = input.iter().any(|s| matches!(s, Stmt::Instr(_)));
+  plan.matched = has_body && ret.int() == 0;
   Ok(plan)
 }
 
@@ -899,10 +887,10 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
   let mut call: Vec<usize> = Vec::new();
   let mut ip = 0usize;
   let mut steps = 0u32;
-  // Handle to the card the most recent `create` made (`created.N`), so a
-  // following `as` can name it without `create` having to leave a value on the
-  // operand stack (keeps every `create` line stack-neutral; see `validate`).
-  let mut last_created: Option<String> = None;
+  // The `sys.time` cursor (Mode::Output): every emitted effect is stamped with
+  // it; `0 &sys.time set` then `10 &sys.time set` partitions the timeline into
+  // acquire-now / mutate-and-release-at-window.
+  let mut now_t: i64 = 0;
 
   while ip < body.len() {
     steps += 1;
@@ -959,17 +947,20 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               // Expand any `as`-handle root in the target so the emitted effect
               // names the created card (`created.N`), not the alias.
               let taddr = store.resolve_addr(&addr);
-              if taddr == "sys.duration" {
-                plan.duration = val.int();
-              } else if let Some(slot) = taddr.strip_suffix(".style") {
-                let style = match &val { Item::Sym(s) => s.clone(), _ => String::new() };
-                plan.styles.push((slot.to_string(), style));
+              if taddr == "sys.time" {
+                // advance the effect-stamp cursor; the action's duration is the
+                // furthest stamp reached.
+                now_t = val.int();
+                plan.duration = plan.duration.max(now_t);
               } else if let Some(i) = taddr.find(".data.") {
-                plan.effects.push(Effect::Stock {
-                  slot: taddr[..i].to_string(),
-                  aspect: taddr[i + ".data.".len()..].to_string(),
-                  delta: val.int(),
-                  abs: true,
+                plan.effects.push(TimedEffect {
+                  at: now_t,
+                  effect: Effect::Stock {
+                    slot: taddr[..i].to_string(),
+                    aspect: taddr[i + ".data.".len()..].to_string(),
+                    delta: val.int(),
+                    abs: true,
+                  },
                 });
               }
             }
@@ -1154,6 +1145,46 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               let k = store.prims_push(name);
               st.push(Item::Cell(Cell::Ref(format!("prims.{k}"))));
             }
+            // `&owner <surface> <q> <r> ^macro_zone call` — build a zone handle
+            // (the owner's slot path + surface + cell). Pure: rules resolves the
+            // owner path to a card_id and packs the macro_zone at apply time.
+            Some(Item::Sys(name)) if name == "macro_zone" => {
+              let r = st.pop().map(|i| i.int()).unwrap_or(0);
+              let q = st.pop().map(|i| i.int()).unwrap_or(0);
+              let surface = st.pop().map(|i| i.int()).unwrap_or(0);
+              let owner = st.pop().map(|i| store.resolve_addr(i.addr())).unwrap_or_default();
+              st.push(Item::Cell(Cell::Map(vec![
+                ("owner".into(), Cell::Sym(owner)),
+                ("surface".into(), Cell::Int(surface)),
+                ("q".into(), Cell::Int(q)),
+                ("r".into(), Cell::Int(r)),
+              ])));
+            }
+            // `<zone> $card::def &owner ^create call` — emit a Create effect at the
+            // current `sys.time`; push a `created.N` handle so a following `as`
+            // (or `&h set`) can address the new card.
+            Some(Item::Sys(name)) if name == "create" && mode == Mode::Output => {
+              let owner = st.pop().map(|i| store.resolve_addr(i.addr())).unwrap_or_default();
+              let def = match st.pop() { Some(Item::Sym(s)) => s, _ => String::new() };
+              let zone = match st.pop() { Some(Item::Cell(c)) => c, _ => Cell::Map(Vec::new()) };
+              let zget = |k: &str| match &zone {
+                Cell::Map(m) => m.iter().find(|(kk, _)| kk == k).map(|(_, c)| c.clone()),
+                _ => None,
+              };
+              let zone_owner = match zget("owner") { Some(Cell::Sym(s)) => s, _ => String::new() };
+              let surface = zget("surface").map(|c| c.as_int()).unwrap_or(0);
+              let q = zget("q").map(|c| c.as_int()).unwrap_or(0);
+              let r = zget("r").map(|c| c.as_int()).unwrap_or(0);
+              // The created card is `created.N` (Nth Create in the plan); push a
+              // Ref handle so a following `&h set` aliases it (`&h.data.x set`
+              // then folds into this Create).
+              let idx = plan.effects.iter().filter(|e| matches!(&e.effect, Effect::Create { .. })).count();
+              plan.effects.push(TimedEffect {
+                at: now_t,
+                effect: Effect::Create { def, owner, zone_owner, surface, q, r },
+              });
+              st.push(Item::Cell(Cell::Ref(format!("created.{idx}"))));
+            }
             // system call — fetch the host-provided value and push it
             Some(Item::Sys(name)) => {
               let c = host.iter().find(|(k, _)| *k == name).map(|(_, c)| c.clone()).unwrap_or(Cell::Int(0));
@@ -1186,11 +1217,14 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             if mode == Mode::Output {
               let taddr = store.resolve_addr(&addr);
               if let Some(i) = taddr.find(".data.") {
-                plan.effects.push(Effect::Stock {
-                  slot: taddr[..i].to_string(),
-                  aspect: taddr[i + ".data.".len()..].to_string(),
-                  delta,
-                  abs: false,
+                plan.effects.push(TimedEffect {
+                  at: now_t,
+                  effect: Effect::Stock {
+                    slot: taddr[..i].to_string(),
+                    aspect: taddr[i + ".data.".len()..].to_string(),
+                    delta,
+                    abs: false,
+                  },
                 });
               }
             }
@@ -1315,61 +1349,6 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
           "random" => {
             let seed = st.pop().unwrap().int();
             st.push(Item::Val(hash(seed)));
-          }
-          // --- recipe @input: predicate passed, acquire this slot's hold ---
-          "use" | "claim" | "share" | "borrow" if mode == Mode::Input => {
-            let a = st.pop().unwrap();
-            if let Some(h) = Hold::from_word(w) {
-              plan.holds.push((a.addr().to_string(), h));
-            }
-          }
-          // --- recipe @output: server mutations ---
-          "destroy" if mode == Mode::Output => {
-            let a = st.pop().unwrap();
-            plan.effects.push(Effect::Destroy { slot: store.resolve_addr(a.addr()) });
-          }
-          // `&source &target move` — relocate a bound card. Postfix order: source
-          // pushed first, target second, so target is on top.
-          "move" if mode == Mode::Output => {
-            let target = st.pop().unwrap();
-            let source = st.pop().unwrap();
-            plan.effects.push(Effect::Move {
-              source: store.resolve_addr(source.addr()),
-              target: store.resolve_addr(target.addr()),
-            });
-          }
-          "create" if mode == Mode::Output => {
-            let a = st.pop().unwrap();
-            let target = store.resolve_addr(a.addr());
-            let def = match st.pop().unwrap() {
-              Item::Sym(s) => s,
-              _ => String::new(),
-            };
-            // Remember this card as `created.N` (Nth `Create` in the plan) so a
-            // following `as` can name it. `create` stays stack-neutral — the
-            // handle lives in `last_created`, not on the operand stack — so
-            // existing bare-`create` lines still validate.
-            let idx = plan.effects.iter().filter(|e| matches!(e, Effect::Create { .. })).count();
-            plan.effects.push(Effect::Create { def, target });
-            last_created = Some(format!("created.{idx}"));
-          }
-          // `create … &name as` — bind a name to the card the preceding `create`
-          // made, so later lines address it as a path root (`&name…`/`*name…`).
-          // Reserved roots can't be shadowed.
-          "as" if mode == Mode::Output => {
-            let name = st.pop().unwrap();
-            let addr = name.addr().to_string();
-            let root = addr.split(['.', ':']).find(|s| !s.is_empty()).unwrap_or("");
-            if matches!(
-              root,
-              "slot" | "var" | "owner" | "data" | "visual" | "objects" | "prims" | "sys" | "created"
-            ) {
-              return Err(format!("`as` cannot bind reserved root {root:?} (in {addr:?})"));
-            }
-            let handle = last_created
-              .clone()
-              .ok_or_else(|| format!("`as` ({addr:?}) with no preceding create"))?;
-            store.write(&addr, Cell::Ref(handle));
           }
           // `pop` — retrieve the next call argument (FIFO: first pushed by the
           // caller is first popped). An address arg becomes a `Ref` so the
@@ -1896,13 +1875,13 @@ mod tests {
 <recipe>
   ::triple_corpus>
     @input>
-      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use
-      $card::corpus *slot.1.1.def_id eq if &slot.1.1 claim
-      $card::corpus *slot.1.2.def_id eq if &slot.1.2 claim
+      $card::corpus *slot.1.0.def_id eq !if 1 ret
+      $card::corpus *slot.1.1.def_id eq !if 1 ret
+      $card::corpus *slot.1.2.def_id eq !if 1 ret
+      0 ret
     @output>
-      10 &sys.duration set
-      rtl &slot.1.0.style set
-      &slot.1.0 destroy
+      10 &sys.time set
+      &slot.1.0.data.dead inc
 ";
   fn corpus3() -> Store {
     let mut s = Store::default();
@@ -1913,16 +1892,11 @@ mod tests {
   }
 
   #[test]
-  fn recipe_input_matches_conjunction() {
+  fn recipe_input_matches_predicate() {
     let root = parse(TRIPLE).unwrap();
     let (c, f) = cat_funcs();
     let plan = match_recipe(recipe_hook(&root, "triple_corpus", "input"), &mut corpus3(), &c, &f).unwrap();
-    assert!(plan.matched);
-    assert_eq!(plan.holds, vec![
-      ("slot.1.0".into(), Hold::Use),
-      ("slot.1.1".into(), Hold::Claim),
-      ("slot.1.2".into(), Hold::Claim),
-    ]);
+    assert!(plan.matched); // all three guards pass → `0 ret`
   }
 
   #[test]
@@ -1932,33 +1906,34 @@ mod tests {
     let mut s = corpus3();
     s.write("slot.1.2.def_id", Cell::Sym("card::dread".into())); // last slot wrong
     let plan = match_recipe(recipe_hook(&root, "triple_corpus", "input"), &mut s, &c, &f).unwrap();
-    assert!(!plan.matched);
-    assert_eq!(plan.holds.len(), 2); // first two fired, third predicate skipped its hold
+    assert!(!plan.matched); // third guard does `1 ret` (reject)
   }
 
   #[test]
-  fn recipe_output_tape() {
+  fn recipe_output_timeline() {
     let root = parse(TRIPLE).unwrap();
     let (c, f) = cat_funcs();
     let plan = plan_recipe(recipe_hook(&root, "triple_corpus", "output"), &mut corpus3(), &c, &f).unwrap();
     assert_eq!(plan.duration, 10);
-    assert_eq!(plan.styles, vec![("slot.1.0".into(), "rtl".into())]);
-    assert_eq!(plan.effects, vec![Effect::Destroy { slot: "slot.1.0".into() }]);
+    assert_eq!(plan.effects, vec![TimedEffect {
+      at: 10,
+      effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "dead".into(), delta: 1, abs: false },
+    }]);
   }
 
   const FLEETING: &str = "\
 <recipe>
   ::fleeting>
     @input>
-      *root.data.fleeting 1 ge if &root borrow
+      *root.data.fleeting 1 ge !if 1 ret
+      0 ret
     @output>
       *root.data.fleeting &var.0 set
-      5 &sys.duration set
-      *var.0 2 ge if 10 &sys.duration set
-      *var.0 3 ge if 15 &sys.duration set
-      *var.0 4 ge if 20 &sys.duration set
-      rtl &root.style set
-      &root destroy
+      5 &sys.time set
+      *var.0 2 ge if 10 &sys.time set
+      *var.0 3 ge if 15 &sys.time set
+      *var.0 4 ge if 20 &sys.time set
+      &root.data.dead inc
 ";
 
   #[test]
@@ -1966,32 +1941,38 @@ mod tests {
     let root = parse(FLEETING).unwrap();
     let (c, f) = cat_funcs();
     let mut s = Store::default();
-    s.write("root.data.fleeting", Cell::Int(3)); // fleeting=3 -> ge2, ge3, !ge4
+    s.write("root.data.fleeting", Cell::Int(3)); // fleeting=3 -> ge2, ge3, !ge4 → t=15
     let mp = match_recipe(recipe_hook(&root, "fleeting", "input"), &mut s, &c, &f).unwrap();
     assert!(mp.matched);
-    assert_eq!(mp.holds, vec![("root".into(), Hold::Borrow)]);
     let pp = plan_recipe(recipe_hook(&root, "fleeting", "output"), &mut s, &c, &f).unwrap();
     assert_eq!(pp.duration, 15);
-    assert_eq!(pp.effects, vec![Effect::Destroy { slot: "root".into() }]);
+    assert_eq!(pp.effects, vec![TimedEffect {
+      at: 15,
+      effect: Effect::Stock { slot: "root".into(), aspect: "dead".into(), delta: 1, abs: false },
+    }]);
   }
 
   const CUT_TREE: &str = "\
 <recipe>
   ::cut_tree>
     @input>
-      *slot.0.0.data.wood 1 ge if &slot.0.0 use
-      *slot.1.0.data.corpus_lit 1 ge if &slot.1.0 claim
-      $card::axe *slot.1.0.owner.slot.1.0.def_id eq if &slot.1.0.owner.slot.1.0 share
+      *slot.0.0.data.wood 1 ge !if 1 ret
+      *slot.1.0.data.corpus_lit 1 ge !if 1 ret
+      $card::axe *slot.1.0.owner.slot.1.0.def_id eq !if 1 ret
+      0 ret
     @output>
-      10 &sys.duration set
-      ltr &slot.1.0.style set
-      &slot.1.0 destroy
+      0 &sys.time set
+      &slot.1.0.data.claim inc
+      10 &sys.time set
+      &slot.1.0.data.dead inc
       &slot.0.0.data.wood dec
-      $card::corpus_dim &slot.1.0.owner.inventory create
+      &slot.1.0.owner 1 0 0 ^macro_zone call &mz set
+      *mz $card::corpus_dim &slot.1.0.owner ^create call drop
+      &slot.1.0.data.claim dec
 ";
 
   #[test]
-  fn recipe_cut_tree_aspect_owner_stock_create() {
+  fn recipe_cut_tree_timeline_macro_zone_create() {
     let root = parse(CUT_TREE).unwrap();
     let (c, f) = cat_funcs();
     let mut s = Store::default();
@@ -2000,61 +1981,41 @@ mod tests {
     s.write("slot.1.0.owner.slot.1.0.def_id", Cell::Sym("card::axe".into())); // owner re-anchor baked in
     let mp = match_recipe(recipe_hook(&root, "cut_tree", "input"), &mut s, &c, &f).unwrap();
     assert!(mp.matched);
-    assert_eq!(mp.holds, vec![
-      ("slot.0.0".into(), Hold::Use),
-      ("slot.1.0".into(), Hold::Claim),
-      ("slot.1.0.owner.slot.1.0".into(), Hold::Share),
-    ]);
     let pp = plan_recipe(recipe_hook(&root, "cut_tree", "output"), &mut s, &c, &f).unwrap();
     assert_eq!(pp.duration, 10);
-    assert_eq!(pp.styles, vec![("slot.1.0".into(), "ltr".into())]);
+    // acquire claim @t=0; kill + decrement wood + spawn + release claim @t=10
     assert_eq!(pp.effects, vec![
-      Effect::Destroy { slot: "slot.1.0".into() },
-      Effect::Stock { slot: "slot.0.0".into(), aspect: "wood".into(), delta: -1, abs: false },
-      Effect::Create { def: "card::corpus_dim".into(), target: "slot.1.0.owner.inventory".into() },
+      TimedEffect { at: 0, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "claim".into(), delta: 1, abs: false } },
+      TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "dead".into(), delta: 1, abs: false } },
+      TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.0.0".into(), aspect: "wood".into(), delta: -1, abs: false } },
+      TimedEffect { at: 10, effect: Effect::Create { def: "card::corpus_dim".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 1, q: 0, r: 0 } },
+      TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "claim".into(), delta: -1, abs: false } },
     ]);
   }
 
-  // `as` binds the handle a `create` pushes; later `&log…` targets resolve
-  // through the alias to `created.N` (the Nth create in the plan).
-  const AS_HANDLE: &str = "\
+  // `^create call &h set` binds the created handle; a following `&h.data.x set`
+  // resolves through the ref to `created.N` (the Nth create in the plan) — so a
+  // same-card stock set folds onto that Create.
+  const CREATE_HANDLE: &str = "\
 <recipe>
   ::handle_test>
     @output>
-      $card::log &slot.1.0.owner.inventory create &log as
+      &slot.1.0.owner 0 0 0 ^macro_zone call &mz set
+      *mz $card::log &slot.1.0.owner ^create call &log set
       4 &log.data.progress set
-      $card::pip &log.inventory create
-      &log destroy
+      *mz $card::pip &slot.1.0.owner ^create call drop
 ";
 
   #[test]
-  fn recipe_as_binds_created_handle() {
-    let root = parse(AS_HANDLE).unwrap();
+  fn recipe_create_handle_binds_and_folds() {
+    let root = parse(CREATE_HANDLE).unwrap();
     let (c, f) = cat_funcs();
     let pp = plan_recipe(recipe_hook(&root, "handle_test", "output"), &mut Store::default(), &c, &f).unwrap();
     assert_eq!(pp.effects, vec![
-      // first create → created.0
-      Effect::Create { def: "card::log".into(), target: "slot.1.0.owner.inventory".into() },
-      // stock/aspect set resolves &log → created.0
-      Effect::Stock { slot: "created.0".into(), aspect: "progress".into(), delta: 4, abs: true },
-      // nested create into the handle → target carries created.0
-      Effect::Create { def: "card::pip".into(), target: "created.0.inventory".into() },
-      // destroy targets the handle
-      Effect::Destroy { slot: "created.0".into() },
+      TimedEffect { at: 0, effect: Effect::Create { def: "card::log".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 } },
+      // `&log.data.progress set` resolves &log → created.0
+      TimedEffect { at: 0, effect: Effect::Stock { slot: "created.0".into(), aspect: "progress".into(), delta: 4, abs: true } },
+      TimedEffect { at: 0, effect: Effect::Create { def: "card::pip".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 } },
     ]);
-  }
-
-  #[test]
-  fn recipe_as_rejects_reserved_root() {
-    let src = "\
-<recipe>
-  ::bad>
-    @output>
-      $card::log &slot.1.0.owner.inventory create &slot as
-";
-    let root = parse(src).unwrap();
-    let (c, f) = cat_funcs();
-    let err = plan_recipe(recipe_hook(&root, "bad", "output"), &mut Store::default(), &c, &f);
-    assert!(err.is_err(), "binding a reserved root must error, got {err:?}");
   }
 }

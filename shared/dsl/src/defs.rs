@@ -954,11 +954,11 @@ mod tests {
 
   #[test]
   fn recipe_meta_iterators_and_anchors() {
-    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n";
+    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n  ::dead>\n    @define>\n      traits &section set\n";
     let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n        1 &data.cost set\n";
     let recipes = "<recipe>\n\
-      \x20 ::triple>\n    @input>\n      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use\n      $card::corpus *slot.1.1.def_id eq if &slot.1.1 use\n    @output>\n      &slot.1.0 destroy\n\
-      \x20 ::rooted>\n    @input>\n      *root.data.cost 1 ge if &root use\n    @output>\n      &root destroy\n";
+      \x20 ::triple>\n    @input>\n      $card::corpus *slot.1.0.def_id eq !if 1 ret\n      $card::corpus *slot.1.1.def_id eq !if 1 ret\n      0 ret\n    @output>\n      &slot.1.0.data.dead inc\n\
+      \x20 ::rooted>\n    @input>\n      *root.data.cost 1 ge !if 1 ret\n      0 ret\n    @output>\n      &root.data.dead inc\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into()), ("r.rd".into(), recipes.into())]).unwrap();
     let m = recipe_meta(&b, "triple").unwrap();
     assert_eq!(m.iterators.len(), 1);

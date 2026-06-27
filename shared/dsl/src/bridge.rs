@@ -421,10 +421,10 @@ mod tests {
 
   #[test]
   fn card_views_feed_match_recipe_end_to_end() {
-    use crate::vm::{match_recipe, Hold};
-    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
+    use crate::vm::match_recipe;
+    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::dead>\n    @define>\n      traits &section set\n";
     let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n";
-    let recipes = "<recipe>\n  ::use_corpus>\n    @input>\n      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use\n    @output>\n      10 &sys.duration set\n      &slot.1.0 destroy\n";
+    let recipes = "<recipe>\n  ::use_corpus>\n    @input>\n      $card::corpus *slot.1.0.def_id eq !if 1 ret\n      0 ret\n    @output>\n      10 &sys.time set\n      &slot.1.0.data.dead inc\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into()), ("r.rd".into(), recipes.into())]).unwrap();
 
     // a stored corpus instance, placed at slot.1.0, drives the matcher
@@ -434,7 +434,6 @@ mod tests {
     let plan = match_recipe(input, &mut frame, &b.catalog, &b.functions).unwrap();
 
     assert!(plan.matched);
-    assert_eq!(plan.holds, vec![("slot.1.0".to_string(), Hold::Use)]);
   }
 
   #[test]
@@ -442,14 +441,14 @@ mod tests {
     use crate::loader::{lineage, version_of};
     use crate::vm::match_recipe;
 
-    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n";
+    let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n  ::dead>\n    @define>\n      traits &section set\n";
     // Two versions of the `apple` lineage (distinct defs, distinct cost) plus an
     // unrelated `corpus`. A `modify` would have produced apple.1 from apple.0.
     let cards = "<card>\n\
       \x20 ::apple.0>\n    :data>\n      @define>\n        faculty &data.type set\n        1 &data.cost set\n\
       \x20 ::apple.1>\n    :data>\n      @define>\n        faculty &data.type set\n        2 &data.cost set\n\
       \x20 ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n";
-    let recipes = "<recipe>\n  ::eat_apple>\n    @input>\n      $card::apple *slot.1.0.def_id eq if &slot.1.0 use\n    @output>\n      10 &sys.duration set\n      &slot.1.0 destroy\n";
+    let recipes = "<recipe>\n  ::eat_apple>\n    @input>\n      $card::apple *slot.1.0.def_id eq !if 1 ret\n      0 ret\n    @output>\n      10 &sys.time set\n      &slot.1.0.data.dead inc\n";
     let b = load(&[
       ("a.rd".into(), aspects.into()),
       ("c.rd".into(), cards.into()),

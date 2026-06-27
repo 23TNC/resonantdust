@@ -462,9 +462,9 @@ mod tests {
     use super::*;
 
     fn content() -> Content {
-        let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-        let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &aspect.type set\n";
-        let recipes = "<recipe>\n  ::use_corpus>\n    @input>\n      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use\n    @output>\n      10 &sys.duration set\n      &slot.1.0 destroy\n";
+        let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::dead>\n    @define>\n      traits &section set\n";
+        let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n";
+        let recipes = "<recipe>\n  ::use_corpus>\n    @input>\n      $card::corpus *slot.1.0.def_id eq !if 1 ret\n      0 ret\n    @output>\n      10 &sys.time set\n      &slot.1.0.data.dead inc\n";
         Content::load(vec![
             ("a.rd".into(), aspects.into()),
             ("c.rd".into(), cards.into()),
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn bad_content_reports_problems() {
-        let err = Content::load(vec![("b.rd".into(), "<functions:f>\n  2 &aspect.ghost set\n".into())]).unwrap_err();
+        let err = Content::load(vec![("b.rd".into(), "<functions:f>\n  2 &data.ghost set\n".into())]).unwrap_err();
         assert!(err.contains("ghost"), "{err}");
     }
 
@@ -609,7 +609,7 @@ mod tests {
     fn generates_terrain_and_packs_defs() {
         let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n  ::pine>\n    @define>\n      aspects &section set\n";
         let biomes = "<biome>\n  ::forest>\n    @define>\n      30 75 &elevation range\n      20 70 &temperature range\n      55 95 &humidity range\n      1 &tile array\n      $card::forest &tile.0 set\n";
-        let cards = "<card>\n  ::forest>\n    :data>\n      @define>\n        2 &aspect.pine stock\n        tile &aspect.type set\n        30 &aspect.cost set\n      @init>\n        ^biome call &biome set\n        0 3 &aspect.pine range\n        &aspect.pine *biome.humidity normalize\n";
+        let cards = "<card>\n  ::forest>\n    :data>\n      @define>\n        2 &data.pine stock\n        tile &data.type set\n        30 &data.cost set\n      @init>\n        ^biome call &biome set\n        0 3 &data.pine range\n        &data.pine *biome.humidity normalize\n";
         let c = Content::load(vec![
             ("a.rd".into(), aspects.into()),
             ("b.rd".into(), biomes.into()),

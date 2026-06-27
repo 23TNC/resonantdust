@@ -328,7 +328,7 @@ mod tests {
   // ---- frame building ----
 
   use crate::loader::load;
-  use crate::vm::{match_recipe, Hold};
+  use crate::vm::match_recipe;
 
   fn bundle() -> Bundle {
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
@@ -350,20 +350,19 @@ mod tests {
   fn frame_places_binding_and_matches_then_translates_back() {
     let b = bundle();
     let r = recipe_node(
-      "<recipe>\n  ::r>\n    @input>\n      $card::corpus *slot.2.0.def_id eq if &slot.2.0 use\n    @output>\n      &slot.2.0 destroy\n",
+      "<recipe>\n  ::r>\n    @input>\n      $card::corpus *slot.2.0.def_id eq !if 1 ret\n      0 ret\n    @output>\n      &slot.2.0.data.dead inc\n",
     );
     // iterator 0 = branch 2 (top); bind card 101 (a corpus) at offset 0.
     let corpus = card_of(&b, "corpus");
     let lookup = |id: u32| (id == 101).then(|| corpus.clone());
     let frame = build_frame(&b, &r, 0, &[vec![101]], None, &lookup);
 
-    // the placement resolves, and the recipe matches against it
+    // the placement resolves, and the recipe matches against it (`0 ret`)
     let mut store = frame.store;
     let plan =
       match_recipe(&r.hook("input").unwrap().body, &mut store, &b.catalog, &b.functions).unwrap();
     assert!(plan.matched);
-    assert_eq!(plan.holds, vec![("slot.2.0".to_string(), Hold::Use)]);
-    // and the hold's slot-path translates back to the bound card_id
+    // and the bound slot-path translates back to the card_id
     let frame2 = build_frame(&b, &r, 0, &[vec![101]], None, &lookup);
     assert_eq!(frame2.card_at("slot.2.0"), Some(101));
   }
@@ -375,7 +374,7 @@ mod tests {
     // spuriously pass (regression: `corpus_b_top` firing on a single corpus).
     let b = bundle();
     let r = recipe_node(
-      "<recipe>\n  ::r>\n    @input>\n      $card::corpus *slot.2.0.def_id eq if &slot.2.0 use\n      $card::corpus *slot.2.1.def_id eq if &slot.2.1 claim\n    @output>\n      &slot.2.0 destroy\n",
+      "<recipe>\n  ::r>\n    @input>\n      $card::corpus *slot.2.0.def_id eq !if 1 ret\n      $card::corpus *slot.2.1.def_id eq !if 1 ret\n      0 ret\n    @output>\n      &slot.2.0.data.dead inc\n",
     );
     let corpus = card_of(&b, "corpus");
     let one = |id: u32| (id == 101).then(|| corpus.clone());
@@ -394,7 +393,7 @@ mod tests {
   fn frame_nests_owner_reanchor() {
     let b = bundle();
     let r = recipe_node(
-      "<recipe>\n  ::r>\n    @input>\n      $card::axe *slot.2.0.owner.slot.2.0.def_id eq if &slot.2.0.owner.slot.2.0 share\n    @output>\n      $card::corpus &slot.2.0.owner.inventory create\n",
+      "<recipe>\n  ::r>\n    @input>\n      $card::axe *slot.2.0.owner.slot.2.0.def_id eq !if 1 ret\n      0 ret\n    @output>\n      &slot.2.0.owner.slot.2.0.data.dead inc\n",
     );
     // iter 0 = branch 2 (actor, from the owner-path prefix); iter 1 = nested axe.
     let (actor, axe) = (card_of(&b, "corpus"), card_of(&b, "axe"));
@@ -410,7 +409,6 @@ mod tests {
     let plan =
       match_recipe(&r.hook("input").unwrap().body, &mut store, &b.catalog, &b.functions).unwrap();
     assert!(plan.matched);
-    assert_eq!(plan.holds, vec![("slot.2.0.owner.slot.2.0".to_string(), Hold::Share)]);
 
     // back-translation: exact placement + an effect target that walks past one
     assert_eq!(frame.card_at("slot.2.0.owner.slot.2.0"), Some(301));
