@@ -453,6 +453,13 @@ impl Store {
   pub fn into_root(self) -> Cell {
     self.root
   }
+  /// Remove a top-level key from the root map — strips the `__schema` stock
+  /// sidecar from a finished `card_view` so the matched frame stays clean.
+  pub fn drop_key(&mut self, key: &str) {
+    if let Cell::Map(m) = &mut self.root {
+      m.retain(|(k, _)| k != key);
+    }
+  }
   /// Parse a path into steps, resolving `*`-interpolations against the local
   /// store (Int → index, Sym → map key — the latter is how `:*faction` works).
   fn parse(&self, path: &str) -> Vec<Seg> {
@@ -1288,8 +1295,21 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             store.write(a.addr(), Cell::Ranged { min, max, val });
           }
           "stock" => {
+            // `<bits> &data.<name> stock` — declare a stock slot. The slot itself
+            // stays a plain `0` (so `normalize`/`scatter` still see an UNRANGED
+            // slot until an explicit `range`), but we record `(name, bits)` into a
+            // `__schema` sidecar IN DECLARATION ORDER. This is schema-BY-EXECUTION:
+            // declarations inside called data_funcs are captured because the bridge
+            // RUNS @define rather than scanning it. `resolve_addr` follows the `&a`
+            // alias so `&a.claim` inside a data_func records `claim` on the card.
             let a = st.pop().unwrap();
-            let _bits = st.pop().unwrap().int();
+            let bits = st.pop().unwrap().int();
+            let resolved = store.resolve_addr(a.addr());
+            if let Some(name) = resolved.strip_prefix("data.") {
+              let n = store.read("__schema").map(Cell::len).unwrap_or(0);
+              store.write(&format!("__schema.{n}.name"), Cell::Sym(name.to_string()));
+              store.write(&format!("__schema.{n}.bits"), Cell::Int(bits));
+            }
             store.write(a.addr(), Cell::Int(0));
           }
           "random" => {

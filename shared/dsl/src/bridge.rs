@@ -9,7 +9,6 @@
 //! `slot.a.b`), then runs [`crate::vm::match_recipe`] / `plan_recipe`.
 
 use crate::loader::Bundle;
-use crate::parser::{Stmt, Token};
 use crate::vm::{run, Cell, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -24,33 +23,47 @@ pub struct Card {
   pub stock: Vec<i64>,
 }
 
-/// The ordered stock aspects a card declares — `<bits> &data.<name> stock` in
-/// its `:data @define`, as `(name, bits)` in declaration order. A packed row's
-/// stock slots map onto these positionally, and `card_view` overlays the row's
-/// values here.
-pub fn stock_schema(bundle: &Bundle, card: &str) -> Vec<(String, i64)> {
+/// Run a card's `:data @define` into a fresh store. Schema-by-execution: because
+/// we EXECUTE the hook (threading the bundle's catalog + functions/data_funcs), a
+/// `stock` declaration inside a called `$data_func::x` is captured just like a
+/// direct one — a static token scan can't follow the call/alias.
+fn run_define(bundle: &Bundle, card: &str) -> Store {
+  let mut store = Store::default();
+  if let Some(define) = bundle.card(card).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) {
+    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &bundle.functions);
+  }
+  store
+}
+
+/// Read the ordered stock schema from a post-`@define` store's `__schema` sidecar
+/// (the `stock` op records `(name, bits)` there in declaration order, dotted for
+/// nested namespaces like `touch.user`).
+fn read_schema(store: &Store) -> Vec<(String, i64)> {
   let mut out = Vec::new();
-  let Some(define) = bundle.card(card).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) else {
-    return out;
-  };
-  for stmt in &define.body {
-    let Stmt::Instr(toks) = stmt else { continue };
-    if !matches!(toks.last(), Some(Token::Word(w)) if w == "stock") {
-      continue;
-    }
-    let name = toks.iter().find_map(|t| match t {
-      Token::Slot(s) => s.strip_prefix("data.").map(str::to_string),
-      _ => None,
-    });
-    let bits = toks.iter().find_map(|t| match t {
-      Token::Number(n) => Some(*n),
-      _ => None,
-    });
-    if let Some(name) = name {
-      out.push((name, bits.unwrap_or(0)));
+  if let Some(Cell::Arr(items)) = store.read("__schema") {
+    for it in items {
+      let Cell::Map(m) = it else { continue };
+      let name = m.iter().find_map(|(k, c)| match (k.as_str(), c) {
+        ("name", Cell::Sym(s)) => Some(s.clone()),
+        _ => None,
+      });
+      let bits = m.iter().find_map(|(k, c)| (k == "bits").then(|| c.as_int()));
+      if let Some(name) = name {
+        out.push((name, bits.unwrap_or(0)));
+      }
     }
   }
   out
+}
+
+/// The ordered stock aspects a card declares — `<bits> &data.<name> stock` in its
+/// `:data @define` (incl. those declared by a called `$data_func::x`), as
+/// `(name, bits)` in declaration order. **Zone-savable slots come first** by
+/// declaring them before any stock-allocating data_func (a tile's bottom bits are
+/// its persisted terrain). A packed row's stock slots map onto these positionally;
+/// `card_view` overlays the row's values here.
+pub fn stock_schema(bundle: &Bundle, card: &str) -> Vec<(String, i64)> {
+  read_schema(&run_define(bundle, card))
 }
 
 /// Build the per-card view the VM matches against: `def_id` (the `$card::name`
@@ -59,30 +72,28 @@ pub fn stock_schema(bundle: &Bundle, card: &str) -> Vec<(String, i64)> {
 /// `satisfies` hierarchy — so a recipe reading `data.wood` sees the sum of
 /// pine/ash/etc. Pure over `(bundle, card)`.
 pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
-  let mut store = Store::default();
   let Some(name) = bundle.card_name(card.def_id).map(str::to_string) else {
     return Cell::Map(Vec::new());
   };
+  // Run :data @define — static aspects (type/cost/…) and stock declarations,
+  // including those a `$data_func::x` declares. Threads catalog + functions so
+  // shared helpers (e.g. the lock-aspect declarations) resolve.
+  let mut store = run_define(bundle, &name);
+
   // Match by LINEAGE, not exact version: the `def_id` symbol is the
   // version-stripped logical name, so a recipe's `$card::apple` matches any
-  // version (apple.0, apple.1, …). The `@define` below still reads the
+  // version (apple.0, apple.1, …). The `@define` above still reads the
   // version-SPECIFIC def by `name`, so each instance keeps its own
   // aspects/stock schema even while several versions coexist.
   store.write("def_id", Cell::Sym(format!("card::{}", crate::loader::lineage(&name))));
 
-  // static aspects (type/cost/…) and stock declarations from :data @define.
-  // Threads the bundle's `functions` so a `:data @define` can `$functions::x
-  // call` a shared helper (e.g. the lock-aspect declarations) instead of
-  // repeating it per card.
-  if let Some(define) = bundle.card(&name).and_then(|d| d.facet("data")).and_then(|f| f.hook("define")) {
-    let _ = run(&define.body, &mut store, &[], &bundle.catalog, &bundle.functions);
-  }
-  // overlay the per-instance stock values (positional, by the schema)
-  for (i, (aspect, _bits)) in stock_schema(bundle, &name).iter().enumerate() {
+  // overlay the per-instance stock values (positional, by the executed schema)
+  for (i, (aspect, _bits)) in read_schema(&store).iter().enumerate() {
     if let Some(v) = card.stock.get(i) {
       store.write(&format!("data.{aspect}"), Cell::Int(*v));
     }
   }
+  store.drop_key("__schema"); // sidecar is schema-only; keep the matched frame clean
   fold_aspects(&mut store, bundle);
   store.into_root()
 }
@@ -291,6 +302,37 @@ mod tests {
   fn stock_schema_lists_stock_aspects_in_order() {
     let b = bundle();
     assert_eq!(stock_schema(&b, "grove"), vec![("pine".to_string(), 2), ("ash".to_string(), 2)]);
+  }
+
+  #[test]
+  fn schema_by_execution_captures_data_func_stock_zone_first() {
+    // Stock declared INSIDE a data_func is captured (the bridge runs @define, so
+    // the call + `&a` alias resolve), AND zone aspects declared first stay first
+    // (forest's pine/flora → the zone-savable bottom slots), AND a nested
+    // namespace (`touch.user`) is captured dotted.
+    let aspects = "<aspect>\n\
+      \x20 ::type>\n    @define>\n      traits &section set\n\
+      \x20 ::pine>\n    @define>\n      aspects &section set\n\
+      \x20 ::flora>\n    @define>\n      aspects &section set\n\
+      \x20 ::claim>\n    @define>\n      aspects &section set\n\
+      \x20 ::touch>\n    @define>\n      aspects &section set\n";
+    let dfun = "<data_func>\n  ::flags>\n    pop &a set\n    3 &a.claim stock\n    2 &a.touch.user stock\n    0 ret\n";
+    let cards = "<card>\n  ::forest>\n    :data>\n      @define>\n        2 &data.pine stock\n        2 &data.flora stock\n        &data $data_func::flags call drop\n        tile &data.type set\n";
+    let b = load(&[
+      ("a.rd".into(), aspects.into()),
+      ("d.rd".into(), dfun.into()),
+      ("c.rd".into(), cards.into()),
+    ])
+    .expect("load");
+    assert_eq!(
+      stock_schema(&b, "forest"),
+      vec![
+        ("pine".to_string(), 2),
+        ("flora".to_string(), 2),
+        ("claim".to_string(), 3),
+        ("touch.user".to_string(), 2),
+      ]
+    );
   }
 
   #[test]
