@@ -112,7 +112,7 @@ fn tile_stock(bundle: &Bundle, tile: &str, global_q: i32, global_r: i32, seed: u
   let schema = crate::bridge::stock_schema(bundle, tile);
   let mut out = [0u8; 2];
   for (i, (aspect, _bits)) in schema.iter().take(2).enumerate() {
-    let v = s.read(&format!("aspect.{aspect}")).map(Cell::as_int).unwrap_or(0);
+    let v = s.read(&format!("data.{aspect}")).map(Cell::as_int).unwrap_or(0);
     out[i] = v.clamp(0, ZONE_STOCK_MAX) as u8;
   }
   out
@@ -152,8 +152,8 @@ mod tests {
       \x20 ::forest>\n    @define>\n      30 75 &elevation range\n      20 70 &temperature range\n      55 95 &humidity range\n      1 &tile array\n      $card::forest &tile.0 set\n\
       \x20 ::plains>\n    @define>\n      1 &tile array\n      $card::plains &tile.0 set\n";
     let cards = "<card>\n\
-      \x20 ::forest>\n    :data>\n      @define>\n        2 &aspect.pine stock\n        2 &aspect.flora stock\n        tile &aspect.type set\n        30 &aspect.cost set\n      @init>\n        ^biome call &biome set\n        0 3 &aspect.pine range\n        &aspect.pine *biome.humidity normalize\n        0 2 &aspect.flora range\n        &aspect.flora *biome.humidity normalize\n\
-      \x20 ::plains>\n    :data>\n      @define>\n        tile &aspect.type set\n        5 &aspect.cost set\n";
+      \x20 ::forest>\n    :data>\n      @define>\n        2 &data.pine stock\n        2 &data.flora stock\n        tile &data.type set\n        30 &data.cost set\n      @init>\n        ^biome call &biome set\n        0 3 &data.pine range\n        &data.pine *biome.humidity normalize\n        0 2 &data.flora range\n        &data.flora *biome.humidity normalize\n\
+      \x20 ::plains>\n    :data>\n      @define>\n        tile &data.type set\n        5 &data.cost set\n";
     load(&[
       ("a.rd".into(), aspects.into()),
       ("b.rd".into(), biomes.into()),

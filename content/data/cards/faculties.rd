@@ -7,62 +7,62 @@
   ::corpus>
     :data>
       @define>
-        faculty &aspect.type set
-        1 &aspect.corpus_lit set
+        faculty &data.type set
+        1 &data.corpus_lit set
 
   ::corpus_dim>
     :data>
       @define>
-        faculty &aspect.type set
-        1 &aspect.corpus_dim set
+        faculty &data.type set
+        1 &data.corpus_dim set
 
   ::corpus_upgrade>
     :data>
       @define>
-        faculty &aspect.type set
-        1 &aspect.corpus_upgrade set
+        faculty &data.type set
+        1 &data.corpus_upgrade set
 
   ::aether>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::aether_dim>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::aether_lit>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::sollertia>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::sollertia_dim>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::sollertia_lit>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::anima>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::anima_dim>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set
 
   ::anima_lit>
     :data>
       @define>
-        faculty &aspect.type set
+        faculty &data.type set

@@ -19,7 +19,7 @@
 //!
 //! Path separators (inside references, resolved later — the lexer keeps them
 //! verbatim): `::` definition · `:` tag · `.` member. e.g.
-//! `$card::corpus:data.aspect.corpus+`.
+//! `$card::corpus:data.data.corpus+`.
 //!
 //! Grammar reference: content/data/SYNTAX.txt. The VM comes later.
 
@@ -30,7 +30,7 @@
 pub enum Token {
   /// `$path` — resolve a global symbol (`$card::corpus`, `$functions:ring_objects`).
   Const(String),
-  /// `&path` — writable slot reference (`&aspect.cost`, `&objects.0`).
+  /// `&path` — writable slot reference (`&data.cost`, `&objects.0`).
   Slot(String),
   /// `*path` — read / deref (`*biome.humidity`, `*slot.1.0.def_id`).
   Value(String),
@@ -353,12 +353,12 @@ mod tests {
 
   #[test]
   fn classifies_token_sigils() {
-    let src = "<functions:f>\n  $card::corpus *slot.1.0.def_id &aspect.cost -1 #395C39 set :loop ^biome \"tile \"1.5\n";
+    let src = "<functions:f>\n  $card::corpus *slot.1.0.def_id &data.cost -1 #395C39 set :loop ^biome \"tile \"1.5\n";
     let root = parse(src).unwrap();
     let toks = instr(&root.children[0], 0);
     assert_eq!(toks[0], Token::Const("card::corpus".into()));
     assert_eq!(toks[1], Token::Value("slot.1.0.def_id".into()));
-    assert_eq!(toks[2], Token::Slot("aspect.cost".into()));
+    assert_eq!(toks[2], Token::Slot("data.cost".into()));
     assert_eq!(toks[3], Token::Number(-1));
     assert_eq!(toks[4], Token::Color("#395C39".into()));
     assert_eq!(toks[5], Token::Word("set".into()));
@@ -397,12 +397,12 @@ mod tests {
     :data>
       @define>
         tile &card.type set
-        2 &aspect.pine stock
+        2 &data.pine stock
       @init>
         *biome.rarity 0 10 within !if :r10 goto
-        0 1 &aspect.pine range
+        0 1 &data.pine range
         :r10>
-        0 3 &aspect.pine range
+        0 3 &data.pine range
     :visuals>
       @define>
         $shape.hex &shape set
@@ -456,7 +456,7 @@ mod tests {
 
   #[test]
   fn instruction_at_structural_level_errors() {
-    let src = "<card>\n  ::x>\n  10 &aspect.cost set\n";
+    let src = "<card>\n  ::x>\n  10 &data.cost set\n";
     assert!(parse(src).is_err());
   }
 

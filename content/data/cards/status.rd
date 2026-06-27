@@ -8,20 +8,20 @@
   ::dread>
     :data>
       @define>
-        revery &aspect.type set
+        revery &data.type set
 
   ::test>
     :data>
       @define>
-        event &aspect.type set
-        2 &aspect.stack_joins set
+        event &data.type set
+        2 &data.stack_joins set
 
   ::despair>
     :data>
       @define>
-        event &aspect.type set
-        2 &aspect.stack_joins set
-        12 &aspect.stack_hosts set
+        event &data.type set
+        2 &data.stack_joins set
+        12 &data.stack_hosts set
         $recipe::despair_success &magnetic.recipe set
         $recipe::despair_failure &magnetic.failure set
         3 &magnetic.radius set
@@ -30,9 +30,9 @@
   ::strike>
     :data>
       @define>
-        event &aspect.type set
-        2 &aspect.stack_joins set
-        12 &aspect.stack_hosts set
+        event &data.type set
+        2 &data.stack_joins set
+        12 &data.stack_hosts set
         $recipe::strike_success &magnetic.recipe set
         $recipe::strike_failure &magnetic.failure set
         3 &magnetic.radius set
@@ -45,9 +45,9 @@
   ::gloom>
     :data>
       @define>
-        event &aspect.type set
-        2 &aspect.stack_joins set
-        12 &aspect.stack_hosts set
+        event &data.type set
+        2 &data.stack_joins set
+        12 &data.stack_hosts set
         $recipe::gloom_success &magnetic.recipe set
         $recipe::gloom_failure &magnetic.failure set
         3 &magnetic.radius set

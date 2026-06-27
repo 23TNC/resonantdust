@@ -9,10 +9,10 @@
 //! `within`, `if`/`!if`, `goto`, `call`/`ret`/`drop` (functions + `^system`
 //! calls, returning one value), `inc`/`dec`, `count`,
 //! `array`, `range`, `normalize`, `stock`, `random`; interpolated path segments
-//! (`objects.*var.0`, `*aspect.*var.2`, `:*faction`); **ref-following derefs**
+//! (`objects.*var.0`, `*data.*var.2`, `:*faction`); **ref-following derefs**
 //! through the catalog — a slot whose value is a stored `$asset::x` ref follows
 //! into the catalog when the path continues (`asset.0.object`). Only genuinely
-//! stored refs follow; a plain scalar (`aspect.pine` = a magnitude) does not
+//! stored refs follow; a plain scalar (`data.pine` = a magnitude) does not
 //! shadow into a registry — its definition is reached via `$aspect::pine`;
 //! cross-function
 //! `$functions:x call`; and **recipe execution** — [`match_recipe`] runs an
@@ -24,8 +24,8 @@
 //! a plain key. The gate builds the operating-set frame: it applies the
 //! frame-base `N`, bakes owner re-anchors into the tree, and **folds the aspect
 //! hierarchy up** — a forest tile stocks `pine`, so the gate writes the rolled-up
-//! `aspect.wood` (= the sum of pine and any other wood-descendants) into the
-//! frame before calling, since `cut_tree` reads `aspect.wood`. The pine→wood tree
+//! `data.wood` (= the sum of pine and any other wood-descendants) into the
+//! frame before calling, since `cut_tree` reads `data.wood`. The pine→wood tree
 //! is still a JSON registry the gate consults; it never enters the VM. The gate
 //! slides the frame by re-calling `match_recipe` at successive positions.
 
@@ -88,7 +88,7 @@ pub struct Catalog {
   /// `<aspect>` records (satisfies/section/icon/color), keyed by id — the
   /// registry the gate consults to fold a card's per-instance aspect scalars up
   /// the satisfies LUT. Cards do NOT store these; an aspect's definition is a
-  /// `$aspect::id` lookup here, distinct from the card's `aspect.id` magnitude.
+  /// `$aspect::id` lookup here, distinct from the card's `data.id` magnitude.
   aspects: HashMap<String, Cell>,
   /// `<globals>` constants (card_width, title_height, …) keyed by id — shared
   /// dimensions/values the DSL reads with `$globals::id` (resolved to the VALUE
@@ -341,7 +341,7 @@ fn walk_read<'a>(cur: &'a Cell, segs: &[Seg]) -> Option<&'a Cell> {
 /// *explicitly stored* `Sym` ref, follows it into the catalog and continues
 /// there. Only a real stored ref derefs — a slot whose value is `$asset::pine`
 /// (e.g. `objects.0`), where `*objects.0.object` walks the ref that's actually
-/// in the data. A plain scalar does NOT shadow into a registry: `aspect.pine`
+/// in the data. A plain scalar does NOT shadow into a registry: `data.pine`
 /// (a per-card magnitude) behaves like any other local key, and an aspect's
 /// definition is reached with an explicit `$aspect::pine`, never by walking a
 /// card's value. Instance (`*`) and definition (`$`) stay distinct.
@@ -818,7 +818,7 @@ pub enum Effect {
   /// `&source &target move` — relocate the bound card `source` to `target`
   /// (`…owner.inventory`). The consumed-blueprint-back-to-inventory verb.
   Move { source: String, target: String },
-  /// `&slot.aspect.x dec`/`inc`/`set` — per-row tile-stock mutation. `delta` is
+  /// `&slot.data.x dec`/`inc`/`set` — per-row tile-stock mutation. `delta` is
   /// the signed change for inc/dec; `set` carries the absolute value with abs=true.
   Stock { slot: String, aspect: String, delta: i64, abs: bool },
 }
@@ -946,7 +946,7 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             let addr = a.addr().to_string();
             // In `@output`, `set` is path-dispatched the way the old engine's
             // `resolve_target` keyed on the path tail: a `.style` write is a
-            // progress style, `sys.duration` is the action window, `.aspect.`
+            // progress style, `sys.duration` is the action window, `.data.`
             // is a tile-stock op.
             if mode == Mode::Output {
               // Expand any `as`-handle root in the target so the emitted effect
@@ -957,10 +957,10 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               } else if let Some(slot) = taddr.strip_suffix(".style") {
                 let style = match &val { Item::Sym(s) => s.clone(), _ => String::new() };
                 plan.styles.push((slot.to_string(), style));
-              } else if let Some(i) = taddr.find(".aspect.") {
+              } else if let Some(i) = taddr.find(".data.") {
                 plan.effects.push(Effect::Stock {
                   slot: taddr[..i].to_string(),
-                  aspect: taddr[i + ".aspect.".len()..].to_string(),
+                  aspect: taddr[i + ".data.".len()..].to_string(),
                   delta: val.int(),
                   abs: true,
                 });
@@ -1174,14 +1174,14 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             let p = st.pop().unwrap();
             let addr = p.addr().to_string();
             let delta = if w == "inc" { 1 } else { -1 };
-            // `&slot.aspect.x dec` in `@output` is a per-row tile-stock change,
+            // `&slot.data.x dec` in `@output` is a per-row tile-stock change,
             // not just a scratch counter (`&var.0 inc`) — emit a stock effect.
             if mode == Mode::Output {
               let taddr = store.resolve_addr(&addr);
-              if let Some(i) = taddr.find(".aspect.") {
+              if let Some(i) = taddr.find(".data.") {
                 plan.effects.push(Effect::Stock {
                   slot: taddr[..i].to_string(),
-                  aspect: taddr[i + ".aspect.".len()..].to_string(),
+                  aspect: taddr[i + ".data.".len()..].to_string(),
                   delta,
                   abs: false,
                 });
@@ -1342,7 +1342,7 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
             let root = addr.split(['.', ':']).find(|s| !s.is_empty()).unwrap_or("");
             if matches!(
               root,
-              "slot" | "var" | "owner" | "aspect" | "objects" | "prims" | "sys" | "created"
+              "slot" | "var" | "owner" | "data" | "visual" | "objects" | "prims" | "sys" | "created"
             ) {
               return Err(format!("`as` cannot bind reserved root {root:?} (in {addr:?})"));
             }
@@ -1557,38 +1557,38 @@ mod tests {
   }
   #[test]
   fn range_then_normalize() {
-    let s = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    0 3 &aspect.pine range\n    &aspect.pine *biome.humidity normalize\n", "define", biome(7, 70, 40));
-    assert_eq!(s.read("aspect.pine"), Some(&Cell::Ranged { min: 0, max: 3, val: 2 }));
+    let s = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    0 3 &data.pine range\n    &data.pine *biome.humidity normalize\n", "define", biome(7, 70, 40));
+    assert_eq!(s.read("data.pine"), Some(&Cell::Ranged { min: 0, max: 3, val: 2 }));
   }
   #[test]
   fn scatter_band_relative_with_jitter() {
     // band 55..75 mapped onto range 0..3 (vs normalize's absolute-0..100 floor,
     // which buries 55..75 in a single bucket). humidity 65 → frac 0.5 →
     // base round(1.5)=2, then ±1 jitter, clamped into 0..3.
-    let mid = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &aspect.pine range\n    &aspect.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 65, 40));
-    match mid.read("aspect.pine") {
+    let mid = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &data.pine range\n    &data.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 65, 40));
+    match mid.read("data.pine") {
       Some(Cell::Ranged { min: 0, max: 3, val }) => assert!((1..=3).contains(val), "mid got {val}"),
       other => panic!("not ranged: {other:?}"),
     }
     // below the band → base 0; only upward jitter survives the clamp.
-    let lo = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &aspect.pine range\n    &aspect.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 20, 40));
-    match lo.read("aspect.pine") {
+    let lo = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &data.pine range\n    &data.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 20, 40));
+    match lo.read("data.pine") {
       Some(Cell::Ranged { val, .. }) => assert!((0..=1).contains(val), "lo got {val}"),
       other => panic!("not ranged: {other:?}"),
     }
     // above the band → base max; only downward jitter survives the clamp.
-    let hi = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &aspect.pine range\n    &aspect.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 95, 40));
-    match hi.read("aspect.pine") {
+    let hi = run_hook("<functions:f>\n  @define>\n    ^biome call &biome set\n    ^seed call &seed set\n    0 3 &data.pine range\n    &data.pine *biome.humidity 55 75 *seed scatter\n", "define", biome(40, 95, 40));
+    match hi.read("data.pine") {
       Some(Cell::Ranged { val, .. }) => assert!((2..=3).contains(val), "hi got {val}"),
       other => panic!("not ranged: {other:?}"),
     }
   }
   #[test]
   fn within_and_goto_bucket() {
-    let src = "<functions:f>\n  @define>\n    ^biome call &biome set\n    *biome.rarity 0 10 within !if :r10 goto\n    0 1 &aspect.pine range\n    :norm goto\n    :r10>\n    0 3 &aspect.stone range\n    :norm>\n    1 &done set\n";
+    let src = "<functions:f>\n  @define>\n    ^biome call &biome set\n    *biome.rarity 0 10 within !if :r10 goto\n    0 1 &data.pine range\n    :norm goto\n    :r10>\n    0 3 &data.stone range\n    :norm>\n    1 &done set\n";
     let s = run_hook(src, "define", biome(5, 70, 40));
-    assert!(matches!(s.read("aspect.pine"), Some(Cell::Ranged { .. })));
-    assert_eq!(s.read("aspect.stone"), None);
+    assert!(matches!(s.read("data.pine"), Some(Cell::Ranged { .. })));
+    assert_eq!(s.read("data.stone"), None);
   }
   #[test]
   fn interpolated_index_read_write() {
@@ -1692,7 +1692,7 @@ mod tests {
   #[test]
   fn instance_aspect_is_a_plain_scalar_no_shadow() {
     // A card holds an aspect as a plain scalar — the path does NOT shadow into
-    // the registry. `aspect.pine` behaves exactly like any other local key; the
+    // the registry. `data.pine` behaves exactly like any other local key; the
     // definition is reached via `$aspect::pine`, never by walking a card value.
     // (Contrast `deref_asset_to_manifest_texture`: an asset slot stores a real
     // `$asset::x` Sym, so following it is honest, not a synthesized shadow.)
@@ -1700,12 +1700,12 @@ mod tests {
     let mut cat = Catalog::default();
     cat.add_aspects(&parse(aspects).unwrap());
     let mut s = Store::default();
-    s.write("slot.0.0.aspect.pine", Cell::Int(2));
+    s.write("slot.0.0.data.pine", Cell::Int(2));
     // the scalar reads back...
-    assert_eq!(resolve(&s, &cat, "slot.0.0.aspect.pine"), Some(Cell::Int(2)));
+    assert_eq!(resolve(&s, &cat, "slot.0.0.data.pine"), Some(Cell::Int(2)));
     // ...but navigating past it does NOT reach the registry (no shadow)
-    assert_eq!(resolve(&s, &cat, "slot.0.0.aspect.pine.satisfies.0"), None);
-    assert_eq!(resolve(&s, &cat, "slot.0.0.aspect.pine.satisfies"), None);
+    assert_eq!(resolve(&s, &cat, "slot.0.0.data.pine.satisfies.0"), None);
+    assert_eq!(resolve(&s, &cat, "slot.0.0.data.pine.satisfies"), None);
   }
 
   #[test]
@@ -1753,7 +1753,7 @@ mod tests {
 
   #[test]
   fn key_returns_name_at_index() {
-    let s = run_hook("<functions:f>\n  @define>\n    2 &aspect.pine set\n    1 &aspect.flora set\n    &aspect 0 key &a set\n    &aspect 1 key &b set\n", "define", vec![]);
+    let s = run_hook("<functions:f>\n  @define>\n    2 &data.pine set\n    1 &data.flora set\n    &data 0 key &a set\n    &data 1 key &b set\n", "define", vec![]);
     assert_eq!(s.read("a"), Some(&Cell::Sym("pine".into())));
     assert_eq!(s.read("b"), Some(&Cell::Sym("flora".into())));
   }
@@ -1779,15 +1779,15 @@ mod tests {
   0 &var.2 set
   ^seed call &seed set
   :aspect>
-    *var.2 &aspect count ge if 0 ret
+    *var.2 &data count ge if 0 ret
     *var.0 &objects count ge if 0 ret
-    &aspect *var.2 key &name set
+    &data *var.2 key &name set
     *name aspect recall &rec set
     *rec.art.object:*faction.texture count &var.4 set
     *var.4 0 eq if :next goto
     0 &var.1 set
     :place>
-      *var.1 *aspect.*var.2 ge if :next goto
+      *var.1 *data.*var.2 ge if :next goto
       *var.0 &objects count ge if 0 ret
       *seed *var.0 add random *var.4 mod &var.3 set
       *rec.art.object:*faction.texture.*var.3 &objects.*var.0 set
@@ -1811,8 +1811,8 @@ mod tests {
 
     let ro = parse(RING_OBJECTS).unwrap();
     let mut s = Store::default();
-    s.write("aspect.pine", Cell::Int(2));   // 2 pines → 2 objects
-    s.write("aspect.cost", Cell::Int(30));  // no art → skipped (not 30 garbage objects)
+    s.write("data.pine", Cell::Int(2));   // 2 pines → 2 objects
+    s.write("data.cost", Cell::Int(30));  // no art → skipped (not 30 garbage objects)
     s.write("faction", Cell::Sym("neutral".into()));
     let host = vec![("seed".to_string(), Cell::Int(7))];
     run(find(&ro, "ring_objects").unwrap(), &mut s, &host, &cat, &Functions::default()).unwrap();
@@ -1930,9 +1930,9 @@ mod tests {
 <recipe>
   ::fleeting>
     @input>
-      *root.aspect.fleeting 1 ge if &root borrow
+      *root.data.fleeting 1 ge if &root borrow
     @output>
-      *root.aspect.fleeting &var.0 set
+      *root.data.fleeting &var.0 set
       5 &sys.duration set
       *var.0 2 ge if 10 &sys.duration set
       *var.0 3 ge if 15 &sys.duration set
@@ -1946,7 +1946,7 @@ mod tests {
     let root = parse(FLEETING).unwrap();
     let (c, f) = cat_funcs();
     let mut s = Store::default();
-    s.write("root.aspect.fleeting", Cell::Int(3)); // fleeting=3 -> ge2, ge3, !ge4
+    s.write("root.data.fleeting", Cell::Int(3)); // fleeting=3 -> ge2, ge3, !ge4
     let mp = match_recipe(recipe_hook(&root, "fleeting", "input"), &mut s, &c, &f).unwrap();
     assert!(mp.matched);
     assert_eq!(mp.holds, vec![("root".into(), Hold::Borrow)]);
@@ -1959,14 +1959,14 @@ mod tests {
 <recipe>
   ::cut_tree>
     @input>
-      *slot.0.0.aspect.wood 1 ge if &slot.0.0 use
-      *slot.1.0.aspect.corpus_lit 1 ge if &slot.1.0 claim
+      *slot.0.0.data.wood 1 ge if &slot.0.0 use
+      *slot.1.0.data.corpus_lit 1 ge if &slot.1.0 claim
       $card::axe *slot.1.0.owner.slot.1.0.def_id eq if &slot.1.0.owner.slot.1.0 share
     @output>
       10 &sys.duration set
       ltr &slot.1.0.style set
       &slot.1.0 destroy
-      &slot.0.0.aspect.wood dec
+      &slot.0.0.data.wood dec
       $card::corpus_dim &slot.1.0.owner.inventory create
 ";
 
@@ -1975,8 +1975,8 @@ mod tests {
     let root = parse(CUT_TREE).unwrap();
     let (c, f) = cat_funcs();
     let mut s = Store::default();
-    s.write("slot.0.0.aspect.wood", Cell::Int(3));          // tile-stock total (host pre-summed)
-    s.write("slot.1.0.aspect.corpus_lit", Cell::Int(1));
+    s.write("slot.0.0.data.wood", Cell::Int(3));          // tile-stock total (host pre-summed)
+    s.write("slot.1.0.data.corpus_lit", Cell::Int(1));
     s.write("slot.1.0.owner.slot.1.0.def_id", Cell::Sym("card::axe".into())); // owner re-anchor baked in
     let mp = match_recipe(recipe_hook(&root, "cut_tree", "input"), &mut s, &c, &f).unwrap();
     assert!(mp.matched);
@@ -2002,7 +2002,7 @@ mod tests {
   ::handle_test>
     @output>
       $card::log &slot.1.0.owner.inventory create &log as
-      4 &log.aspect.progress set
+      4 &log.data.progress set
       $card::pip &log.inventory create
       &log destroy
 ";

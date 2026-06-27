@@ -117,7 +117,7 @@ pub struct Bundle {
 /// `:data @define`. All three are `None` for a card that declares no type.
 #[derive(Default, Debug, Clone)]
 struct CardMeta {
-  /// The `&aspect.type` literal (e.g. `tile`).
+  /// The `&data.type` literal (e.g. `tile`).
   card_type: Option<String>,
   /// 1-based index within the card's type (sorted-by-name).
   type_def_id: Option<u16>,
@@ -213,7 +213,7 @@ impl Bundle {
     Some(self.magnetic_store(packed)?.read("magnetic.duration")?.as_int() as u64)
   }
 
-  /// The card's `type` aspect — the literal set by `<type> &aspect.type set` in
+  /// The card's `type` aspect — the literal set by `<type> &data.type set` in
   /// its `:data @define` (e.g. `tile`). The DSL authority for a card's type
   /// (D1), replacing the legacy `id.json` per-type tables. `None` if the card
   /// is unknown or declares no type. Precomputed at load (O(1)).
@@ -324,7 +324,7 @@ pub fn load(sources: &[(String, String)]) -> Result<Bundle, Vec<LoadError>> {
   // instances keep pointing at the same def. (No sort; no id.json.)
 
   // Precompute per-card identity once. Walking `card_ids` in order assigns each
-  // type its append-stable `def_id`: an EXPLICIT `&aspect.def_id set` in the
+  // type its append-stable `def_id`: an EXPLICIT `&data.def_id set` in the
   // card's `@define` pins it (lets content reserve fixed slots — e.g. the
   // player_soul at 0xFFF so its packed def is 0xFFFF); otherwise the next free
   // value of a per-type counter is used (skipping any explicitly-claimed ids).
@@ -390,15 +390,15 @@ pub fn load(sources: &[(String, String)]) -> Result<Bundle, Vec<LoadError>> {
   }
 }
 
-/// Walk a card def's `:data @define` for `<value> &aspect.type set` → the type
+/// Walk a card def's `:data @define` for `<value> &data.type set` → the type
 /// literal (e.g. `tile`). The DSL authority for a card's type (D1). `None` if it
 /// declares none. Run once per card at load to populate [`CardMeta`].
 fn parse_card_type(node: &Node) -> Option<String> {
   let define = node.facet("data")?.hook("define")?;
   for stmt in &define.body {
     let Stmt::Instr(toks) = stmt else { continue };
-    // `<value> &aspect.type set` — value is the token before the slot.
-    let Some(slot) = toks.iter().position(|t| matches!(t, Token::Slot(s) if s == "aspect.type"))
+    // `<value> &data.type set` — value is the token before the slot.
+    let Some(slot) = toks.iter().position(|t| matches!(t, Token::Slot(s) if s == "data.type"))
     else {
       continue;
     };
@@ -415,15 +415,15 @@ fn parse_card_type(node: &Node) -> Option<String> {
 }
 
 /// Optional explicit per-type `def_id` declared in a card's `@define` as
-/// `<n> &aspect.def_id set`. Lets content PIN a card's packed def to a fixed
+/// `<n> &data.def_id set`. Lets content PIN a card's packed def to a fixed
 /// slot — e.g. the player_soul to `0xFFF` so its `packed_definition` is `0xFFFF`
 /// (the reserved player-soul range). `None` → the def_id is auto-incremented.
-/// Read the same way as `aspect.type` (the loader's two content-pinned fields).
+/// Read the same way as `data.type` (the loader's two content-pinned fields).
 fn parse_card_def_id(node: &Node) -> Option<u16> {
   let define = node.facet("data")?.hook("define")?;
   for stmt in &define.body {
     let Stmt::Instr(toks) = stmt else { continue };
-    let Some(slot) = toks.iter().position(|t| matches!(t, Token::Slot(s) if s == "aspect.def_id"))
+    let Some(slot) = toks.iter().position(|t| matches!(t, Token::Slot(s) if s == "data.def_id"))
     else {
       continue;
     };
@@ -501,7 +501,7 @@ mod tests {
   fn loads_a_clean_corpus() {
     let srcs = vec![
       src("aspects.rd", "<aspect>\n  ::type>\n    @define>\n      traits &section set\n"),
-      src("cards.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &aspect.type set\n    :visuals>\n      @update>\n        $functions:ring call drop\n"),
+      src("cards.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &data.type set\n    :visuals>\n      @update>\n        $functions:ring call drop\n"),
       src("recipes.rd", "<recipe>\n  ::r>\n    @output>\n      10 &sys.duration set\n"),
       src("fns.rd", "<functions:ring>\n  0 ret\n"),
     ];
@@ -524,8 +524,8 @@ mod tests {
     // it), and must not renumber ids.
     let srcs = vec![
       src("aspects.rd", "<aspect>\n  ::type>\n    @define>\n      traits &section set\n"),
-      src("data/forest.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &aspect.type set\n"),
-      src("data/desert.rd", "<card>\n  ::desert>\n    :data>\n      @define>\n        tile &aspect.type set\n"),
+      src("data/forest.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &data.type set\n"),
+      src("data/desert.rd", "<card>\n  ::desert>\n    :data>\n      @define>\n        tile &data.type set\n"),
       src("fns.rd", "<functions:ring>\n  0 ret\n"),
       // visuals authored separately, loaded AFTER both data files.
       src("visuals/forest.rd", "<card>\n  ::forest>\n    :visuals>\n      @update>\n        $functions:ring call drop\n"),
@@ -582,7 +582,7 @@ mod tests {
   fn derives_stable_def_ids_from_content() {
     let srcs = vec![
       src("aspects.rd", "<aspect>\n  ::type>\n    @define>\n      traits &section set\n"),
-      src("cards.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &aspect.type set\n  ::desert>\n    :data>\n      @define>\n        tile &aspect.type set\n"),
+      src("cards.rd", "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &data.type set\n  ::desert>\n    :data>\n      @define>\n        tile &data.type set\n"),
       src("recipes.rd", "<recipe>\n  ::cut>\n    @output>\n      10 &sys.duration set\n  ::burn>\n    @output>\n      10 &sys.duration set\n"),
     ];
     let b = load(&srcs).unwrap();
@@ -610,7 +610,7 @@ mod tests {
       src("a.rd", "<aspect>\n  ::type>\n    @define>\n      traits &section set\n"),
       src(
         "cards.rd",
-        "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &aspect.type set\n  ::desert>\n    :data>\n      @define>\n        tile &aspect.type set\n",
+        "<card>\n  ::forest>\n    :data>\n      @define>\n        tile &data.type set\n  ::desert>\n    :data>\n      @define>\n        tile &data.type set\n",
       ),
     ];
     let b0 = load(&base).unwrap();
@@ -623,7 +623,7 @@ mod tests {
     let mut added = base.clone();
     added.push(src(
       "added.rd",
-      "<card>\n  ::aaa>\n    :data>\n      @define>\n        tile &aspect.type set\n",
+      "<card>\n  ::aaa>\n    :data>\n      @define>\n        tile &data.type set\n",
     ));
     let b1 = load(&added).unwrap();
 
@@ -637,9 +637,9 @@ mod tests {
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
     // forest/desert tiles (type nibble 7); `status` declares a lifecycle.
     let cards = "<card>\n\
-      \x20 ::desert>\n    :data>\n      @define>\n        tile &aspect.type set\n\
-      \x20 ::forest>\n    :data>\n      @define>\n        tile &aspect.type set\n\
-      \x20 ::status>\n    :data>\n      @define>\n        faculty &aspect.type set\n        60000 &magnetic.duration set\n";
+      \x20 ::desert>\n    :data>\n      @define>\n        tile &data.type set\n\
+      \x20 ::forest>\n    :data>\n      @define>\n        tile &data.type set\n\
+      \x20 ::status>\n    :data>\n      @define>\n        faculty &data.type set\n        60000 &magnetic.duration set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).unwrap();
 
     // packed_def → name_for_packed round-trip (tile nibble 7)
@@ -658,15 +658,15 @@ mod tests {
 
   #[test]
   fn surfaces_resolve_errors() {
-    // `aspect.ghost` member is not in any <aspect> registry -> a load error
-    let errs = load(&[src("bad.rd", "<functions:f>\n  2 &aspect.ghost set\n")]).unwrap_err();
+    // `data.ghost` member is not in any <aspect> registry -> a load error
+    let errs = load(&[src("bad.rd", "<functions:f>\n  2 &data.ghost set\n")]).unwrap_err();
     assert!(errs.iter().any(|e| e.file == "bad.rd" && e.message.contains("ghost")), "{errs:?}");
   }
 
   #[test]
   fn surfaces_parse_errors() {
     // an instruction at structural level is a parse error
-    let errs = load(&[src("p.rd", "<card>\n  ::x>\n  10 &aspect.cost set\n")]).unwrap_err();
+    let errs = load(&[src("p.rd", "<card>\n  ::x>\n  10 &data.cost set\n")]).unwrap_err();
     assert!(errs.iter().any(|e| e.file == "p.rd" && e.message.starts_with("parse:")), "{errs:?}");
   }
 }

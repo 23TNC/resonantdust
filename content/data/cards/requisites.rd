@@ -8,32 +8,32 @@
   ::log>
     :data>
       @define>
-        requisite &aspect.type set
-        2 &aspect.fuel set
-        2 &aspect.wood set
-        14 &aspect.stack_hosts set
-        6 &aspect.stack_joins set
+        requisite &data.type set
+        2 &data.fuel set
+        2 &data.wood set
+        14 &data.stack_hosts set
+        6 &data.stack_joins set
 
 
   ::stick>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.fuel set
-        1 &aspect.wood set
+        requisite &data.type set
+        1 &data.fuel set
+        1 &data.wood set
 
   ::stone>
     :data>
       @define>
-        requisite &aspect.type set
+        requisite &data.type set
 
   ::dust>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.aether set
-        14 &aspect.stack_hosts set
-        4 &aspect.stack_joins set
+        requisite &data.type set
+        1 &data.aether set
+        14 &data.stack_hosts set
+        4 &data.stack_joins set
 
   ; Stacking-resolver test card: hosts NO stacks (0b0000), joins top+bottom
   ; (0b1100=12). Used by the harness stack tests — a leaf that caps a stack and
@@ -41,63 +41,63 @@
   ::test_dust>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.aether set
-        0 &aspect.stack_hosts set
-        12 &aspect.stack_joins set
+        requisite &data.type set
+        1 &data.aether set
+        0 &data.stack_hosts set
+        12 &data.stack_joins set
 
   ::food>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.food set
+        requisite &data.type set
+        1 &data.food set
 
   ::reliquary>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.anima set
+        requisite &data.type set
+        1 &data.anima set
 
   ::corpse>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.corpse set
-        1 &aspect.inventory set
+        requisite &data.type set
+        1 &data.corpse set
+        1 &data.inventory set
 
   ::corpse_chorus>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.corpse set
-        1 &aspect.inventory set
-        1 &aspect.chorus set
+        requisite &data.type set
+        1 &data.corpse set
+        1 &data.inventory set
+        1 &data.chorus set
 
   ::corpse_chord>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.corpse set
-        1 &aspect.inventory set
-        1 &aspect.chord set
+        requisite &data.type set
+        1 &data.corpse set
+        1 &data.inventory set
+        1 &data.chord set
 
   ::corpse_resonance>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.corpse set
-        1 &aspect.inventory set
-        1 &aspect.resonance set
+        requisite &data.type set
+        1 &data.corpse set
+        1 &data.inventory set
+        1 &data.resonance set
 
   ::axe>
     :data>
       @define>
-        requisite &aspect.type set
+        requisite &data.type set
 
   ::pickaxe>
     :data>
       @define>
-        requisite &aspect.type set
+        requisite &data.type set
 
   ; Test card for the per-card stock model: an 8-bit `progress` counter in stock
   ; (bits 0-7), seeded to 1 by its `@define` default (proves spawn-from-define).
@@ -107,9 +107,9 @@
   ::tally>
     :data>
       @define>
-        requisite &aspect.type set
-        8 &aspect.progress stock
-        1 &aspect.progress set
+        requisite &data.type set
+        8 &data.progress stock
+        1 &data.progress set
 
   ; `as` handle-binding test trio (see the `forge` recipe). `anvil` is the
   ; root-only marker: a 1-bit `forged` flag (default 0) the recipe sets to 1 so it
@@ -121,16 +121,16 @@
   ::anvil>
     :data>
       @define>
-        requisite &aspect.type set
-        1 &aspect.forged stock
-        0 &aspect.forged set
+        requisite &data.type set
+        1 &data.forged stock
+        0 &data.forged set
   ::widget>
     :data>
       @define>
-        requisite &aspect.type set
-        8 &aspect.progress stock
-        1 &aspect.progress set
+        requisite &data.type set
+        8 &data.progress stock
+        1 &data.progress set
   ::pip>
     :data>
       @define>
-        requisite &aspect.type set
+        requisite &data.type set

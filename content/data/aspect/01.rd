@@ -2,9 +2,9 @@
 ; The aspect catalog — replaces cards/aspects.json. Each aspect is a flat record.
 ; A `satisfies` LUT (this aspect IS-A those aspects) inverts the old parent tree,
 ; so an aspect can satisfy several at once (pine could be wood AND conifer). A
-; recipe predicate `aspect.Q` folds over a card: sum every stocked aspect A where
+; recipe predicate `data.Q` folds over a card: sum every stocked aspect A where
 ; A==Q or Q in satisfies(A). The gate computes the transitive closure + sum and
-; writes the rolled-up `aspect.Q` into the operating-set frame; the VM just reads
+; writes the rolled-up `data.Q` into the operating-set frame; the VM just reads
 ; the key. Exact match is implicit — no aspect lists itself.
 ;
 ; `visibility`: default display level — 0 hidden (old traits) / 1 aspect slot
@@ -193,7 +193,7 @@
   ; --- traits: descriptive sim properties, not displayed (no icon/color) ---
   ; `type` is the card's kind (tile/faculty/soul/…) — a symbol-valued classifier,
   ; not a magnitude: read by `eq` like def_id, never summed, no satisfies edges.
-  ; Its presence here just lets `&aspect.type set` pass the aspect-member lint.
+  ; Its presence here just lets `&data.type set` pass the aspect-member lint.
   ::type>
     @define>
       0 &visibility set
@@ -205,8 +205,8 @@
     @define>
       0 &visibility set
   ; `progress` is a per-card stock counter (build/charge progress, 0..N). Backed
-  ; by a card's `stock` u32 (declared `<bits> &aspect.progress stock`), read +
-  ; written by recipes (`*root.aspect.progress`, `&root.aspect.progress inc`). A
+  ; by a card's `stock` u32 (declared `<bits> &data.progress stock`), read +
+  ; written by recipes (`*root.data.progress`, `&root.data.progress inc`). A
   ; magnitude, but sim-only — not displayed.
   ::progress>
     @define>
@@ -223,6 +223,33 @@
     @define>
       0 &visibility set
   ::stack_joins>
+    @define>
+      0 &visibility set
+  ; Hold / lifecycle aspects — transient per-card stock (NOT zone-persisted),
+  ; declared by the shared `aspect_flags` data_func and mutated by recipe
+  ; can_/set_/release_ helpers. `claim` = exclusive (slot) hold; `borrow` =
+  ; non-exclusive hold; `touch` = refcount namespace (`.user`/`.server` budgets);
+  ; `pos_hold` = position pin; `dead`/`reap` = lifecycle refcounts (dead != 0 does
+  ; not immediately remove the card); `pstyle` = progress-bar style. All sim-only.
+  ::claim>
+    @define>
+      0 &visibility set
+  ::borrow>
+    @define>
+      0 &visibility set
+  ::touch>
+    @define>
+      0 &visibility set
+  ::pos_hold>
+    @define>
+      0 &visibility set
+  ::dead>
+    @define>
+      0 &visibility set
+  ::reap>
+    @define>
+      0 &visibility set
+  ::pstyle>
     @define>
       0 &visibility set
   ::cost>

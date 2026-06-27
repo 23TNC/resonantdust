@@ -5,7 +5,7 @@
   ::blueprint_nd_furnace>
     :data>
       @define>
-        blueprint &aspect.type set
+        blueprint &data.type set
 
   ; A reusable blueprint: placed in the world and fed dust (stacked on top of it),
   ; it assembles a `chord_soul` at its location and returns to the player's
@@ -15,5 +15,5 @@
   ::blueprint_chord_soul>
     :data>
       @define>
-        blueprint &aspect.type set
-        14 &aspect.stack_hosts set
+        blueprint &data.type set
+        14 &data.stack_hosts set

@@ -22,12 +22,15 @@ pub struct SymbolTable {
   pub cards: HashSet<String>,
   pub recipes: HashSet<String>,
   pub functions: HashSet<String>,
+  /// `<data_func>` ids — pure aspect-mutating helpers (`$data_func::name`), a
+  /// namespace distinct from `functions`.
+  pub data_funcs: HashSet<String>,
   /// asset pack name -> its texture-LUT symbols (empty for single-sprite packs).
   pub assets: HashMap<String, HashSet<String>>,
   /// `<manifest>` object names (generated sprite-pack folders).
   pub manifest: HashSet<String>,
   /// `<aspect>` ids — the satisfies-LUT registry. Doubles as the set of valid
-  /// `aspect.<name>` path members (so `aspect.corpus_lit` drift is caught).
+  /// `data.<name>` path members (so `data.corpus_lit` drift is caught).
   pub aspects: HashSet<String>,
   /// `<globals>` ids — shared constants referenced as `$globals::id`.
   pub globals: HashSet<String>,
@@ -100,6 +103,13 @@ impl SymbolTable {
         for c in &node.children {
           if let Header::Def(d) = &c.header {
             register(&mut self.functions, def_id(d));
+          }
+        }
+      }
+      Header::Bucket(name) if name == "data_func" => {
+        for c in &node.children {
+          if let Header::Def(d) = &c.header {
+            register(&mut self.data_funcs, def_id(d));
           }
         }
       }
@@ -190,8 +200,8 @@ fn walk(node: &Node, path: &mut Vec<String>, table: &SymbolTable, diags: &mut Ve
                 diags.push(Diagnostic { path: p.clone(), message: msg });
               }
             }
-            // `&…aspect.<name>` / `*…aspect.<name>` — the member must be a real
-            // aspect (skip interpolated `*…` members like `aspect.*var.2`).
+            // `&…data.<name>` / `*…data.<name>` — the member must be a real
+            // aspect (skip interpolated `*…` members like `data.*var.2`).
             Token::Slot(s) | Token::Value(s) => {
               if let Some(msg) = check_aspect_member(s, table, toks) {
                 diags.push(Diagnostic { path: p.clone(), message: msg });
@@ -209,13 +219,14 @@ fn walk(node: &Node, path: &mut Vec<String>, table: &SymbolTable, diags: &mut Ve
   path.pop();
 }
 
-/// Check the `aspect.<name>` member of a `&`/`*` path against the registry. The
-/// segment right after a literal `aspect` segment must be a known `<aspect>` id;
-/// an interpolated member (`aspect.*var.2`) is dynamic, so it's left alone.
+/// Check the `data.<name>` member of a `&`/`*` path against the registry. The
+/// segment right after a literal `data` segment (the instance namespace) must be
+/// a known `<aspect>` id; an interpolated member (`data.*var.2`) is dynamic, so
+/// it's left alone. `visual.*` members are free-form (no registry), not checked.
 fn check_aspect_member(path: &str, table: &SymbolTable, toks: &[Token]) -> Option<String> {
   let segs: Vec<&str> = path.split(|c| c == ':' || c == '.').filter(|s| !s.is_empty()).collect();
   for w in segs.windows(2) {
-    if w[0] == "aspect" {
+    if w[0] == "data" {
       let name = w[1];
       if name.starts_with('*') {
         return None; // interpolated member — resolved at runtime
@@ -244,6 +255,10 @@ fn check_ref(v: &str, table: &SymbolTable, toks: &[Token]) -> Option<String> {
     "functions" => match seg.first() {
       Some(id) if table.functions.contains(*id) => None,
       _ => bad("function"),
+    },
+    "data_func" => match seg.first() {
+      Some(id) if table.data_funcs.contains(*id) => None,
+      _ => bad("data_func"),
     },
     "asset" => match seg.first() {
       // Only the asset name is statically checked; deeper segments
@@ -347,7 +362,7 @@ mod tests {
       $asset::pine &asset.pine set
       $manifest::conifer &object set
       $shape.rect &shape set
-      $aspect::wood &slot.0.0.aspect.pine set
+      $aspect::wood &slot.0.0.data.pine set
 ").unwrap();
     assert_eq!(unresolved(&user, &t), vec![]);
   }
@@ -355,17 +370,17 @@ mod tests {
   #[test]
   fn resolves_and_flags_aspect_refs_and_members() {
     let t = table(&[DEFS]);
-    // a known `$aspect::` ref and a known `aspect.<name>` member both resolve
-    let ok = parse("<functions:f>\n  $aspect::pine &slot.0.0.aspect.wood set\n").unwrap();
+    // a known `$aspect::` ref and a known `data.<name>` member both resolve
+    let ok = parse("<functions:f>\n  $aspect::pine &slot.0.0.data.wood set\n").unwrap();
     assert_eq!(unresolved(&ok, &t), vec![]);
     // unknown `$aspect::` ref
     let d = unresolved(&parse("<functions:f>\n  $aspect::ghost &a set\n").unwrap(), &t);
     assert!(d.iter().any(|d| d.message.contains("unresolved aspect `$aspect::ghost`")), "{d:?}");
-    // unknown `aspect.<name>` member (the corpus_lit-style drift this catches)
-    let d = unresolved(&parse("<functions:f>\n  *slot.0.0.aspect.ghost 1 ge if &slot.0.0 use\n").unwrap(), &t);
+    // unknown `data.<name>` member (the corpus_lit-style drift this catches)
+    let d = unresolved(&parse("<functions:f>\n  *slot.0.0.data.ghost 1 ge if &slot.0.0 use\n").unwrap(), &t);
     assert!(d.iter().any(|d| d.message.contains("unknown aspect `ghost`")), "{d:?}");
-    // an interpolated member (`aspect.*var.0`) is dynamic — not flagged
-    assert_eq!(unresolved(&parse("<functions:f>\n  *aspect.*var.0 &a set\n").unwrap(), &t), vec![]);
+    // an interpolated member (`data.*var.0`) is dynamic — not flagged
+    assert_eq!(unresolved(&parse("<functions:f>\n  *data.*var.0 &a set\n").unwrap(), &t), vec![]);
   }
 
   #[test]

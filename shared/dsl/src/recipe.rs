@@ -286,8 +286,8 @@ mod tests {
     // (axe in the actor's owner's top stack) → 3 iterators, the nested one
     // parented on "slot.2.0.owner". Mirrors recipe_tape::nested_iterator_for_equipment_chain.
     let iters = iters_of(
-      "      *slot.1.0.aspect.wood 1 ge if &slot.1.0 use\n\
-       \x20     *slot.2.0.aspect.corpus_lit 1 ge if &slot.2.0 claim\n\
+      "      *slot.1.0.data.wood 1 ge if &slot.1.0 use\n\
+       \x20     *slot.2.0.data.corpus_lit 1 ge if &slot.2.0 claim\n\
        \x20     $card::axe *slot.2.0.owner.slot.2.0.def_id eq if &slot.2.0.owner.slot.2.0 share\n",
       "",
     );
@@ -319,7 +319,7 @@ mod tests {
     // The root is `slot.0.0` (branch 0) — filled by the `root` param, never an
     // iterator; a root-only recipe enumerates to nothing.
     let iters = iters_of(
-      "      *slot.0.0.aspect.fleeting 1 ge if &slot.0.0 borrow\n",
+      "      *slot.0.0.data.fleeting 1 ge if &slot.0.0 borrow\n",
       "      &slot.0.0 destroy\n",
     );
     assert_eq!(iters, Vec::<Iter>::new());
@@ -333,8 +333,8 @@ mod tests {
   fn bundle() -> Bundle {
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
     let cards = "<card>\n\
-      \x20 ::corpus>\n    :data>\n      @define>\n        faculty &aspect.type set\n\
-      \x20 ::axe>\n    :data>\n      @define>\n        requisite &aspect.type set\n";
+      \x20 ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n\
+      \x20 ::axe>\n    :data>\n      @define>\n        requisite &data.type set\n";
     load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load")
   }
 

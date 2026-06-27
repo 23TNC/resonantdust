@@ -307,9 +307,9 @@ mod tests {
   ::forest:data>
   @init>
     *biome.rarity 0 10 within !if :r10 goto
-    0 1 &aspect.pine range
+    0 1 &data.pine range
     :r10>
-    &aspect.pine *biome.humidity normalize
+    &data.pine *biome.humidity normalize
 ";
     assert_eq!(diags(src), vec![]);
   }

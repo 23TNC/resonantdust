@@ -88,38 +88,38 @@
   ::axe>
     :data>
       @define>
-        &aspect $data_func::aspect_flags call drop
-        &aspect $data_func::aspect_stack_rect call drop
-        requisite &aspect.data.type set
+        &data $data_func::aspect_flags call drop
+        &data $data_func::aspect_stack_rect call drop
+        requisite &data.type set
   ::corpus>
     :data>
       @define>
-        &aspect $data_func::aspect_flags call drop
-        &aspect $data_func::aspect_stack_rect call drop
-        faculty &aspect.data.type set
-        1 &aspect.data.corpus_lit set
+        &data $data_func::aspect_flags call drop
+        &data $data_func::aspect_stack_rect call drop
+        faculty &data.type set
+        1 &data.corpus_lit set
   ::log>
     :data>
       @define>
-        &aspect $data_func::aspect_flags call drop
-        &aspect $data_func::aspect_stack_rect call drop
-        requisite &aspect.data.type set
-        2 &aspect.data.fuel set
-        2 &aspect.data.wood set
+        &data $data_func::aspect_flags call drop
+        &data $data_func::aspect_stack_rect call drop
+        requisite &data.type set
+        2 &data.fuel set
+        2 &data.wood set
 
   ::forest>
     :data>
       @define>
-        2 &aspect.data.pine stock
-        2 &aspect.data.flora stock
-        &aspect $data_func::aspect_flags call drop
-        &aspect $data_func::aspect_stack_tile call drop
+        2 &data.pine stock
+        2 &data.flora stock
+        &data $data_func::aspect_flags call drop
+        &data $data_func::aspect_stack_tile call drop
         ; only TWO stock slots store per tile (packed u16 = def|stock0|stock1),
         ; mapped positionally to these declarations. Forest carries pine+flora;
         ; a 3rd aspect (e.g. stone) could never be stored or rendered, so don't
         ; declare one. Stone is a mountain/desert aspect, not a forest one.
-        tile &aspect.data.type set
-        30   &aspect.data.cost set
+        tile &data.type set
+        30   &data.cost set
       @init>
         ; scatter maps `input` from the band [lo,hi] onto the slot range, rounds,
         ; and jitters ±1 by ^seed. pine uses *seed, flora *seed+7 (decorrelated).
@@ -137,58 +137,58 @@
         ^seed call &seed set
 
         *biome.rarity 0 10 within !if :r10 goto
-          0 1 &aspect.data.pine  range
-          &aspect.data.pine  *biome.cluster 48 88 *seed scatter
-          0 2 &aspect.data.flora range
-          &aspect.data.flora *biome.humidity 40 85 *seed 7 add scatter
+          0 1 &data.pine  range
+          &data.pine  *biome.cluster 48 88 *seed scatter
+          0 2 &data.flora range
+          &data.flora *biome.humidity 40 85 *seed 7 add scatter
           0 ret
 
         :r10>
         *biome.rarity 10 20 within !if :r20 goto
-          0 2 &aspect.data.pine  range
-          &aspect.data.pine  *biome.cluster 48 88 *seed scatter
-          0 1 &aspect.data.flora range
-          &aspect.data.flora *biome.humidity 40 85 *seed 7 add scatter
+          0 2 &data.pine  range
+          &data.pine  *biome.cluster 48 88 *seed scatter
+          0 1 &data.flora range
+          &data.flora *biome.humidity 40 85 *seed 7 add scatter
           0 ret
 
         :r20>
         *biome.rarity 20 30 within !if :def goto
-          0 2 &aspect.data.pine  range
-          &aspect.data.pine  *biome.cluster 48 88 *seed scatter
-          0 2 &aspect.data.flora range
-          &aspect.data.flora *biome.humidity 55 80 *seed 7 add scatter
+          0 2 &data.pine  range
+          &data.pine  *biome.cluster 48 88 *seed scatter
+          0 2 &data.flora range
+          &data.flora *biome.humidity 55 80 *seed 7 add scatter
           0 ret
 
         :def>
-        0 2 &aspect.data.pine  range
-        &aspect.data.pine  *biome.cluster 48 88 *seed scatter
-        0 1 &aspect.data.flora range
-        &aspect.data.flora *biome.humidity 50 80 *seed 7 add scatter
+        0 2 &data.pine  range
+        &data.pine  *biome.cluster 48 88 *seed scatter
+        0 1 &data.flora range
+        &data.flora *biome.humidity 50 80 *seed 7 add scatter
 
 
 <recipe>
   ::cut_tree>
     @input>
-      *slot.1.0.aspect.wood 1 ge !if 1 ret
-      &slot.1.0.aspect $data_func::can_claim call !if 1 ret
-      *slot.2.0.aspect.corpus_lit 1 ge !if 1 ret
-      &slot.2.0.aspect $data_func::can_claim call !if 1 ret
+      *slot.1.0.data.wood 1 ge !if 1 ret
+      &slot.1.0.data $data_func::can_claim call !if 1 ret
+      *slot.2.0.data.corpus_lit 1 ge !if 1 ret
+      &slot.2.0.data $data_func::can_claim call !if 1 ret
       $card::axe *slot.2.0.owner.slot.2.0.def_id eq !if 1 ret 
-      &slot.2.0.owner.slot.2.0.aspect $data_func::can_borrow call !if 1 ret
+      &slot.2.0.owner.slot.2.0.data $data_func::can_borrow call !if 1 ret
       0 ret
 
     @output>
       0 &sys.time set
-      &slot.1.0.aspect $data_func::set_use call drop
-      &slot.2.0.aspect $data_func::set_claim call drop
-      &slot.2.0.owner.slot.2.0.aspect $data_func::set_share call drop
+      &slot.1.0.data $data_func::set_use call drop
+      &slot.2.0.data $data_func::set_claim call drop
+      &slot.2.0.owner.slot.2.0.data $data_func::set_share call drop
       10 &sys.time set
-      1 &slot.2.0.aspect.pstyle set
-      &slot.2.0.aspect.dead inc
-      &slot.1.0.aspect.wood dec
+      1 &slot.2.0.data.pstyle set
+      &slot.2.0.data.dead inc
+      &slot.1.0.data.wood dec
       &slot.2.0.owner 1 0 0 ^macro_zone call &macro_zone set
       *macro_zone $card::corpus_dim &slot.2.0.owner ^create call drop
       *macro_zone $card::log        &slot.2.0.owner ^create call drop
-      &slot.1.0.aspect $data_func::release_use call drop
-      &slot.2.0.aspect $data_func::release_claim call drop
-      &slot.2.0.owner.slot.2.0.aspect $data_func::release_share call drop
+      &slot.1.0.data $data_func::release_use call drop
+      &slot.2.0.data $data_func::release_claim call drop
+      &slot.2.0.owner.slot.2.0.data $data_func::release_share call drop

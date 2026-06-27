@@ -150,15 +150,15 @@
     0 &var.2 set
 
     :aspect>
-      *var.2 &aspect count ge if 0 ret
+      *var.2 &data count ge if 0 ret
       *var.0 7 ge if 0 ret
-      &aspect *var.2 key &name set
+      &data *var.2 key &name set
       *name aspect recall &rec set
       *rec.art.object 0 eq if :next goto
       0 &var.1 set
 
       :place>
-        *var.1 *aspect.*var.2 ge if :next goto
+        *var.1 *data.*var.2 ge if :next goto
         *var.0 7 ge if 0 ret
         ^sprite call &h set
         ; resolve the stem via ^r2 from the aspect art's category+object; per-slot

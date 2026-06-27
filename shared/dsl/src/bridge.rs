@@ -24,7 +24,7 @@ pub struct Card {
   pub stock: Vec<i64>,
 }
 
-/// The ordered stock aspects a card declares — `<bits> &aspect.<name> stock` in
+/// The ordered stock aspects a card declares — `<bits> &data.<name> stock` in
 /// its `:data @define`, as `(name, bits)` in declaration order. A packed row's
 /// stock slots map onto these positionally, and `card_view` overlays the row's
 /// values here.
@@ -39,7 +39,7 @@ pub fn stock_schema(bundle: &Bundle, card: &str) -> Vec<(String, i64)> {
       continue;
     }
     let name = toks.iter().find_map(|t| match t {
-      Token::Slot(s) => s.strip_prefix("aspect.").map(str::to_string),
+      Token::Slot(s) => s.strip_prefix("data.").map(str::to_string),
       _ => None,
     });
     let bits = toks.iter().find_map(|t| match t {
@@ -54,9 +54,9 @@ pub fn stock_schema(bundle: &Bundle, card: &str) -> Vec<(String, i64)> {
 }
 
 /// Build the per-card view the VM matches against: `def_id` (the `$card::name`
-/// ref recipes compare), plus `aspect.*` = the card's static aspects (its
+/// ref recipes compare), plus `data.*` = the card's static aspects (its
 /// `:data @define`) with the row's stock values overlaid and rolled up the
-/// `satisfies` hierarchy — so a recipe reading `aspect.wood` sees the sum of
+/// `satisfies` hierarchy — so a recipe reading `data.wood` sees the sum of
 /// pine/ash/etc. Pure over `(bundle, card)`.
 pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
   let mut store = Store::default();
@@ -80,7 +80,7 @@ pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
   // overlay the per-instance stock values (positional, by the schema)
   for (i, (aspect, _bits)) in stock_schema(bundle, &name).iter().enumerate() {
     if let Some(v) = card.stock.get(i) {
-      store.write(&format!("aspect.{aspect}"), Cell::Int(*v));
+      store.write(&format!("data.{aspect}"), Cell::Int(*v));
     }
   }
   fold_aspects(&mut store, bundle);
@@ -89,9 +89,9 @@ pub fn card_view(bundle: &Bundle, card: &Card) -> Cell {
 
 /// Roll every raw aspect value up its `satisfies` closure: a card with `pine: 2`
 /// gains `wood += 2` (and `wood`'s own ancestors, transitively). Recipes then
-/// read `aspect.wood` directly. Symbol-valued aspects (`type`) contribute 0.
+/// read `data.wood` directly. Symbol-valued aspects (`type`) contribute 0.
 fn fold_aspects(store: &mut Store, bundle: &Bundle) {
-  let raw: Vec<(String, i64)> = match store.read("aspect") {
+  let raw: Vec<(String, i64)> = match store.read("data") {
     Some(Cell::Map(m)) => m.iter().filter_map(|(k, v)| {
       let n = v.as_int();
       (n != 0).then(|| (k.clone(), n))
@@ -100,7 +100,7 @@ fn fold_aspects(store: &mut Store, bundle: &Bundle) {
   };
   for (name, val) in raw {
     for anc in satisfies_closure(bundle, &name) {
-      let path = format!("aspect.{anc}");
+      let path = format!("data.{anc}");
       let cur = store.read(&path).map(Cell::as_int).unwrap_or(0);
       store.write(&path, Cell::Int(cur + val));
     }
@@ -160,7 +160,7 @@ pub fn stock_defaults(bundle: &Bundle, card: &str) -> (u8, u8) {
   let read = |i: usize| -> u8 {
     schema
       .get(i)
-      .and_then(|(a, _)| store.read(&format!("aspect.{a}")))
+      .and_then(|(a, _)| store.read(&format!("data.{a}")))
       .map(Cell::as_int)
       .unwrap_or(0)
       .clamp(0, 3) as u8
@@ -169,7 +169,7 @@ pub fn stock_defaults(bundle: &Bundle, card: &str) -> (u8, u8) {
 }
 
 /// The card's full default `stock` u64: each stock slot's `@define` default
-/// value (`<v> &aspect.<name> set` after the `stock` declaration, else 0) packed
+/// value (`<v> &data.<name> set` after the `stock` declaration, else 0) packed
 /// at its cumulative bit offset. This is what a freshly-spawned card's `stock`
 /// row field is seeded to (the gate injects it at create time; the shard is
 /// content-agnostic). [`stock_defaults`] is the legacy u4×2 zone view of the same
@@ -185,7 +185,7 @@ pub fn stock_default_u64(bundle: &Bundle, card: &str) -> u64 {
     let width = bits.clamp(0, 64) as u32;
     let cap: u64 = if width >= 64 { u64::MAX } else { (1u64 << width) - 1 };
     let val = store
-      .read(&format!("aspect.{aspect}"))
+      .read(&format!("data.{aspect}"))
       .map(Cell::as_int)
       .unwrap_or(0)
       .clamp(0, cap as i64) as u64;
@@ -203,7 +203,7 @@ pub fn is_descendant(bundle: &Bundle, aspect: &str, ancestor: &str) -> bool {
 
 /// The stock-slot index on `card` that a tile-stock op on `op_aspect` targets,
 /// with sub-aspect widening: a slot declared for `pine` answers an op on
-/// `aspect.wood` (pine satisfies wood). Mirrors the legacy `recipe_plan`'s
+/// `data.wood` (pine satisfies wood). Mirrors the legacy `recipe_plan`'s
 /// `def.stock.position(is_aspect_descendant(slot, aspect))`. `None` if the card
 /// declares no stock slot rolling up to `op_aspect`.
 pub fn stock_slot_for_aspect(bundle: &Bundle, card: &str, op_aspect: &str) -> Option<usize> {
@@ -283,7 +283,7 @@ mod tests {
       \x20 ::ash>\n    @define>\n      aspects &section set\n      1 &satisfies array\n      $aspect::wood &satisfies.0 set\n\
       \x20 ::type>\n    @define>\n      traits &section set\n\
       \x20 ::cost>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::grove>\n    :data>\n      @define>\n        2 &aspect.pine stock\n        2 &aspect.ash stock\n        tile &aspect.type set\n        30 &aspect.cost set\n";
+    let cards = "<card>\n  ::grove>\n    :data>\n      @define>\n        2 &data.pine stock\n        2 &data.ash stock\n        tile &data.type set\n        30 &data.cost set\n";
     load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load")
   }
 
@@ -301,8 +301,8 @@ mod tests {
       \x20 ::type>\n    @define>\n      traits &section set\n\
       \x20 ::slot_hold>\n    @define>\n      aspects &section set\n\
       \x20 ::position_hold>\n    @define>\n      aspects &section set\n";
-    let funcs = "<functions>\n  ::lockable>\n    1 &aspect.slot_hold set\n    1 &aspect.position_hold set\n    0 ret\n";
-    let cards = "<card>\n  ::widget>\n    :data>\n      @define>\n        tile &aspect.type set\n        $functions::lockable call drop\n";
+    let funcs = "<functions>\n  ::lockable>\n    1 &data.slot_hold set\n    1 &data.position_hold set\n    0 ret\n";
+    let cards = "<card>\n  ::widget>\n    :data>\n      @define>\n        tile &data.type set\n        $functions::lockable call drop\n";
     let b = load(&[
       ("a.rd".into(), aspects.into()),
       ("f.rd".into(), funcs.into()),
@@ -313,9 +313,9 @@ mod tests {
     let card = Card { def_id: b.card_def_id("widget").unwrap(), stock: vec![] };
     let v = Store::with_root(card_view(&b, &card));
     // the shared function's writes land in the card's static aspects
-    assert_eq!(v.read("aspect.slot_hold"), Some(&Cell::Int(1)));
-    assert_eq!(v.read("aspect.position_hold"), Some(&Cell::Int(1)));
-    assert_eq!(v.read("aspect.type"), Some(&Cell::Sym("tile".into())));
+    assert_eq!(v.read("data.slot_hold"), Some(&Cell::Int(1)));
+    assert_eq!(v.read("data.position_hold"), Some(&Cell::Int(1)));
+    assert_eq!(v.read("data.type"), Some(&Cell::Sym("tile".into())));
   }
 
   #[test]
@@ -327,14 +327,14 @@ mod tests {
 
     assert_eq!(v.read("def_id"), Some(&Cell::Sym("card::grove".into())));
     // raw stock overlaid
-    assert_eq!(v.read("aspect.pine"), Some(&Cell::Int(3)));
-    assert_eq!(v.read("aspect.ash"), Some(&Cell::Int(2)));
+    assert_eq!(v.read("data.pine"), Some(&Cell::Int(3)));
+    assert_eq!(v.read("data.ash"), Some(&Cell::Int(2)));
     // folded: wood = pine + ash, material = wood (transitive)
-    assert_eq!(v.read("aspect.wood"), Some(&Cell::Int(5)));
-    assert_eq!(v.read("aspect.material"), Some(&Cell::Int(5)));
+    assert_eq!(v.read("data.wood"), Some(&Cell::Int(5)));
+    assert_eq!(v.read("data.material"), Some(&Cell::Int(5)));
     // static aspects survive; symbol-valued type is untouched by the fold
-    assert_eq!(v.read("aspect.cost"), Some(&Cell::Int(30)));
-    assert_eq!(v.read("aspect.type"), Some(&Cell::Sym("tile".into())));
+    assert_eq!(v.read("data.cost"), Some(&Cell::Int(30)));
+    assert_eq!(v.read("data.type"), Some(&Cell::Sym("tile".into())));
   }
 
   #[test]
@@ -381,7 +381,7 @@ mod tests {
   fn card_views_feed_match_recipe_end_to_end() {
     use crate::vm::{match_recipe, Hold};
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &aspect.type set\n";
+    let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n";
     let recipes = "<recipe>\n  ::use_corpus>\n    @input>\n      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use\n    @output>\n      10 &sys.duration set\n      &slot.1.0 destroy\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into()), ("r.rd".into(), recipes.into())]).unwrap();
 
@@ -404,9 +404,9 @@ mod tests {
     // Two versions of the `apple` lineage (distinct defs, distinct cost) plus an
     // unrelated `corpus`. A `modify` would have produced apple.1 from apple.0.
     let cards = "<card>\n\
-      \x20 ::apple.0>\n    :data>\n      @define>\n        faculty &aspect.type set\n        1 &aspect.cost set\n\
-      \x20 ::apple.1>\n    :data>\n      @define>\n        faculty &aspect.type set\n        2 &aspect.cost set\n\
-      \x20 ::corpus>\n    :data>\n      @define>\n        faculty &aspect.type set\n";
+      \x20 ::apple.0>\n    :data>\n      @define>\n        faculty &data.type set\n        1 &data.cost set\n\
+      \x20 ::apple.1>\n    :data>\n      @define>\n        faculty &data.type set\n        2 &data.cost set\n\
+      \x20 ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n";
     let recipes = "<recipe>\n  ::eat_apple>\n    @input>\n      $card::apple *slot.1.0.def_id eq if &slot.1.0 use\n    @output>\n      10 &sys.duration set\n      &slot.1.0 destroy\n";
     let b = load(&[
       ("a.rd".into(), aspects.into()),
@@ -440,8 +440,8 @@ mod tests {
     let v1 = Store::with_root(card_view(&b, &a1));
     assert_eq!(v0.read("def_id"), Some(&Cell::Sym("card::apple".into())));
     assert_eq!(v1.read("def_id"), Some(&Cell::Sym("card::apple".into())));
-    assert_eq!(v0.read("aspect.cost"), Some(&Cell::Int(1)));
-    assert_eq!(v1.read("aspect.cost"), Some(&Cell::Int(2)));
+    assert_eq!(v0.read("data.cost"), Some(&Cell::Int(1)));
+    assert_eq!(v1.read("data.cost"), Some(&Cell::Int(2)));
 
     // a recipe consuming `$card::apple` matches EITHER version's instance.
     let input = &b.recipe("eat_apple").unwrap().hook("input").unwrap().body;
@@ -466,7 +466,7 @@ mod tests {
 
     // `w`: slot a (2b, default 3) then slot b (3b, default 5), packed in order.
     let aspects = "<aspect>\n  ::a>\n    @define>\n      aspects &section set\n  ::b>\n    @define>\n      aspects &section set\n";
-    let cards = "<card>\n  ::w>\n    :data>\n      @define>\n        2 &aspect.a stock\n        3 &aspect.a set\n        3 &aspect.b stock\n        5 &aspect.b set\n";
+    let cards = "<card>\n  ::w>\n    :data>\n      @define>\n        2 &data.a stock\n        3 &data.a set\n        3 &data.b stock\n        5 &data.b set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).unwrap();
     // a=3 at shift 0 (2b), b=5 at shift 2 (3b) → 3 | (5<<2) = 23.
     assert_eq!(stock_default_u64(&b, "w"), 0b1_0111);

@@ -12,7 +12,7 @@ use crate::loader::Bundle;
 use crate::vm::{run, Cell, Store};
 use serde::Serialize;
 
-/// One row-mutable aspect slot — `<bits> &aspect.<name> stock` in `:data`.
+/// One row-mutable aspect slot — `<bits> &data.<name> stock` in `:data`.
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct StockSlot {
   pub aspect: String,
@@ -30,7 +30,7 @@ pub struct CardRenderDef {
   pub card_type: u8,
   pub def_id: u16,
   pub key: String,
-  /// The card's type *name* (`&aspect.type`, e.g. `"requisite"`) — the locale
+  /// The card's type *name* (`&data.type`, e.g. `"requisite"`) — the locale
   /// namespace (`cards.<type>.<key>.label`).
   pub type_name: String,
   /// `"hex"` | `"rect"` (from `&shape`, falling back to the type's hex-ness).
@@ -64,7 +64,7 @@ pub struct AspectInfo {
   /// `0xRRGGBB` (inherited if omitted), or `0` if none in the chain.
   pub color: i64,
   /// Default display visibility (`&visibility`): `0` hidden · `1` aspect slot ·
-  /// `2` function slot. A card's `:visuals` can override per aspect. Absent = `1`.
+  /// `2` function slot. A card's `:visuals` can override per data. Absent = `1`.
   pub visibility: u8,
   /// Aspects this one IS-A (`&satisfies` names), for matcher widening + display.
   pub satisfies: Vec<String>,
@@ -339,16 +339,16 @@ pub fn card_render_def(bundle: &Bundle, packed: u16) -> Option<CardRenderDef> {
   let stock: Vec<StockSlot> = crate::bridge::stock_schema(bundle, &name)
     .into_iter()
     .map(|(aspect, max)| {
-      let default = data.read(&format!("aspect.{aspect}")).map(Cell::as_int).unwrap_or(0);
+      let default = data.read(&format!("data.{aspect}")).map(Cell::as_int).unwrap_or(0);
       let visibility = visibility_of(&aspect);
       StockSlot { aspect, max, default, visibility }
     })
     .collect();
   let is_stock = |k: &str| stock.iter().any(|s| s.aspect == k);
 
-  // data: static aspects (numeric `aspect.*` entries, excluding `type` and any
+  // data: static aspects (numeric `data.*` entries, excluding `type` and any
   // stock-backed aspect — those live in `stock`, where the live value is read).
-  let aspects = match data.read("aspect") {
+  let aspects = match data.read("data") {
     Some(Cell::Map(m)) => m.iter().filter_map(|(k, c)| {
       if is_stock(k) {
         return None;
@@ -368,7 +368,7 @@ pub fn card_render_def(bundle: &Bundle, packed: u16) -> Option<CardRenderDef> {
   Some(CardRenderDef {
     card_type: bundle.card_type(&name).as_deref().and_then(crate::loader::type_nibble).unwrap_or(0),
     def_id: bundle.type_def_id(&name).unwrap_or(0),
-    type_name: sym(data.read("aspect.type")).unwrap_or_default(),
+    type_name: sym(data.read("data.type")).unwrap_or_default(),
     key: name,
     shape,
     color_bg: color("color.bg"),
@@ -594,8 +594,8 @@ pub fn draw_visuals(bundle: &Bundle, packed: u16, host: &[(String, Cell)], hook:
   // (`*sys.label`). The `cards.<type>.<key>.label` scheme mirrors the client's
   // `DefinitionManager.label`; the DSL only forwards the key (the client still
   // resolves the string — definitions never decode locales). The data hook ran
-  // first, so `aspect.type` is set.
-  let type_name = sym(s.read("aspect.type")).unwrap_or_default();
+  // first, so `data.type` is set.
+  let type_name = sym(s.read("data.type")).unwrap_or_default();
   s.write("sys.key", Cell::Sym(name.clone()));
   s.write("sys.type", Cell::Sym(type_name.clone()));
   s.write("sys.label", Cell::Sym(format!("cards.{type_name}.{name}.label")));
@@ -628,7 +628,7 @@ pub fn tile_prims(bundle: &Bundle, packed: u16, stock: &[i64], seed: i64) -> Vec
   run_into(bundle, &name, "data", "define", &[], &mut s);
   for (i, (aspect, _)) in crate::bridge::stock_schema(bundle, &name).iter().enumerate() {
     if let Some(v) = stock.get(i) {
-      s.write(&format!("aspect.{aspect}"), Cell::Int(*v));
+      s.write(&format!("data.{aspect}"), Cell::Int(*v));
     }
   }
   run_into(bundle, &name, "visuals", "define", &[], &mut s);
@@ -694,7 +694,7 @@ pub fn aspect_info(bundle: &Bundle, name: &str) -> Option<AspectInfo> {
 /// aspect with value 0. Callers rely on that distinction (e.g. "has an
 /// inventory" vs "infinite-capacity inventory"), so don't `unwrap_or(0)` here —
 /// that collapses absent into `Some(0)`, making every card look like it carries
-/// every aspect.
+/// every data.
 pub fn aspect_value(bundle: &Bundle, packed: u16, name: &str) -> Option<i64> {
   // Resolve packed → name → GLOBAL card def_id. `card_view`/`card_name` index a
   // global card list, so feeding the raw `unpack_def(packed).1` (the TYPE-LOCAL
@@ -705,7 +705,7 @@ pub fn aspect_value(bundle: &Bundle, packed: u16, name: &str) -> Option<i64> {
   // `card_render_def`.
   let def_id = bundle.card_def_id(bundle.name_for_packed(packed)?)?;
   let view = crate::bridge::card_view(bundle, &crate::bridge::Card { def_id, stock: Vec::new() });
-  Store::with_root(view).read(&format!("aspect.{name}")).map(Cell::as_int)
+  Store::with_root(view).read(&format!("data.{name}")).map(Cell::as_int)
 }
 
 /// A card's stacking bit-fields (the bundle-aware lookup behind the canonical
@@ -740,8 +740,8 @@ mod tests {
       \x20 ::type>\n    @define>\n      0 &visibility set\n\
       \x20 ::cost>\n    @define>\n      0 &visibility set\n";
     let cards = "<card>\n\
-      \x20 ::log>\n    :data>\n      @define>\n        requisite &aspect.type set\n        2 &aspect.wood set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n        #8B5E3C &color.bg set\n        #ecd6aa &color.title set\n        #0b1426 &color.text set\n        2 &visibility.wood set\n        1 &objects array\n        $asset::log &objects.0 set\n\
-      \x20 ::forest>\n    :data>\n      @define>\n        2 &aspect.pine stock\n        tile &aspect.type set\n        30 &aspect.cost set\n    :visuals>\n      @define>\n        $shape.hex &shape set\n        #0b1426 &color.bg set\n        #0b1426 &color.title set\n        #0b1426 &color.text set\n";
+      \x20 ::log>\n    :data>\n      @define>\n        requisite &data.type set\n        2 &data.wood set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n        #8B5E3C &color.bg set\n        #ecd6aa &color.title set\n        #0b1426 &color.text set\n        2 &visibility.wood set\n        1 &objects array\n        $asset::log &objects.0 set\n\
+      \x20 ::forest>\n    :data>\n      @define>\n        2 &data.pine stock\n        tile &data.type set\n        30 &data.cost set\n    :visuals>\n      @define>\n        $shape.hex &shape set\n        #0b1426 &color.bg set\n        #0b1426 &color.title set\n        #0b1426 &color.text set\n";
     load(&[("s.rd".into(), assets.into()), ("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load")
   }
 
@@ -751,7 +751,7 @@ mod tests {
     // from a value @define set — exercises the prim constructor + Ref handle
     // (`&h.field` writes through to the pushed prim) + float coords.
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::panel>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @define>\n        #112233 &bg set\n      @init>\n        ^rect call &h set\n        0 0 &h.pos vec2\n        100 50.5 &h.size vec2\n        50 50 &h.anchor vec2\n        *bg &h.tint set\n";
+    let cards = "<card>\n  ::panel>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @define>\n        #112233 &bg set\n      @init>\n        ^rect call &h set\n        0 0 &h.pos vec2\n        100 50.5 &h.size vec2\n        50 50 &h.anchor vec2\n        *bg &h.tint set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let prims = draw_visuals(&b, b.packed_def("panel").unwrap(), &[], "init");
     assert_eq!(prims.len(), 1);
@@ -770,7 +770,7 @@ mod tests {
     // reads NESTED fields (`*d.stack.index`, `*d.progress.0`) to drive prims —
     // the hook for DSL-side stack positioning / progress bars / overlays.
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        ^rect call &h set\n        *d.stack.index &h.tint set\n        *d.progress.0 &h.rot set\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        ^rect call &h set\n        *d.stack.index &h.tint set\n        *d.progress.0 &h.rot set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let host = vec![(
       "card_data".to_string(),
@@ -792,7 +792,7 @@ mod tests {
     // the arithmetic + nested `^card_data` reads + that a `vec2` takes a computed
     // y. (step is a literal here; the real builders use `$globals::title_height`.)
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        *d.stack.index *d.stack.dir mul 10 mul &stack_dy set\n        ^rect call &h set\n        0.0 0.0 *stack_dy add &h.pos vec2\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        *d.stack.index *d.stack.dir mul 10 mul &stack_dy set\n        ^rect call &h set\n        0.0 0.0 *stack_dy add &h.pos vec2\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let host = vec![(
       "card_data".to_string(),
@@ -813,7 +813,7 @@ mod tests {
     // the prims to these EXIT targets before removing the card. Here the exit fades
     // the rect to alpha 0; a card with no `@destroy` would yield an empty list.
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^rect call &h set\n      @destroy>\n        ^rect call &h set\n        0.0 &h.alpha set\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^rect call &h set\n      @destroy>\n        ^rect call &h set\n        0.0 &h.alpha set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let alive = draw_visuals(&b, b.packed_def("c").unwrap(), &[], "init");
     assert_eq!(alive.len(), 1);
@@ -828,7 +828,7 @@ mod tests {
     // `&h.z set` rides through to the prim so the client can sort intra-card paint
     // order (text over art, …); unset → None (client falls back to push order).
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^rect call &h set\n        ^text call &h set\n        9 &h.z set\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^rect call &h set\n        ^text call &h set\n        9 &h.z set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let prims = draw_visuals(&b, b.packed_def("c").unwrap(), &[], "init");
     assert_eq!(prims.len(), 2);
@@ -843,7 +843,7 @@ mod tests {
     // TRACK + the style. The client fills it live from the row's timing (the DSL
     // never sets a 0..1 value — it isn't run per-frame).
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        ^progress call &h set\n        *d.progress.0.id &h.target set\n        *d.progress.0.style &h.style set\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^card_data call &d set\n        ^progress call &h set\n        *d.progress.0.id &h.target set\n        *d.progress.0.style &h.style set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let host = vec![(
       "card_data".to_string(),
@@ -864,7 +864,7 @@ mod tests {
     // `&h.source set` picks the fill SOURCE: unset/0 = a progress row, 1 = the
     // action queue/debounce. The client routes to `deps.queue` for source 1.
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^progress call &p set\n        1 &p.source set\n";
+    let cards = "<card>\n  ::c>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^progress call &p set\n        1 &p.source set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let prims = draw_visuals(&b, b.packed_def("c").unwrap(), &[], "init");
     assert_eq!(prims.len(), 1);
@@ -879,7 +879,7 @@ mod tests {
     let manifest = "<manifest>\n  ::requisite>\n    :neutral>\n      @define>\n        1 &texture array\n        a.png &texture.0 set\n";
     let assets = "<asset>\n  ::requisite>\n    @define>\n      $manifest::requisite &object set\n      128 &size set\n      7 &texture.axe set\n";
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::axe>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        $asset::requisite &pack set\n        ^sprite call &h set\n        *pack.object &h.texture set\n        *pack.texture.axe &h.index set\n";
+    let cards = "<card>\n  ::axe>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        $asset::requisite &pack set\n        ^sprite call &h set\n        *pack.object &h.texture set\n        *pack.texture.axe &h.index set\n";
     let b = load(&[
       ("m.rd".into(), manifest.into()),
       ("s.rd".into(), assets.into()),
@@ -900,7 +900,7 @@ mod tests {
     // builder can author the label locale KEY without per-card hardcoding:
     // `*sys.label` → `cards.<type>.<key>.label` (client resolves the string).
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::axe>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @init>\n        ^text call &h set\n        *sys.label &h.text set\n";
+    let cards = "<card>\n  ::axe>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @init>\n        ^text call &h set\n        *sys.label &h.text set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let prims = draw_visuals(&b, b.packed_def("axe").unwrap(), &[], "init");
     assert_eq!(prims.len(), 1);
@@ -955,10 +955,10 @@ mod tests {
   #[test]
   fn recipe_meta_iterators_and_anchors() {
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n  ::cost>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &aspect.type set\n        1 &aspect.cost set\n";
+    let cards = "<card>\n  ::corpus>\n    :data>\n      @define>\n        faculty &data.type set\n        1 &data.cost set\n";
     let recipes = "<recipe>\n\
       \x20 ::triple>\n    @input>\n      $card::corpus *slot.1.0.def_id eq if &slot.1.0 use\n      $card::corpus *slot.1.1.def_id eq if &slot.1.1 use\n    @output>\n      &slot.1.0 destroy\n\
-      \x20 ::rooted>\n    @input>\n      *root.aspect.cost 1 ge if &root use\n    @output>\n      &root destroy\n";
+      \x20 ::rooted>\n    @input>\n      *root.data.cost 1 ge if &root use\n    @output>\n      &root destroy\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into()), ("r.rd".into(), recipes.into())]).unwrap();
     let m = recipe_meta(&b, "triple").unwrap();
     assert_eq!(m.iterators.len(), 1);
@@ -981,7 +981,7 @@ mod tests {
       \x20 ::pine>\n    @define>\n      aspects &section set\n      1 &satisfies array\n      $aspect::wood &satisfies.0 set\n\
       \x20 ::type>\n    @define>\n      traits &section set\n";
     let cards = "<card>\n\
-      \x20 ::twig>\n    :data>\n      @define>\n        requisite &aspect.type set\n        2 &aspect.pine set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n";
+      \x20 ::twig>\n    :data>\n      @define>\n        requisite &data.type set\n        2 &data.pine set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let twig = b.packed_def("twig").unwrap();
     assert_eq!(aspect_value(&b, twig, "pine"), Some(2));
@@ -1004,9 +1004,9 @@ mod tests {
       \x20 ::type>\n    @define>\n      traits &section set\n\
       \x20 ::inventory>\n    @define>\n      features &section set\n";
     let cards = "<card>\n\
-      \x20 ::ra>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n\
-      \x20 ::rb>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n\
-      \x20 ::hero>\n    :data>\n      @define>\n        soul &aspect.type set\n        1 &aspect.inventory set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n";
+      \x20 ::ra>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n\
+      \x20 ::rb>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n\
+      \x20 ::hero>\n    :data>\n      @define>\n        soul &data.type set\n        1 &data.inventory set\n    :visuals>\n      @define>\n        $shape.rect &shape set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let hero = b.packed_def("hero").unwrap();
     // The mismatch the bug needs: type-local def_id 1, global index 3.
@@ -1025,7 +1025,7 @@ mod tests {
     // seeds the open height so the client eases full → 0. Verifies the new kind
     // is a real PRIM_KIND and `enter` survives the serializer.
     let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
-    let cards = "<card>\n  ::dummy>\n    :data>\n      @define>\n        requisite &aspect.type set\n    :visuals>\n      @define>\n        #112233 &color.bg set\n      @destroy>\n        ^mask call &m set\n        0 0 &m.pos vec2\n        72 0 &m.size vec2\n        90 &m.enter.h set\n";
+    let cards = "<card>\n  ::dummy>\n    :data>\n      @define>\n        requisite &data.type set\n    :visuals>\n      @define>\n        #112233 &color.bg set\n      @destroy>\n        ^mask call &m set\n        0 0 &m.pos vec2\n        72 0 &m.size vec2\n        90 &m.enter.h set\n";
     let b = load(&[("a.rd".into(), aspects.into()), ("c.rd".into(), cards.into())]).expect("load");
     let prims = draw_visuals(&b, b.packed_def("dummy").unwrap(), &[], "destroy");
     assert_eq!(prims.len(), 1);
