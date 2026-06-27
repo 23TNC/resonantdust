@@ -539,7 +539,11 @@ mod tests {
             "log sprite texture should be a resolved stem, got {tex:?}; prims: {:?}",
             prims.iter().map(|p| (&p.kind, &p.texture)).collect::<Vec<_>>()
         );
-        assert_eq!(tex.as_deref(), Some("requisite.0/log.0/1.1.0"), "stem mismatch");
+        // Compare the stem WITHOUT the volatile `?v=<hash>` version suffix the
+        // `^r2` resolver appends from the manifest object's hash facet (the hash
+        // is content-derived and changes on remaster — not worth pinning here).
+        let stem = tex.as_deref().map(|s| s.split('?').next().unwrap_or(s));
+        assert_eq!(stem, Some("requisite.0/log.0/1.1.0"), "stem mismatch");
     }
 
     #[test]
