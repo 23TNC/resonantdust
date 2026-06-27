@@ -13,11 +13,6 @@
 /// non-stock effect. The gate future-stamps each at `start + at`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
-  /// Mark a card dead (`destroy_card` — sets the dead flag the reaper acts on).
-  /// The new model expresses destroy as `data.dead inc`; because the shard is
-  /// content-agnostic (can't map a dead stock-bit to the flag) the GATE
-  /// translates a `data.dead` write into this effect.
-  Destroy { card_id: u32 },
   /// Spawn a card at a macro_zone (`^create`). `owner_id` is either a real
   /// `card_id` or a transient plan TAG (`codec::packed::is_tag`) naming a sibling
   /// `Create` this card nests in; the shard resolves the tag to the minted id.
