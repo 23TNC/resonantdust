@@ -531,15 +531,15 @@ export function cardFlagFieldShape(field, name) {
 
 /**
  * @param {number} flags
- * @param {number} stock
+ * @param {bigint} stock
  * @param {string} name
- * @returns {number | undefined}
+ * @returns {bigint | undefined}
  */
 export function cardFlagFieldValueAny(flags, stock, name) {
     const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.cardFlagFieldValueAny(flags, stock, ptr0, len0);
-    return ret === Number.MAX_SAFE_INTEGER ? undefined : ret;
+    return ret[0] === 0 ? undefined : BigInt.asUintN(64, ret[1]);
 }
 
 /**

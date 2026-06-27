@@ -1,164 +1,189 @@
-# Temporal aspect op-log (future-stamped, out-of-order, GC'd)
+# Temporal aspect op-log (server-internal, future-stamped, out-of-order, GC'd)
 
-Status: **design only** — not built. Captures the model worked out for the
-next-gen recipe DSL (see `content/data/recipes/02.rd`), where holds, lifecycle,
-and presentation become **aspects** mutated by time-stamped operations rather
-than hardcoded flags set/released in place.
+Status: **design + plan** — not built. The mechanism that gives **stock** aspects
+forward propagation, so future-stamped holds / lifecycle (`acquire@0`,
+`release@10`, `dead@deadline`) materialize correctly under out-of-order arrival.
+Building this is the prerequisite for collapsing the separate `flags` word into
+the stock u64 (see `docs/flags_in_dsl_plan.md` — this **supersedes** that plan's
+separate-word approach).
+
+## Decision: the log is SERVER-INTERNAL
+
+The client only ever receives **materialized card rows** — the folded
+value-as-of-now plus **future-stamped** card rows for the schedule — over the
+existing card subscription. It plays those forward against its delayed clock with
+the machinery it already has (`future_row_progress_kick`, the movement
+future-stamp path). It never sees the log, never folds deltas.
+
+The **server is the sole folder.** The op-log is a private shard table used only
+to materialize card rows correctly. This deletes the entire client-facing half of
+the original design — no client log subscription, no login-snapshot/live-tail
+split, no `[tag|time|count]` static-boundary packing, no checkpoint-churn-on-sub
+concern. Those existed only because the log was on the client.
+
+Trade accepted: a materialized future row is heavier on the wire than a compact
+`(op, modifier)` delta — but schedules are a couple of stamps per aspect, progress
+interpolates locally, and **re-materialization is rare** (only late ops and recipe
+fire), so the dumber client + far simpler GC is worth the bytes.
 
 ## Problem
 
-The new DSL `@output` is a **timeline**: effects are stamped at a future
-`sys.time` (acquire holds at t=0, mutate at t=10, release at t=10). The server
-applies operations as its clock crosses each stamp; clients receive the schedule
-and play it forward against their own (delayed) clock.
+`@output` is a timeline; stamps arrive **out of order** (RTT-midpoint stamping,
+skew, late clients): an op stamped T=8 can land after T=10 was applied. The
+materialized value must still be correct, and some ops compute off the value they
+read, so a late earlier insert can invalidate later results.
 
-Two forces collide:
+## Core: store the delta, not the result
 
-1. **Future-stamped + out-of-order arrival.** An op stamped T=8 can arrive after
-   an op stamped T=10 has already been applied (clock skew, RTT-midpoint
-   stamping, late client requests). The materialized value must still be correct.
-2. **Dependent operations.** Some ops compute off the value they read, so a late
-   insert before them invalidates their results.
-
-## Core decision: store the delta, not the result
-
-The cascade-recompute problem is an artifact of storing **absolutes**. If a row
-stores the *result* of `inc` (e.g. "claim = 1"), it has baked in the base it read
-at compute time, so a later-discovered earlier op can't retroactively shift it —
-you'd have to carry-forward-rewrite every later row.
-
-Store the **operation** instead (`op`, `modifier`), and read by folding:
+Storing the *result* of `inc` bakes in the base read at compute time, so a
+late-discovered earlier op forces a carry-forward rewrite. Store the **operation**
+and read by folding:
 
 ```
-value-as-of(T) = (value of latest `set` ≤ T) + Σ(deltas with set.time < op.time ≤ T)
+value-as-of(T) = (latest set ≤ T) + Σ(deltas with set.time < op.time ≤ T)
 ```
 
-A `set` is the reset/anchor barrier; deltas accumulate on top of it.
+A `set` is the reset/anchor barrier; deltas accumulate on top.
 
-### Commutative vs value-dependent ops
+| Class | Ops | Late insert before existing ops |
+|---|---|---|
+| **Commutative** | `inc` / `dec` | Just another addend — **no re-fold**. Order-independent. |
+| **Value-dependent** | `set` / `mul` / `div` | Later results were computed off a base the late op changed → **re-fold the tail** from the earliest disturbed time. |
 
-| Class            | Ops              | Late insert before existing ops      |
-|------------------|------------------|--------------------------------------|
-| **Commutative**  | `inc` / `dec`    | Just another addend — **no re-fold.** Existing entries are still `+1`/`−1`; the fold picks up the new one. Order-independent. |
-| **Value-dependent** | `set` / `mul` / `div` | Existing later results were computed off a base the late op changed → **re-fold the tail** from the earliest disturbed time. True forward propagation (the `1 2 4 8 16 → 1 2 5 10 20` case). |
+Every hold/lifecycle aspect — `claim`, `borrow`, `pos_hold`, `touch_user`,
+`touch_server`, `dead`, `reap` — is a commutative refcount (PN-counter). They need
+the **fold**, never replay. That's what makes this tractable.
 
-All the hold/lifecycle aspects — `claim`, `borrow`, `pos_hold`, `touch_user`,
-`touch_server`, `dead`, `reap` — are commutative refcounts (PN-counters). They
-need the **fold**, never cascade replay. Reserve replay for genuinely
-value-dependent persisted ops, and only after confirming they're **pure
-value-folds** (see Trap below).
+### Guardrail: effects branch only on settled state
 
-### Trap: pure value-fold vs effectful re-run
+The op-log models pure arithmetic. If correcting a past value would require
+**re-running an `@output`** that branched on it (`*v 2 gt if … create`), that's
+transactional rollback of side effects — an `(op, modifier)` row can't represent
+it. So: a recipe may read the **settled** value to decide whether to fire, but the
+unsettled (future / out-of-order) window carries **commutative deltas only**. Then
+a late correction is always a fold, never an effect replay. If a feature can't
+honor this, surface it — it's a bigger conversation than the log.
 
-The op-log only models pure arithmetic. If correcting a past value would require
-**re-running a recipe `@output`** that branched on it (`*v 2 gt if … create`),
-that's transactional rollback of side effects (un-create / restore cards), not a
-fold — and an `(op, bit, modifier)` row can't represent it.
+## Architecture (server-internal)
 
-**Architectural rule: effects branch only on settled state.** The unsettled
-(future / out-of-order) window carries commutative deltas only. Then a past
-correction never has to replay an effect. If this rule can't hold for some
-feature, that's a much larger design conversation than this log — surface it
-before building.
+Two tiers, both on the shard:
 
-## Materialization & reads
+1. **Materialized card rows** — the packed stock u64 (value-as-of-now) for hot
+   reads (matcher, `card_view`), plus future-stamped card rows for each scheduled
+   stamp. This is the *only* thing clients subscribe to.
+2. **The op-log table** (new, ST-only) — append-only deltas per `(card, aspect)`,
+   the source the server folds from.
 
-Reads are hot (every matcher pass, every `card_view`). Do **not** fold a growing
-log per read.
+Generalizes what already exists: `propagate_hold_forward` is today a *hardcoded*
+op-log for the hold refcount fields in `flags` (walks future rows, ±1). The log
+makes that general and moves it onto stock aspects.
 
-- Keep a materialized **value-as-of-now** column (the packed stock u64 slot) for
-  fast reads.
-- Maintain it by **applying deltas**, never recompute-and-overwrite (overwriting
-  re-introduces the absolute-storage bug for `inc` too):
-  - future op promotes (`col += δ`) when the clock crosses its time;
-  - late *past* commutative op applies immediately (`col += δ`);
-  - late *non-commutative* op (or a late op landing before an existing
-    `set`/`mul`) re-folds the unsettled tail into the column.
-- **Bound the unsettled window** by the late-arrival horizon (`now −
-  max_late_arrival`, ≈ clock-skew + RTT — pin this number down). Everything older
-  is settled and compacted.
+### Log row shape
 
-## Client login & playback
+```
+op_log(card_id, aspect_id:u4, valid_at:i64, op:u3, modifier, reserved_checkpoint)
+```
 
-Client logs in at now=6, log = `{ set@0, ++@8, ++@10 }`:
+- **`aspect_id:u4`** — the **global** op-requiring aspects (~8: the holds +
+  `dead`/`reap`); the codec global registry maps `aspect_id → (shift, width)` in
+  the stock u64 prefix. Works *because* they're global (fixed offset) — the same
+  property that lets the content-agnostic shard fold without content.
+- **`op:u3`** — `set`/`inc`/`dec`(/`mul`/`div`).
+- Per-def magnitude aspects (pine/wood) stay **whole-value `SetCardStock`** — they
+  don't need ops, so they don't enter the log. `aspect_id` stays u4-bounded.
 
-1. Subscription delivers the tail **including future-stamped rows** (`++@8`,
-   `++@10`). The client gets its near-future up front — this is what makes the
-   `client_delay` clock work (events are buffered before the local clock reaches
-   their stamp, so they apply with no pop-in).
-2. Anchor on latest `set ≤ now` (`set@0` → base). The `set`/checkpoint is what
-   lets a mid-stream joiner fold without replaying all history.
-3. `value-as-of(6) = base`.
-4. Enqueue a **local clock-driven re-evaluation at each future stamp** (8, 10).
+### Materialization
 
-At T=8 a local timer fires (NOT a row arrival — the row's been in hand since
-login), re-folds → `base+1`, and updates everything derived from the aspect
-(locks, local match-eligibility, visuals). No server round-trip: server and
-client fold the same deterministic log, so they agree. This is the
-`future_row_progress_kick` problem generalized — `ValidAtTable.promote` only
-fires on *current-row* change, so future rows sitting in the buffer need an
-explicit local scheduler keyed on the next pending stamp.
+- Maintain the stock u64 column by **applying deltas** (`col += δ`), never
+  recompute-overwrite (overwriting re-introduces the absolute-storage bug).
+- **Future-promote** when the clock crosses a stamp (the existing future-row
+  promote, now delta-driven).
+- **Late past commutative** op → apply δ immediately + re-materialize the affected
+  future card rows; re-emit only the *changed* rows (existing card sub fans out).
+- **Late value-dependent** op → re-fold the unsettled tail, re-materialize, re-emit.
+- **Bound the unsettled window** at `now − max_late_arrival` (≈ clock-skew + RTT;
+  relate to `STALE_SAMPLE_MS` / `client_delay`). Older = settled.
 
-A new op streaming in mid-window is inserted and re-folded (commutative → cheap,
-schedule unchanged; non-commutative → re-fold tail, maybe reschedule). Same rules
-as the server, client-side.
+## GC / compaction (server-internal — no client fan-out)
 
-## GC / compaction
+Per `(card, aspect)` keep **one mutable checkpoint row** (the collapsed `set`
+anchor) at a **fixed reserved key**; GC **upserts in place**. Collapse log rows
+older than the watermark (`now − max_late_arrival`, same number as the unsettled
+floor) into it, then delete them.
 
-GC always retains **one row in the past** per (card, aspect): the collapsed
-`set` checkpoint. More-than-one past rows collapse into it. On login the client
-reads that checkpoint + the live tail and plays forward.
+Because compaction doesn't change the *materialized value*, **no card row changes,
+so nothing reaches the client** — the whole churn-on-subscription problem
+disappears. Reads fold checkpoint + live tail.
 
-### Checkpoint churn must never ride a standing subscription
+## Implementation plan
 
-Collapsing N past rows into one `set` fans out to every standing subscriber even
-though they already hold the materialized value. Same failure as
-`region_version_delete_bug` (supersede-delete churn). Cure is the same shape:
-**one mutable checkpoint row, updated in place.**
+Server-side (shard) + rules/codec translate + gate. Each phase unit-testable.
 
-Split into:
-- **One-shot snapshot read at login** — the checkpoint(s). GC churn here never
-  touches standing subs.
-- **Standing subscription on the live window** — the append-only tail only.
+### Phase 1 — log table + global aspect registry
+`spacetime` shard, `shared/codec`
+- `op_log` shard table (`card_id, aspect_id, valid_at, op, modifier, reserved`),
+  indexed `(card_id, aspect_id, valid_at)`; **no client subscription**.
+- codec global registry const: `aspect_id:u4 → (shift, width)` in the stock u64
+  prefix (shared, so the shard folds content-free). Same layout as the flags work.
+- **Verify:** table compiles; registry unit test (`aspect_id ↔ bits`).
 
-Give the checkpoint a **fixed reserved key per (card, aspect)** so GC **upserts
-in place** instead of insert-new + delete-old. In-place update of a row outside
-the live filter = zero fan-out *and* no supersede churn. Those reserved ids also
-serve as the dedup key across the snapshot/live seam.
+### Phase 2 — write path: `translate()` → log ops
+`shared/codec/src/plan.rs`, `shared/rules`, `gateway`, `spacetime`
+- codec `Effect::LogOp { aspect_id, op, modifier, at }`; keep `SetCardStock` for
+  per-def whole-value aspects.
+- `translate()`: global-aspect timeline writes (`claim inc`@0, `release`@win,
+  `dead inc`@deadline) → `LogOp`s at their stamps; per-def writes stay `SetCardStock`.
+- gate threads `LogOp`s to the reducer; shard appends the log row + applies the δ.
+- **Verify:** rules test (cut_tree → `LogOp(claim,+1,@0)` / `(claim,-1,@win)` /
+  `(dead,+1,@deadline)`).
 
-### Encoding the split as a *static* filter
+### Phase 3 — fold + materialize (core)
+`spacetime` shard
+- `value_as_of(card, aspect, T)` = checkpoint + Σ deltas; maintain the stock column
+  by applying δ; future-promote on clock cross; emit future-stamped card rows per
+  pending stamp.
+- **Verify:** fold unit tests (commutative order-independence; future rows correct).
 
-STDB subscriptions can't express `WHERE time > now` — `now` moves. The
-discriminator must be a **constant** and must **outrank the time bits**, or the
-filter partitions by wall-clock instead of by role.
+### Phase 4 — out-of-order + re-emit
+`spacetime` shard
+- Late commutative → apply δ + re-materialize affected future rows, re-emit changed
+  rows only. Late value-dependent → re-fold tail. Enforce the settled-state guard
+  (reject unsettled value-dependent ops that would need effect replay).
+- **Verify:** harness injects out-of-order ops; materialized value + future rows
+  converge to the in-order result.
 
-- **Reserved tag above time:** `[tag | time | count]`, tag highest. Live sub =
-  `col < BOUNDARY`; login snapshot = `col >= BOUNDARY`. Static boundary, never
-  moves; each partition still sorts time-then-count internally.
-- Reserving high bits *of the count* while time is the high half (`[time |
-  count]`) does **not** work: `< boundary` filters by time, so a checkpoint at
-  time=5 still sorts below a live row at time=6. The discriminator must dominate.
+### Phase 5 — GC / compaction
+`spacetime` shard `gc.rs`
+- Reserved per-`(card,aspect)` checkpoint key; in-place upsert; collapse rows past
+  the watermark; pin `max_late_arrival`.
+- **Verify:** N past ops → 1 checkpoint, current value invariant, **no card-row
+  emit** on compaction.
 
-### Mechanics / gotchas
+### Phase 6 — migrate global aspects onto the log; retire hardcoded forward-prop
+`spacetime` shard, `content/**`, DSL
+- Replace `propagate_hold_forward` (hardcoded `flags` hold fields) with the general
+  log for `claim/borrow/touch/pos_hold`; move `dead`/`reap` onto the log in the
+  stock u64 prefix; the reaper reads materialized `dead` at the global stock offset
+  (content-free) instead of the flag bit.
+- Retire the `flags` word's hold refcount fields + `dead` bit (now folded from the
+  log into stock); `flags_bk` (dirty) stays. **This is the flags-into-stock
+  collapse** — global aspects named as `data.*` (global) per the flags-in-DSL
+  decision.
+- **Verify:** cut_tree end-to-end (acquire/release/`dead` via the log); reaper on
+  stock-prefix `dead`; claude redeploy + browser.
 
-1. **The one-shot is subscribe → read → unsubscribe**, via the gate gather path —
-   must release the handle or it leaks (`gate_gather_subs`). Reuses existing,
-   already-fixed machinery.
-2. **Seam order: live sub first, snapshot second, dedup by count id.** An op
-   landing mid-login can't fall in the gap; overlap is idempotent (commutative +
-   dedup).
-3. **GC absorbs-into-checkpoint and deletes the live row in one reducer** (STDB
-   atomic), so clients see both together and re-fold to an invariant value.
-   Corollary: the client must read a **compaction-delete as "settled, keep the
-   value," not "retract/subtract."** The checkpoint already absorbed it.
-4. **Compaction watermark == live-window floor.** Only collapse rows past `now −
-   max_late_arrival`; the live window must extend at least that far down, or
-   you'd compact a row a late op still wants to reorder against. One number drives
-   both.
+## Relationship to the flags work
+
+This **supersedes** `docs/flags_in_dsl_plan.md`'s separate-`flags`-word approach.
+Phase 6 here IS the flags-into-stock collapse: once stock aspects forward-propagate
+via the log, `dead`/`reap`/holds become global stock aspects and the separate
+`flags` word retires. If a `flags.*` DSL *namespace* is still wanted, it's a naming
+marker over the global stock prefix — not separate storage.
 
 ## Reduces to
 
-One mutable checkpoint row + an append-only live tail per (card, aspect) — a
-shape this codebase already keeps cheap (regions current-value table, anchor/sub
-watermarks). Commutative deltas are the fast path (late insert = one addition);
-replay-the-tail is reserved for value-dependent ops under the settled-state rule.
+One mutable checkpoint + an append-only live tail per `(card, aspect)`, folded by
+the server into materialized current + future-stamped card rows — a shape this
+codebase already keeps cheap (regions current-value table, the existing future-row
+promote). Commutative deltas are the fast path; replay is reserved for
+value-dependent ops under the settled-state guard.

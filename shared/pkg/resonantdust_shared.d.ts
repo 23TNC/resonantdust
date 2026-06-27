@@ -129,7 +129,7 @@ export function cardFlagBitIn(field: string, name: string): number | undefined;
 
 export function cardFlagFieldShape(field: string, name: string): Uint8Array | undefined;
 
-export function cardFlagFieldValueAny(flags: number, stock: number, name: string): number | undefined;
+export function cardFlagFieldValueAny(flags: number, stock: bigint, name: string): bigint | undefined;
 
 export function cardFlagFieldValueIn(field: string, host: number, name: string): number | undefined;
 
@@ -148,7 +148,7 @@ export interface InitOutput {
     readonly cardFlagBit: (a: number, b: number) => number;
     readonly cardFlagBitIn: (a: number, b: number, c: number, d: number) => number;
     readonly cardFlagFieldShape: (a: number, b: number, c: number, d: number) => [number, number];
-    readonly cardFlagFieldValueAny: (a: number, b: number, c: number, d: number) => number;
+    readonly cardFlagFieldValueAny: (a: number, b: bigint, c: number, d: number) => [number, bigint];
     readonly cardFlagFieldValueIn: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly cardTypeId: (a: number, b: number) => number;
     readonly content_allTextures: (a: number) => [number, number, number, number];

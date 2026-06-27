@@ -12,7 +12,7 @@
     :berry>
       @define>
         1 &parts set
-        3329970878776688 &hash set
+        2958421933917756 &hash set
         12 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -43,7 +43,7 @@
     :conifer>
       @define>
         1 &parts set
-        3530322076723369 &hash set
+        336743525520799 &hash set
         9 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
@@ -89,7 +89,7 @@
     :flora>
       @define>
         1 &parts set
-        216072356008656 &hash set
+        4042968917333897 &hash set
         30 &var_id array
         1 &var_id.0 set
         1 &var_id.1 set
