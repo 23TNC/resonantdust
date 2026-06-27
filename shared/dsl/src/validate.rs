@@ -87,6 +87,12 @@ fn op_effect(word: &str) -> Option<(u32, u32)> {
 fn sys_effect(s: &str) -> (u32, u32) {
   match s {
     "r2" => (5, 1),
+    // `&owner <surface> <q> <r> ^macro_zone call` — resolve a macro_zone (the
+    // card_id+surface+cell tuple) from an owner card; 4 args in, the zone out.
+    "macro_zone" => (4, 1),
+    // `<zone> $card::def &owner ^create call` — spawn `def` at `zone`, owned by
+    // `owner`; 3 args in, the created handle (or 0) out.
+    "create" => (3, 1),
     _ => (0, 1),
   }
 }
