@@ -146,8 +146,24 @@ fn translate<S: CardStore>(
                             effect: Effect::SetCardStock { card_id, stock: new_stock },
                         });
                     }
+                } else if let Some(asp) = resonantdust_codec::aspects::StockAspect::from_name(aspect) {
+                    // GLOBAL aspect (a hold) on the synthetic tile → tile op-log.
+                    // The tile-card the shard promotes carries it; identified by
+                    // the action's (surface, q, r), so no card_id here.
+                    use resonantdust_codec::oplog::AspectOp;
+                    let (op, modifier) = if *abs {
+                        (AspectOp::Set, *delta)
+                    } else if *delta < 0 {
+                        (AspectOp::Dec, -*delta)
+                    } else {
+                        (AspectOp::Inc, *delta)
+                    };
+                    ap.effects.push(TimedEffect {
+                        at,
+                        effect: Effect::TileLogOp { aspect_id: asp.id(), op: op.code(), modifier },
+                    });
                 } else {
-                    // Unplaced → the synthetic tile (the zone-savable u4 path).
+                    // Unplaced per-def aspect → the synthetic tile (zone-savable u4).
                     let tile = synth
                         .as_ref()
                         .ok_or_else(|| "tile stock op but no synthetic tile".to_string())?;

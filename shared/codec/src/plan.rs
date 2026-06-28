@@ -41,6 +41,12 @@ pub enum Effect {
   /// [`crate::aspects::StockAspect::id`]; `op` is [`crate::oplog::AspectOp::code`].
   /// The shard applies it via `oplog::apply_op` at this effect's stamp.
   LogOp { card_id: u32, aspect_id: u8, op: u8, modifier: i64 },
+  /// Like [`Effect::LogOp`] but for the action's TILE: the shard promotes the
+  /// tile-card (it's identified by the action's `(surface, macro_zone, q, r)`,
+  /// not a card_id known at translate time) and applies the op there. The
+  /// op-log home for a tile's holds — `cut_tree`'s `set_use` on the tile lands
+  /// here instead of the never-wired flag tile-hold path.
+  TileLogOp { aspect_id: u8, op: u8, modifier: i64 },
 }
 
 /// Tile-stock arithmetic for [`Effect::ModifyTileStock`]. `code()` is the u8 the
