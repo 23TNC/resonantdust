@@ -151,48 +151,11 @@ pub fn write_stock(stock: u64, slot: usize, value: u8) -> u64 {
 /// u4 — a zone tile only persists a u4). The upper 60 bits are card-only.
 pub const STOCK_ZONE_SAVE_MASK: u64 = 0x0000_0000_0000_000F;
 
-/// True when any refcount hold field (`touch_count`, `server_count`,
-/// `slot_claim_count`, `slot_borrow_count`, `drop_hold_count`,
-/// `position_hold_count`) in `flags` is nonzero — i.e. the card is actively held
-/// by at least one party. A tile-card with active holds is mid-action and must
-/// NOT be demoted.
-pub fn has_active_holds(flags: u32) -> bool {
-    flags & layout().hold_counts_mask != 0
-}
-
 /// True when `flags` carries something a bare zone tile slot can't express, so
 /// the card must NOT be demoted back into its zone: any of `dead`, `pos_need`,
 /// `pos_want`.
 pub fn state_blocks_demotion(flags: u32) -> bool {
     flags & layout().demote_blocking != 0
-}
-
-/// A refcount count field in `flags`. The lease-acquiring recipe verbs map to
-/// `SlotClaim` (`use`/`claim`), `SlotBorrow` (`share`/`borrow`), `PositionHold`,
-/// and `Touch` (rides along on any held card). `DropHold` (stacking-block) and
-/// `Server` (parallel-reducer safety) are server-internal counts that are still
-/// incremented/decremented through the same machinery. The `u8` discriminants
-/// double as the `kind` selector the gate passes to the tile-hold reducers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HoldField {
-    Touch = 0,
-    SlotClaim = 1,
-    SlotBorrow = 2,
-    PositionHold = 3,
-    DropHold = 4,
-    Server = 5,
-}
-
-/// Read a hold/refcount `field` value out of `flags`.
-pub fn hold_count(flags: u32, field: HoldField) -> u8 {
-    count_field(field).read(flags) as u8
-}
-
-/// Read the `drop_hold_count` refcount — the stacking-block gate. Not a
-/// [`HoldField`] (it's never an acquirable lease *kind*, only a readable
-/// count), so it has its own reader. Used by recipe binding validation.
-pub fn drop_hold_count(flags: u32) -> u8 {
-    layout().drop_hold.read(flags) as u8
 }
 
 /// Is this card marked dead? Reads the `Dead` count in the global-aspect region
@@ -234,28 +197,6 @@ pub fn bind_blocked(stock: u64) -> bool {
 // by its DEFINITION now (`packed::is_player_soul`, the reserved 0xFFF0..=0xFFFF
 // range), not a flag — so the owner-walk terminus needs no propagating bit.
 
-/// `flags` with `field` incremented by one (saturating at the field's max).
-pub fn increment_hold(flags: u32, field: HoldField) -> u32 {
-    count_field(field).increment(flags)
-}
-
-/// `flags` with `field` decremented by one (saturating at 0).
-pub fn decrement_hold(flags: u32, field: HoldField) -> u32 {
-    count_field(field).decrement(flags)
-}
-
-fn count_field(field: HoldField) -> CountField {
-    let l = layout();
-    match field {
-        HoldField::Touch => l.touch,
-        HoldField::SlotClaim => l.slot_claim,
-        HoldField::SlotBorrow => l.slot_borrow,
-        HoldField::PositionHold => l.position_hold,
-        HoldField::DropHold => l.drop_hold,
-        HoldField::Server => l.server,
-    }
-}
-
 // ---- layout (from crate::flags) ----------------------------------------
 
 /// A refcount / placement field's window: pre-built mask, low-bit shift, and max
@@ -274,33 +215,14 @@ impl CountField {
     fn pack(self, value: u32) -> u32 {
         (value.min(self.max) << self.shift) & self.mask
     }
-    fn write(self, flags: u32, value: u32) -> u32 {
-        (flags & !self.mask) | self.pack(value)
-    }
-    fn increment(self, flags: u32) -> u32 {
-        let next = self.read(flags).saturating_add(1).min(self.max);
-        self.write(flags, next)
-    }
-    fn decrement(self, flags: u32) -> u32 {
-        let next = self.read(flags).saturating_sub(1);
-        self.write(flags, next)
-    }
 }
 
 struct FlagsLayout {
     stack: CountField,
     index: CountField,
-    // refcount holds
-    touch: CountField,
-    slot_claim: CountField,
-    slot_borrow: CountField,
-    position_hold: CountField,
-    drop_hold: CountField,
-    server: CountField,
-    /// Union of all six refcount field masks — nonzero iff any hold is held.
-    hold_counts_mask: u32,
-    // single-bit state
-    dead: u32,
+    // (bits 8-23, the refcount holds, RETIRED — holds are op-log stock aspects.)
+    // single-bit state (the `dead` bit feeds state_mask/demote_blocking but is no
+    // longer a standalone field — `dead` is read from stock now.)
     /// `flags.pos_need` — the server REQUIRES this position (authoritative).
     pos_need: u32,
     /// `flags.pos_want` — the server's position is advisory (a recipe output);
@@ -327,18 +249,6 @@ fn layout() -> &'static FlagsLayout {
                 max: (((1u64 << f.width) - 1) & 0xFFFF_FFFF) as u32,
             }
         };
-        let touch = field("touch_count");
-        let slot_claim = field("slot_claim_count");
-        let slot_borrow = field("slot_borrow_count");
-        let position_hold = field("position_hold_count");
-        let drop_hold = field("drop_hold_count");
-        let server = field("server_count");
-        let hold_counts_mask = touch.mask
-            | slot_claim.mask
-            | slot_borrow.mask
-            | position_hold.mask
-            | drop_hold.mask
-            | server.mask;
         let dead = bit("dead");
         let pos_need = bit("pos_need");
         let pos_want = bit("pos_want");
@@ -347,14 +257,6 @@ fn layout() -> &'static FlagsLayout {
         FlagsLayout {
             stack: field("stack"),
             index: field("index"),
-            touch,
-            slot_claim,
-            slot_borrow,
-            position_hold,
-            drop_hold,
-            server,
-            hold_counts_mask,
-            dead,
             pos_need,
             pos_want,
             state_mask: dead | pos_need | pos_want | surface_locked | zone_born,
@@ -408,14 +310,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_preserves_state_and_holds() {
-        // A state bit and a hold count survive a placement write. (Uses the raw
-        // dead FLAG bit as a sample state bit; `is_dead` now reads stock, so check
-        // the flag mask directly rather than via the helper.)
-        let base = layout().dead | increment_hold(0, HoldField::Touch);
-        let (_ml, f) = Micro::snap(0, 0).apply(base);
-        assert_ne!(f & layout().dead, 0);
-        assert_eq!(hold_count(f, HoldField::Touch), 1);
+    fn apply_preserves_state_bits() {
+        // A state bit (`pos_need`, a sample) survives a placement write. (Holds
+        // are op-log stock aspects now, not flag fields.)
+        let (_ml, f) = Micro::snap(0, 0).apply(layout().pos_need);
+        assert_ne!(f & layout().pos_need, 0);
     }
 
     #[test]
@@ -426,30 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn hold_count_roundtrip() {
-        use HoldField::*;
-        assert_eq!(hold_count(0, SlotClaim), 0);
-        let f = increment_hold(increment_hold(0, SlotClaim), SlotClaim);
-        assert_eq!(hold_count(f, SlotClaim), 2);
-        let f = decrement_hold(f, SlotClaim);
-        assert_eq!(hold_count(f, SlotClaim), 1);
-        // fields are independent
-        let f = increment_hold(f, SlotBorrow);
-        assert_eq!(hold_count(f, SlotBorrow), 1);
-        assert_eq!(hold_count(f, SlotClaim), 1);
-        assert!(has_active_holds(f));
-        // decrement floors at zero
-        assert_eq!(hold_count(decrement_hold(0, SlotClaim), SlotClaim), 0);
-    }
-
-    #[test]
     fn demotion_predicates() {
-        assert!(!has_active_holds(0));
         assert!(!state_blocks_demotion(0));
-        let held = increment_hold(0, HoldField::Touch);
-        assert!(has_active_holds(held));
-        assert!(state_blocks_demotion(layout().dead));
-        // holds and placement live outside the demote-blocking mask.
+        assert!(state_blocks_demotion(layout().pos_need));
+        // placement lives outside the demote-blocking mask.
         let (_ml, placed) = Micro::snap(0, 0).apply(0);
         assert!(!state_blocks_demotion(placed));
     }
@@ -458,8 +337,5 @@ mod tests {
     fn placement_and_state_masks_disjoint() {
         // Placement (bits 0-7) and state bits (24+) must not overlap.
         assert_eq!(placement_mask() & state_mask(), 0);
-        // Refcounts (8-23) must not overlap either.
-        assert_eq!(placement_mask() & layout().hold_counts_mask, 0);
-        assert_eq!(state_mask() & layout().hold_counts_mask, 0);
     }
 }

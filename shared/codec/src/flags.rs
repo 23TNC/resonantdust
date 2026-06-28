@@ -70,13 +70,9 @@ pub fn flag_field(field: &str, name: &str) -> Option<FlagField> {
     // --- flags (propagating) — placement ---
     ("flags", "stack") => (0, 4),
     ("flags", "index") => (4, 4),
-    // --- flags (propagating) — refcount holds ---
-    ("flags", "slot_claim_count") => (8, 3),
-    ("flags", "slot_borrow_count") => (11, 3),
-    ("flags", "position_hold_count") => (14, 3),
-    ("flags", "drop_hold_count") => (17, 3),
-    ("flags", "touch_count") => (20, 2),
-    ("flags", "server_count") => (22, 2),
+    // bits 8-23 were the refcount holds (slot_claim/borrow/position/drop/touch/
+    // server) — RETIRED: holds are op-log stock aspects now (`crate::aspects`).
+    // Free for reuse.
     // --- stock (tile-card per-row stock slots) ---
     ("stock", "stock_0") => (0, 2),
     ("stock", "stock_1") => (2, 2),
@@ -95,10 +91,7 @@ mod tests {
     assert_eq!(flag_bit("flags", "player_owned"), None); // retired; bit 24 reclaimed
     assert_eq!(flag_bit("flags_bk", "position_dirty"), Some(0));
     assert_eq!(flag_bit("flags", "ghost"), None);
-    let f = flag_field("flags", "slot_claim_count").unwrap();
-    assert_eq!((f.shift, f.width), (8, 3));
-    assert_eq!(f.mask(), 0b111 << 8);
-    assert_eq!(f.pack(5), 5 << 8);
+    assert_eq!(flag_field("flags", "slot_claim_count"), None); // retired (op-log)
     let s = flag_field("flags", "stack").unwrap();
     assert_eq!((s.shift, s.width), (0, 4));
     let st = flag_field("stock", "stock_1").unwrap();
@@ -111,10 +104,7 @@ mod tests {
     for name in ["surface_locked", "dead", "pos_need", "pos_want", "zone_born"] {
       assert!(flag_bit("flags", name).unwrap() < 32);
     }
-    for name in [
-      "stack", "index", "slot_claim_count", "slot_borrow_count",
-      "position_hold_count", "drop_hold_count", "touch_count", "server_count",
-    ] {
+    for name in ["stack", "index"] {
       let f = flag_field("flags", name).unwrap();
       assert!(f.shift + f.width <= 32, "{name} overflows u32");
     }

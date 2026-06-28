@@ -141,14 +141,8 @@ fn check_card(card: &CardView, card_id: u32, wants_exclusive: bool) -> Result<()
 #[cfg(test)]
 mod tests {
   use super::*;
-  use resonantdust_codec::flags::flag_bit;
   use std::collections::HashMap;
 
-  // Build flag values from the real layout (the same source card_model reads),
-  // so the tests exercise the live bit positions.
-  fn state_bit(name: &str) -> u32 {
-    1u32 << flag_bit("flags", name).unwrap()
-  }
   fn hold_stock(aspect: resonantdust_codec::aspects::StockAspect) -> u64 {
     resonantdust_codec::aspects::inc(0, aspect)
   }

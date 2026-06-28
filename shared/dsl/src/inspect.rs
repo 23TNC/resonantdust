@@ -101,11 +101,12 @@ mod tests {
 
   #[test]
   fn multi_bit_field_value_reads() {
-    // slot_claim_count is flags (shift 8, width 3); pack a 5.
-    let host = 5u32 << 8;
-    assert_eq!(card_flag_field_shape("flags", "slot_claim_count"), Some((8, 3)));
-    assert_eq!(card_flag_field_value_in("flags", host, "slot_claim_count"), Some(5));
-    assert_eq!(card_flag_field_value_any(host, 0, "slot_claim_count"), Some(5));
+    // `index` is a flags field (shift 4, width 4); pack a 5. (The hold fields
+    // that used to test this are retired — holds are op-log stock aspects now.)
+    let host = 5u32 << 4;
+    assert_eq!(card_flag_field_shape("flags", "index"), Some((4, 4)));
+    assert_eq!(card_flag_field_value_in("flags", host, "index"), Some(5));
+    assert_eq!(card_flag_field_value_any(host, 0, "index"), Some(5));
     assert_eq!(card_flag_field_value_in("flags", host, "nope"), None);
     // stock fields route to the stock host (the full u64 word).
     let stock = 3u64 << 2; // stock_1
