@@ -249,7 +249,9 @@ fn layout() -> &'static FlagsLayout {
                 max: (((1u64 << f.width) - 1) & 0xFFFF_FFFF) as u32,
             }
         };
-        let dead = bit("dead");
+        // `dead` retired from the flags word — it's an op-log stock aspect now
+        // (`aspects::stock_is_dead`); readers take `stock`. So it no longer joins
+        // state_mask (bit-diff propagation) or demote_blocking.
         let pos_need = bit("pos_need");
         let pos_want = bit("pos_want");
         let surface_locked = bit("surface_locked");
@@ -259,8 +261,8 @@ fn layout() -> &'static FlagsLayout {
             index: field("index"),
             pos_need,
             pos_want,
-            state_mask: dead | pos_need | pos_want | surface_locked | zone_born,
-            demote_blocking: dead | pos_need | pos_want,
+            state_mask: pos_need | pos_want | surface_locked | zone_born,
+            demote_blocking: pos_need | pos_want,
         }
     })
 }

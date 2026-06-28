@@ -51,7 +51,7 @@ pub fn flag_bit(field: &str, name: &str) -> Option<u8> {
     // bit 24 was `player_owned`, RETIRED — player_soul is identified by its
     // definition now (packed::is_player_soul). Free for reuse.
     ("flags", "surface_locked") => 25,
-    ("flags", "dead") => 26,
+    // bit 26 was `dead`, RETIRED — dead is an op-log stock aspect now. Free.
     ("flags", "pos_need") => 27,
     ("flags", "pos_want") => 28,
     ("flags", "zone_born") => 29,
@@ -87,7 +87,8 @@ mod tests {
 
   #[test]
   fn known_bits_and_fields() {
-    assert_eq!(flag_bit("flags", "dead"), Some(26));
+    assert_eq!(flag_bit("flags", "pos_need"), Some(27));
+    assert_eq!(flag_bit("flags", "dead"), None); // retired; op-log stock aspect now
     assert_eq!(flag_bit("flags", "player_owned"), None); // retired; bit 24 reclaimed
     assert_eq!(flag_bit("flags_bk", "position_dirty"), Some(0));
     assert_eq!(flag_bit("flags", "ghost"), None);
@@ -101,7 +102,7 @@ mod tests {
   #[test]
   fn flags_word_fits_u32() {
     // The propagating word's highest declared bit must be < 32.
-    for name in ["surface_locked", "dead", "pos_need", "pos_want", "zone_born"] {
+    for name in ["surface_locked", "pos_need", "pos_want", "zone_born"] {
       assert!(flag_bit("flags", name).unwrap() < 32);
     }
     for name in ["stack", "index"] {

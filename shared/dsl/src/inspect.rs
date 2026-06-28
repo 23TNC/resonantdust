@@ -83,18 +83,18 @@ mod tests {
 
   #[test]
   fn flag_bit_searches_both_fields() {
-    // `dead` lives in flags (bit 26); `position_dirty` in flags_bk (bit 0).
-    assert_eq!(card_flag_bit("dead"), Some(26));
+    // `pos_need` lives in flags (bit 27); `position_dirty` in flags_bk (bit 0).
+    assert_eq!(card_flag_bit("pos_need"), Some(27));
     assert_eq!(card_flag_bit("position_dirty"), Some(0));
     assert_eq!(card_flag_bit("nope"), None);
   }
 
   #[test]
   fn has_flag_routes_to_the_right_host() {
-    let dead = 1u32 << 26; // flags.dead
+    let pos_need = 1u32 << 27; // flags.pos_need
     let dirty = 1u32 << 0; // flags_bk.position_dirty
-    assert!(has_card_flag(dead, 0, "dead"));
-    assert!(!has_card_flag(0, dead, "dead"));
+    assert!(has_card_flag(pos_need, 0, "pos_need"));
+    assert!(!has_card_flag(0, pos_need, "pos_need"));
     assert!(has_card_flag(0, dirty, "position_dirty"));
     assert!(!has_card_flag(0xFFFF_FFFF, 0xFFFF_FFFF, "nope"));
   }
