@@ -13,17 +13,15 @@
 ; acquires via set_* and releases via release_*.
 
 <data_func>
-  ; Declare the shared hold/lifecycle stock on a card (`&data` passed in). For a
-  ; TILE, call this AFTER the gameplay stock so the zone-savable bottom slots stay
-  ; the terrain (pine/flora), not the holds.
+  ; Declare per-card UI stock (`&data` passed in). The holds + lifecycle
+  ; (claim/borrow/touch/pos_hold/dead/reap) are NO LONGER declared here — they're
+  ; op-log GLOBAL stock aspects (codec::aspects, fixed bits 42-63), so declaring
+  ; them as schema slots was both vestigial AND harmful: on a card with many
+  ; per-def aspects the schema grew up into the global region and a slot's default
+  ; landed on the Dead field → false `is_dead`. `pstyle` (progress-bar style) is a
+  ; real per-card aspect a recipe sets, so it stays.
   ::aspect_flags>
     pop &a set
-    3 &a.claim stock
-    3 &a.borrow stock
-    2 &a.touch.user stock
-    2 &a.touch.server stock
-    3 &a.pos_hold stock
-    3 &a.dead stock
     2 &a.pstyle stock
     0 ret
 
