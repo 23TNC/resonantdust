@@ -19,7 +19,8 @@ use resonantdust_codec::card_model::{
     is_dead, stack_branch, stack_index, Micro,
 };
 use resonantdust_codec::packed::{
-    owner_of, surface_of, with_surface, STACK_DIR_DOWN, STACK_DIR_HEX, STACK_DIR_UP,
+    owner_of, surface_of, unpack_definition, with_surface, zone_disk_cells, STACK_DIR_DOWN,
+    STACK_DIR_HEX, STACK_DIR_UP, TILE_CARD_TYPE,
 };
 use resonantdust_codec::stacking::{match_stack, StackBits, STACK_BOTTOM, STACK_HEX, STACK_TOP};
 
@@ -31,6 +32,15 @@ use crate::recipe_state::{owning_player, CardStore, CardView, WORLD_PLAYER_ID};
 pub trait StackStore: CardStore {
     fn members_of(&self, root_id: u32, now_ms: u64) -> Vec<CardView>;
 
+    /// Every live card whose `macro_zone == macro_zone`, current at `now_ms` — the
+    /// occupants of a zone, for the placement sweep ([`resolve_placement`]): loose
+    /// roots mark taken cells, and a loose root at the target cell is the stack
+    /// host. Defaults to empty (stores without a zone index don't sweep — they take
+    /// the caller's exact placement).
+    fn cards_in_zone(&self, _macro_zone: u64, _now_ms: u64) -> Vec<CardView> {
+        Vec::new()
+    }
+
     /// The tile occupying a cell `(q, r)` of zone `macro_zone`, as a virtual
     /// loose-root [`CardView`] — the would-be hex member when a card is seated
     /// there. Only `packed_definition` (the tile's def, for its stack bits) and
@@ -40,6 +50,16 @@ pub trait StackStore: CardStore {
     /// terrain — the bundle-aware client does, predicting the move.
     fn tile_at(&self, _macro_zone: u64, _q: u8, _r: u8, _now_ms: u64) -> Option<CardView> {
         None
+    }
+
+    /// Does this store track terrain, so a `None` from [`tile_at`] means the cell is
+    /// genuinely un-tiled (not merely "I don't index tiles")? The bundle-aware client
+    /// returns `true` and so rejects a loose drop onto a non-existent tile (a player
+    /// can't place past the map / inventory disk). Tile-blind stores (the shard/gate)
+    /// keep the default `false`: they don't enforce seating against the terrain, they
+    /// trust the client's resolved placement.
+    fn tracks_tiles(&self) -> bool {
+        false
     }
 }
 
@@ -132,6 +152,17 @@ pub fn plan_place<S: StackStore>(
         Placement::Loose { surface, macro_zone, q, r, x, y } => {
             let (surface, macro_zone, micro) =
                 resolve_loose(store, caller_player_id, surface, macro_zone, q, r, x, y, now_ms)?;
+            // One root per cell: a loose drop onto a cell already held by another live
+            // loose root is rejected — only one root may occupy a cell. The drop path
+            // ([`loose_root_at`]) redirects such a drop into a stack onto the occupant;
+            // this is the authority backstop so the bad state stays unrepresentable.
+            if let Some(occ) =
+                loose_root_at(store, card_id, with_surface(macro_zone, surface), q, r, now_ms)
+            {
+                return Err(format!(
+                    "place: cell ({q}, {r}) is already occupied by root card {occ}"
+                ));
+            }
             // Seating a card loose on a tile is the bidirectional drop against that
             // tile: it hosts nothing, so the only resolution is the *invert* — the
             // tile joins the source's hex stack, which requires the source to host
@@ -219,14 +250,157 @@ pub fn plan_place<S: StackStore>(
     Ok(Plan { writes })
 }
 
+/// The live loose root at cell `(q, r)` within a pre-fetched zone occupant list,
+/// ignoring `ignore` (the moving card — it may currently sit at its own target
+/// cell, which is a free slot for it, not an obstacle). The one-root-per-cell
+/// predicate shared by [`plan_place`] (reject), [`resolve_placement`] (sweep), and
+/// [`loose_root_at`] (the drop redirect).
+fn loose_root_in(occupants: &[CardView], ignore: u32, q: u8, r: u8) -> Option<&CardView> {
+    occupants.iter().find(|c| {
+        c.card_id != ignore
+            && !is_dead(c.stock)
+            && matches!(Micro::of(c.micro_location, c.flags), Micro::Loose { local_q, local_r, .. } if local_q == q && local_r == r)
+    })
+}
+
+/// The id of the live loose root occupying cell `(q, r)` of full-key `macro_zone`,
+/// ignoring `ignore`, or `None` if the cell is free. The one-root-per-cell lookup
+/// the drop path uses to redirect a loose drop onto an occupied cell into a stack
+/// onto its occupant. `None` for stores without a zone index (they take the
+/// caller's exact placement — see [`StackStore::cards_in_zone`]).
+pub fn loose_root_at<S: StackStore>(
+    store: &S,
+    ignore: u32,
+    macro_zone: u64,
+    q: u8,
+    r: u8,
+    now_ms: u64,
+) -> Option<u32> {
+    let occupants = store.cards_in_zone(macro_zone, now_ms);
+    loose_root_in(&occupants, ignore, q, r).map(|c| c.card_id)
+}
+
+/// The [`STACK_DIR_*`] a target `stack_id` (1=hex, 2=top, 3=bottom) drops in.
+fn dir_of_stack(stack: u8) -> u8 {
+    match stack {
+        STACK_HEX => STACK_DIR_HEX,
+        STACK_TOP => STACK_DIR_UP,
+        STACK_BOTTOM => STACK_DIR_DOWN,
+        _ => STACK_DIR_UP,
+    }
+}
+
+/// Resolve a placement INTENT — a `macro_zone`, a preferred loose cell `(q, r)`,
+/// and a target `stack` id (0=loose, 1=hex, 2=top, 3=bottom) — into a concrete
+/// [`Plan`] for moving `card_id`, by sweeping the `(cell × stack)` space in
+/// preference order and taking the **first candidate [`plan_place`] accepts**
+/// (`plan_place` owns all viability/index/carry/splice logic, so a blocked slot
+/// just rolls to the next candidate).
+///
+/// Preference follows the requested `stack`:
+/// - `stack == 0` (loose intent): cell is the inner loop → exhaust loose cells
+///   first, then fall back to stacking onto occupants.
+/// - `stack != 0` (stacking intent): stack id is the inner loop → exhaust stack
+///   slots at a cell first, then move to the next cell.
+///
+/// Both orderings cover the same `cell × stack` space, so a placement is found
+/// whenever any slot in the zone's disk is open. `None` when none is.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_placement<S: StackStore>(
+    store: &S,
+    card_id: u32,
+    macro_zone: u64,
+    // The preferred cell. Tried first IF it's inside the zone's disk; otherwise (an
+    // off-disk corner like an inventory's (0,0)) the sweep just walks the disk — so
+    // the placement is always a real cell, "first-free" falling out of the walk.
+    pref_q: u8,
+    pref_r: u8,
+    target_stack: u8,
+    caller_player_id: u32,
+    distance: u16,
+    now_ms: u64,
+    bits: &dyn Fn(u16) -> StackBits,
+) -> Option<Plan> {
+    let surface = surface_of(macro_zone);
+
+    // Occupancy: live loose roots index their cell; that same root is the stack
+    // host for a stacking candidate at the cell.
+    let occupants = store.cards_in_zone(macro_zone, now_ms);
+    // The loose root at a cell, ignoring the moving card itself (it may currently
+    // sit at its own preferred cell — that's a free slot for it, not an obstacle).
+    let loose_root_at = |q: u8, r: u8| -> Option<&CardView> {
+        loose_root_in(&occupants, card_id, q, r)
+    };
+
+    // Cell sweep over the zone's disk, the preferred cell FIRST when it's a real
+    // disk cell. A pref outside the disk (e.g. an inventory's off-centre (0,0)) is
+    // simply not offered — the walk finds the first valid free cell instead.
+    let disk = zone_disk_cells(macro_zone, distance);
+    let pref = (pref_q, pref_r);
+    let mut cells: Vec<(u8, u8)> = Vec::new();
+    if disk.contains(&pref) {
+        cells.push(pref);
+    }
+    for c in disk {
+        if c != pref {
+            cells.push(c);
+        }
+    }
+    // Stack sweep: the requested slot first, then the others (loose last when the
+    // intent was to stack; stacking after loose when the intent was loose).
+    let stacks: Vec<u8> = if target_stack == 0 {
+        vec![0, STACK_HEX, STACK_TOP, STACK_BOTTOM]
+    } else {
+        let mut s = vec![target_stack];
+        for o in [STACK_HEX, STACK_TOP, STACK_BOTTOM] {
+            if o != target_stack {
+                s.push(o);
+            }
+        }
+        s.push(0);
+        s
+    };
+
+    // Candidate order: loose intent sweeps cells inner; stacking intent sweeps
+    // stack slots inner.
+    let candidates: Vec<(u8, u8, u8)> = if target_stack == 0 {
+        stacks.iter().flat_map(|&s| cells.iter().map(move |&(q, r)| (q, r, s))).collect()
+    } else {
+        cells.iter().flat_map(|&(q, r)| stacks.iter().map(move |&s| (q, r, s))).collect()
+    };
+
+    for (q, r, s) in candidates {
+        let placement = if s == 0 {
+            // Loose only onto a free cell — an occupied cell isn't a loose slot.
+            if loose_root_at(q, r).is_some() {
+                continue;
+            }
+            Placement::Loose { surface, macro_zone, q, r, x: 0, y: 0 }
+        } else {
+            // Stacking needs a host loose root at the cell.
+            match loose_root_at(q, r) {
+                Some(host) if host.card_id != card_id => {
+                    Placement::Stack { parent_id: host.card_id, direction: dir_of_stack(s) }
+                }
+                _ => continue,
+            }
+        };
+        if let Ok(plan) = plan_place(store, card_id, placement, caller_player_id, now_ms, bits) {
+            return Some(plan);
+        }
+    }
+    None
+}
+
 /// Can `card_id` be seated as a loose root on the tile at cell `(q, r)` of
 /// `macro_zone` (a full zone key, surface included)? This is the bidirectional
 /// drop against the cell's tile: the tile hosts nothing, so it can only join the
 /// card's hex stack — i.e. the card must host hex (leaf-aware via [`open_stack`],
 /// the same check [`resolve_stack`]'s invert uses). An empty cell has no tile to
-/// mount, so seating is unconditional (a host-`0` card can occupy open cells —
-/// the moving-tile-card edge case). The shared rule behind both loose placement
-/// and movement onto a tile.
+/// rest on, so a non-tile card can't seat there (a player can't drop a card onto a
+/// non-existent tile); only a tile card may occupy an open cell — the moving-tile
+/// edge case, and how the system grows a surface past the map / inventory disk for
+/// overflow. The shared rule behind both loose placement and movement onto a tile.
 pub fn can_seat_on_tile<S: StackStore>(
     store: &S,
     card_id: u32,
@@ -240,7 +414,14 @@ pub fn can_seat_on_tile<S: StackStore>(
         return false;
     };
     let Some(tile) = store.tile_at(macro_zone, q, r, now_ms) else {
-        return true; // empty cell — nothing to mount
+        // No tile to rest on. A tile-blind store doesn't enforce terrain — it trusts
+        // the client's resolved placement, so seating is unconditional there. A
+        // tile-tracking store (the client) rejects a non-tile card on a genuinely
+        // empty cell (a player can't drop a card onto a non-existent tile); only a
+        // tile card itself may occupy an open cell, which is how the system grows a
+        // surface outward (seeding tiles past the map / inventory disk for overflow).
+        return !store.tracks_tiles()
+            || unpack_definition(card.packed_definition).0 == TILE_CARD_TYPE;
     };
     let source_bits = bits(card.packed_definition);
     let tile_bits = bits(tile.packed_definition);
@@ -314,7 +495,14 @@ fn carried_run<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<
 fn drag_travelers<S: StackStore>(store: &S, source: &CardView, now_ms: u64) -> Vec<CardView> {
     match Micro::of(source.micro_location, source.flags) {
         Micro::Stacked { .. } => carried_run(store, source, now_ms),
-        Micro::Loose { .. } => store.members_of(source.card_id, now_ms),
+        // A loose root carries its whole chain — minus dead members (a consumed
+        // card awaiting reap stays a chain member in data, but must not be dragged
+        // along; `carried_run` already filters dead on the member path).
+        Micro::Loose { .. } => store
+            .members_of(source.card_id, now_ms)
+            .into_iter()
+            .filter(|m| !is_dead(m.stock))
+            .collect(),
     }
 }
 
@@ -693,7 +881,9 @@ fn resolve_loose<S: StackStore>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use resonantdust_codec::packed::{with_owner, INVENTORY_LAYER, PLAYER_SOUL_PACKED, WORLD_LAYER};
+    use resonantdust_codec::packed::{
+        pack_definition, with_owner, INVENTORY_LAYER, PLAYER_SOUL_PACKED, WORLD_LAYER,
+    };
     use resonantdust_codec::stacking::DEFAULT_BITS;
     use std::collections::HashMap;
 
@@ -754,6 +944,12 @@ mod tests {
         fn tile_at(&self, _macro_zone: u64, _q: u8, _r: u8, _now: u64) -> Option<CardView> {
             self.tile.clone()
         }
+        fn tracks_tiles(&self) -> bool {
+            true // the Mock stands in for the bundle-aware (tile-enforcing) client
+        }
+        fn cards_in_zone(&self, macro_zone: u64, _now: u64) -> Vec<CardView> {
+            self.cards.values().filter(|v| v.macro_zone == macro_zone).cloned().collect()
+        }
     }
 
     const P: u32 = 7; // caller player_id
@@ -782,6 +978,28 @@ mod tests {
             .with({ let mut c = loose(1026, 1024, WORLD_LAYER, 2, 2); c.macro_zone = mz; c });
         let plan = plan_place(&store, 1026, Placement::Stack { parent_id: 1025, direction: STACK_DIR_UP }, P, 0, &|_| DEFAULT_BITS).unwrap();
         assert_eq!(plan.writes[0].micro, Micro::Stacked { root: 1025, branch: STACK_DIR_UP, index: 1 });
+    }
+
+    #[test]
+    fn drag_carry_of_a_loose_root_excludes_dead_members() {
+        use resonantdust_codec::aspects::{inc, StockAspect};
+        let mz = with_surface(0, WORLD_LAYER);
+        // root(1025) loose, a LIVE member (1027) and a DEAD one (1028, a consumed
+        // card awaiting reap that's still a chain member in data).
+        let dead = {
+            let mut c = stacked(1028, 1024, mz, 1025, STACK_DIR_UP, 1);
+            c.stock = inc(0, StockAspect::Dead);
+            c
+        };
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with({ let mut c = loose(1025, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
+            .with(stacked(1027, 1024, mz, 1025, STACK_DIR_UP, 0))
+            .with(dead);
+        let carry = drag_carry_set(&store, 1025, 0);
+        assert!(carry.contains(&1025), "the root itself is carried");
+        assert!(carry.contains(&1027), "the live member is carried");
+        assert!(!carry.contains(&1028), "a dead member must NOT be dragged along the loose root");
     }
 
     #[test]
@@ -883,6 +1101,7 @@ mod tests {
     fn loose_world_placement_lands_at_cell() {
         let store = Mock::default()
             .with(soul(1024, P))
+            .with_tile(world_tile())
             .with({ let mut c = loose(1026, 1024, WORLD_LAYER, 2, 2); c.macro_zone = with_surface(0, WORLD_LAYER); c });
         let plan = plan_place(
             &store,
@@ -890,10 +1109,32 @@ mod tests {
             Placement::Loose { surface: WORLD_LAYER, macro_zone: with_surface(0, WORLD_LAYER), q: 5, r: 6, x: 0, y: 0 },
             P,
             0,
-            &|_| DEFAULT_BITS,
+            &seat_bits,
         )
         .unwrap();
         assert_eq!(plan.writes[0].micro, Micro::Loose { local_q: 5, local_r: 6, x: 0, y: 0 });
+    }
+
+    #[test]
+    fn loose_onto_occupied_cell_rejected() {
+        // One root per cell: 1027 already sits loose at (5, 6); placing 1026 loose
+        // there must reject rather than seat a second root on the cell. (The drop
+        // path redirects this to a stack onto 1027 — see `Client::place_loose`.)
+        let mz = with_surface(0, WORLD_LAYER);
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with({ let mut c = loose(1026, 1024, WORLD_LAYER, 2, 2); c.macro_zone = mz; c })
+            .with({ let mut c = loose(1027, 1024, WORLD_LAYER, 5, 6); c.macro_zone = mz; c });
+        let err = plan_place(
+            &store,
+            1026,
+            Placement::Loose { surface: WORLD_LAYER, macro_zone: mz, q: 5, r: 6, x: 0, y: 0 },
+            P,
+            0,
+            &|_| DEFAULT_BITS,
+        )
+        .unwrap_err();
+        assert!(err.contains("already occupied by root card 1027"), "{err}");
     }
 
     #[test]
@@ -959,6 +1200,23 @@ mod tests {
         }
     }
 
+    /// A normal ground tile (def 50): hosts nothing, joins hex — the production tile
+    /// bits. A loose drop onto a cell requires its tile to be present and hex-joinable
+    /// (see [`can_seat_on_tile`]); placement-mechanics tests stand a cell up with this.
+    const WORLD_TILE: u16 = 50;
+    fn world_tile() -> CardView {
+        tile_view(WORLD_TILE)
+    }
+    /// Resolver pairing hex-hosting cards (DEFAULT) with the hex-joining ground tile,
+    /// so a normal card seats loose on the cell's tile — the production pairing.
+    fn seat_bits(p: u16) -> StackBits {
+        if p == WORLD_TILE {
+            StackBits { hosts: 0, joins: HEX }
+        } else {
+            DEFAULT_BITS
+        }
+    }
+
     #[test]
     fn loose_on_tile_requires_hex_host() {
         let mz = with_surface(0, WORLD_LAYER);
@@ -975,20 +1233,20 @@ mod tests {
     }
 
     #[test]
-    fn loose_on_empty_cell_allows_non_hex_host() {
-        // No tile at the cell (Mock reports None): a host-0 card still seats — the
-        // moving-tile-card-into-open-cell edge case.
+    fn loose_on_empty_cell_only_for_tile_cards() {
+        // No tile at the cell (Mock reports None). A non-tile card can't rest on a
+        // non-existent tile — a player can't drop a card past the map / inventory disk.
         let mz = with_surface(0, WORLD_LAYER);
+        let pl = Placement::Loose { surface: WORLD_LAYER, macro_zone: mz, q: 5, r: 5, x: 0, y: 0 };
         let store = Mock::default().with(soul(1024, P)).with(card(1400, DUST));
-        let plan = plan_place(
-            &store,
-            1400,
-            Placement::Loose { surface: WORLD_LAYER, macro_zone: mz, q: 5, r: 5, x: 0, y: 0 },
-            P,
-            0,
-            &bits_for,
-        )
-        .unwrap();
+        let err = plan_place(&store, 1400, pl, P, 0, &bits_for).unwrap_err();
+        assert!(err.contains("rest on a tile"), "{err}");
+        // A tile card itself (card_type 7) DOES seat on an open cell — that's how the
+        // system grows a surface outward to absorb inventory overflow.
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with(card(1401, pack_definition(TILE_CARD_TYPE, 1)));
+        let plan = plan_place(&store, 1401, pl, P, 0, &bits_for).unwrap();
         assert_eq!(plan.writes.len(), 1);
     }
 
@@ -1156,6 +1414,7 @@ mod tests {
         let mz = with_surface(0, WORLD_LAYER);
         let store = Mock::default()
             .with(soul(1024, P))
+            .with_tile(world_tile())
             .with({ let mut c = loose(100, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
             .with(stacked(200, 1024, mz, 100, STACK_DIR_UP, 0))
             .with(stacked(201, 1024, mz, 100, STACK_DIR_UP, 1))
@@ -1166,7 +1425,7 @@ mod tests {
             Placement::Loose { surface: WORLD_LAYER, macro_zone: with_surface(0, WORLD_LAYER), q: 5, r: 6, x: 0, y: 0 },
             P,
             0,
-            &|_| DEFAULT_BITS,
+            &seat_bits,
         )
         .unwrap();
         let m = |id: u32| plan.writes.iter().find(|w| w.card_id == id).map(|w| w.micro);
@@ -1190,6 +1449,7 @@ mod tests {
         };
         let store = Mock::default()
             .with(soul(1024, P))
+            .with_tile(world_tile())
             .with({ let mut c = loose(100, 1024, WORLD_LAYER, 1, 1); c.macro_zone = mz; c })
             .with(stacked(200, 1024, mz, 100, STACK_DIR_UP, 0))
             .with(stacked(201, 1024, mz, 100, STACK_DIR_UP, 1))
@@ -1201,7 +1461,7 @@ mod tests {
             Placement::Loose { surface: WORLD_LAYER, macro_zone: with_surface(0, WORLD_LAYER), q: 5, r: 6, x: 0, y: 0 },
             P,
             0,
-            &|_| DEFAULT_BITS,
+            &seat_bits,
         )
         .unwrap();
         let m = |id: u32| plan.writes.iter().find(|w| w.card_id == id).map(|w| w.micro);
@@ -1211,5 +1471,44 @@ mod tests {
         assert_eq!(m(202), Some(Micro::Stacked { root: 100, branch: STACK_DIR_UP, index: 0 }), "locked dust stays, index shifts");
         // corpus3 stays above dust, collapses 3→1 (dust's index + 1).
         assert_eq!(m(203), Some(Micro::Stacked { root: 100, branch: STACK_DIR_UP, index: 1 }));
+    }
+
+    // The sweep resolver: a stacking intent at a cell with a host loose root stacks
+    // onto it; a loose intent at an occupied cell skips to a free one.
+    #[test]
+    fn resolve_placement_stacks_then_falls_to_free_cell() {
+        let mz = with_surface(0, WORLD_LAYER);
+        let cell = |id: u32, q: u8, r: u8| {
+            let mut c = loose(id, 1024, WORLD_LAYER, q, r);
+            c.macro_zone = mz;
+            c
+        };
+        // soul owns a host at (1,1) and the source we'll relocate.
+        let store = Mock::default()
+            .with(soul(1024, P))
+            .with_tile(world_tile())
+            .with(cell(1025, 1, 1)) // host
+            .with(cell(1026, 5, 5)); // source
+
+        // Stacking intent at the host's cell → stacks 1026 onto 1025 (top).
+        let plan = resolve_placement(&store, 1026, mz, 1, 1, STACK_TOP, P, u16::MAX, 0, &seat_bits)
+            .expect("stack resolves");
+        let src = plan.writes.iter().find(|w| w.card_id == 1026).unwrap();
+        assert_eq!(
+            src.micro,
+            Micro::Stacked { root: 1025, branch: STACK_DIR_UP, index: 0 },
+            "stacking intent must stack the source onto the host at the preferred cell"
+        );
+
+        // Loose intent preferring the OCCUPIED host cell (1,1) → skips to a free cell.
+        let plan = resolve_placement(&store, 1026, mz, 1, 1, 0, P, u16::MAX, 0, &seat_bits)
+            .expect("loose resolves");
+        let src = plan.writes.iter().find(|w| w.card_id == 1026).unwrap();
+        match src.micro {
+            Micro::Loose { local_q, local_r, .. } => {
+                assert!((local_q, local_r) != (1, 1), "must not land loose on the occupied host cell");
+            }
+            other => panic!("loose intent must resolve loose, got {other:?}"),
+        }
     }
 }

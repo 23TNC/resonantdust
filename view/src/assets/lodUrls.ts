@@ -28,6 +28,25 @@ export const PREVIEW_LOD: LodSize = 32;
  *  feeds the lighting pass; `emissive` the additive pass. */
 export type Channel = "albedo" | "normal" | "emissive";
 
+/** Map-existence bits, mirroring `bin/art`'s `_object_maps` / the manifest's
+ *  `&maps`: which channels a stem actually has a master for. The resolver rides
+ *  them in the stem as `&m=<bits>` so the client skips channels that can't exist
+ *  (chiefly `emissive`, which has zero masters today) instead of speculatively
+ *  fetching them and eating a guaranteed 404. */
+export const MAP_ALBEDO = 1;
+export const MAP_NORMAL = 2;
+export const MAP_EMISSIVE = 4;
+
+/** The `&m=<bits>` map-existence field carried in a resolved stem. Absent (legacy
+ *  / un-migrated manifest) → all bits set, i.e. fetch every channel exactly as
+ *  before, so nothing regresses until the manifest is regenerated with `&maps`. */
+export function mapsOf(stem: string): number {
+  const q = stem.indexOf("?");
+  if (q < 0) return MAP_ALBEDO | MAP_NORMAL | MAP_EMISSIVE;
+  const m = /(?:^|&)m=([0-9]+)/.exec(stem.slice(q + 1));
+  return m ? Number(m[1]) : MAP_ALBEDO | MAP_NORMAL | MAP_EMISSIVE;
+}
+
 /** Pick the smallest LOD bucket ≥ `desiredSize`, clamped to the largest bucket. */
 export function pickLodForSize(desiredSize: number): LodSize {
   for (const lod of LOD_SIZES) {

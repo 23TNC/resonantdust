@@ -37,8 +37,11 @@ const groundLightBitGl = {
   // The quad's `aPosition` is the fragment's PANEL position — the space hot-light
   // positions are packed into (world + pan, or screen for the cursor). Carry it.
   vertex: {
-    header: /* glsl */ `out vec2 vScreen;`,
-    main: /* glsl */ `vScreen = aPosition;`,
+    // `aGridUV` is the LOGICAL grid UV (slot sx → [sx/cols,(sx+1)/cols]) — the cold-light
+    // block derives the rect slot + rect-local px from it. The padded atlas `aUV` (used by
+    // every texture sampler) is no longer evenly slot-divided, so it can't carry that math.
+    header: /* glsl */ `out vec2 vScreen; in vec2 aGridUV; out vec2 vGridUV;`,
+    main: /* glsl */ `vScreen = aPosition; vGridUV = aGridUV;`,
   },
   fragment: {
     header: /* glsl */ `
@@ -81,6 +84,7 @@ const groundLightBitGl = {
         return g != 0.0 ? g : sign(a.b - b.b);
       }
       in vec2 vScreen;
+      in vec2 vGridUV;                               // logical grid UV → rect slot + rect-local px
     `,
     main: /* glsl */ `
       vec3 nrm = outColor.rgb * 2.0 - 1.0;          // outColor = normal composite (textureBit)
@@ -103,8 +107,10 @@ const groundLightBitGl = {
       // KEEP IN SYNC with rectLightBakeShader's LIGHT_WRAP. (tweak + HMR)
       const float LIGHT_WRAP = 0.4;
       // Final exposure gain on the lit result — the "brighten" knob, applied after the
-      // light is summed (lifts ambient + cold + hot together). 1.0 = unchanged. (tweak + HMR)
-      const float EXPOSURE = 1.15;
+      // light is summed (lifts ambient + cold + hot together). 1.0 = unchanged. Back to
+      // neutral now the albedo over-darkening (flat-field divide bug) is fixed at source;
+      // raise if you still want the scene hotter. (tweak + HMR)
+      const float EXPOSURE = 1.0;
       vec4 dpx = texture(uDepth, vUV);
       // Object ⇔ the depth-blue (layer) byte is set. Standing objects bake BLUE_OBJECT (80),
       // which PIXI sRGB-converts on the tint to ≈25 in the map; ground/tiles write no depth (0).
@@ -185,8 +191,13 @@ const groundLightBitGl = {
         // data/colour textures. Positions are rect-local, so the light vector needs no pan. Both the
         // light and the fragment are rect-local → their difference is the world-space light vector.
         float cCols = uColdGrid.x, cRows = uColdGrid.y;
-        float gx = vUV.x * cCols, gy = vUV.y * cRows;
-        float csx = floor(gx), csy = floor(gy);
+        float gx = vGridUV.x * cCols, gy = vGridUV.y * cRows;  // logical grid: evenly slot-divided
+        // Clamp the slot index to the valid range. vGridUV reaches exactly 1.0 at the LAST
+        // slot's far edge — which only happens at the torus wrap — where floor would overflow
+        // to cCols/cRows (one past the grid) and read off the end of the cold data, blanking
+        // that 1px column's cold light => a dark seam down a card straddling the wrap. Interior
+        // boundaries sit mid-range and never hit it, which is why it's wrap-only.
+        float csx = min(floor(gx), cCols - 1.0), csy = min(floor(gy), cRows - 1.0);
         vec2 fragRL = vec2((gx - csx) * uColdGrid.z, (gy - csy) * uColdGrid.w);
         for (int j = 0; j < ${COLD_TEX_LIGHTS}; j++) {
           vec2 cuv = vec2((csx * ${COLD_TEX_LIGHTS}.0 + float(j) + 0.5) / (${COLD_TEX_LIGHTS}.0 * cCols), (csy + 0.5) / cRows);

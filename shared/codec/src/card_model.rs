@@ -118,6 +118,14 @@ pub fn placement_mask() -> u32 {
     l.stack.mask | l.index.mask
 }
 
+/// Bitmask of the server-position authority bits (`pos_need | pos_want`). A user
+/// move clears these — the player is overriding the server's pre-calculated /
+/// advisory position, so the row no longer carries either requirement.
+pub fn pos_mask() -> u32 {
+    let l = layout();
+    l.pos_need | l.pos_want
+}
+
 /// Bitmask of the bit-diff-propagated state bits within `flags` (`dead`,
 /// `pos_need`, `pos_want`, `surface_locked`, `player_owned`, `zone_born`). These
 /// are the only bits the module's forward bit-diff propagator carries; refcounts

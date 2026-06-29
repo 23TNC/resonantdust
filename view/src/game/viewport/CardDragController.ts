@@ -72,6 +72,9 @@ export class CardDragController {
     const ghost = new Container();
     ghost.pivot.set(global("card_width") / 2, global("body_height") / 2); // centre on cursor
     ghost.position.set(x, y);
+    // Faces join out of stack order (grabbed card first, carried run later); sort by
+    // an explicit per-face zIndex so a member never paints over its root.
+    ghost.sortableChildren = true;
     this.overlay.addChild(ghost);
 
     const grabbedFanDy = source.cardFanDy(cardId);
@@ -104,6 +107,10 @@ export class CardDragController {
     const face = new GenericCardFace(this.ctx, id);
     face.draw(packed);
     face.position.set(0, source.cardFanDy(id) - baseFanDy);
+    // Mirror the world renderer's stack depth: members fanned down (positive offset)
+    // sit in front of the root, fanned up (negative) behind — the fan offset is
+    // proportional to `stackZ`, so its sign + order match.
+    face.zIndex = Math.round(face.position.y);
     ghost.addChild(face);
   }
 
@@ -111,7 +118,7 @@ export class CardDragController {
     const drag = this.drag;
     if (!drag) return;
     this.drag = null; // stops `update` easing — the ghost freezes at the drop point
-    const { cardId, ids, source, ghost } = drag;
+    const { cardId, ids, source, ghost, grabbedFanDy } = drag;
 
     const target = this.viewports().find((v) => v.ownsHit(hit));
     if (target) {
@@ -136,9 +143,20 @@ export class CardDragController {
         moved,
         new Promise<boolean>((r) => setTimeout(() => r(false), PLACE_SETTLE_TIMEOUT_MS)),
       ]);
-      // Start the card at the drop point so it tweens from there to whatever cell the
-      // data settled on (the dropped cell on success, its origin on rejection).
-      target.seedDropPosition(cardId, x, y);
+      // Start every lifted card at the drop point so they all tween from there to
+      // whatever cells the data settled on (the dropped cells on success, their
+      // origins on rejection) — without this only the root seeds and the carried
+      // members snap back to tween in from their old data cells.
+      //
+      // Seed ALL cards at the SAME node point: a stack's members share one node
+      // position (the cell centre) and the DSL fan lives INSIDE the prims, not the
+      // node position. So the node only needs to land the grabbed card under the
+      // cursor (`y - grabbedFanDy`); each card's prims re-add its own fan. Adding
+      // `cardFanDy` here too would double the fan — the small upward "jump".
+      const seedY = y - grabbedFanDy;
+      for (const id of ids) {
+        target.seedDropPosition(id, x, seedY);
+      }
     }
     // Un-dim every lifted card; the data-driven render takes over.
     for (const id of ids) source.setCardDragging(id, false);

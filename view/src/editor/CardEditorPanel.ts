@@ -15,6 +15,7 @@ import { tilePrims } from "../game/cards/generic/drawVisuals";
 import { atlasHex } from "../game/cards/generic/atlasFills";
 import { TEX_TRANSPARENT, TEX_WHITE, type PrimList, type VisualNode } from "../game/cards/generic/visualSpec";
 import { global } from "../game/definitions/globals";
+import { worldHexRadius } from "../game/viewport/hex/hexSize";
 import { sharedContent, contentSources } from "../game/definitions/contentBoot";
 import { debug } from "../debug";
 
@@ -165,7 +166,7 @@ interface CardLight { x: number; y: number; height: number; radius: number; inte
  *  independent); `threshold` is the 0–255 emissive luma that blooms; `intensity`
  *  the add-back strength. Defaults are the module `BLOOM_*` constants; the
  *  per-sprite controls under the emissive square override them per stem. */
-interface BloomParams { threshold: number; radiusFrac: number; intensity: number }
+interface BloomParams { threshold: number; radiusFrac: number; intensity: number; tint: number }
 
 const ROW_CSS: Partial<CSSStyleDeclaration> = {
   display: "flex",
@@ -493,6 +494,13 @@ export class CardEditorPanel extends PixiPanel {
       pointerEvents: "auto",
       overflowY: "auto",
       display: "none",
+      // Match the bloom (emissive) controls: a rectangle card clamped to the
+      // diffuse preview width (see positionControls).
+      boxSizing: "border-box",
+      background: "rgba(20, 22, 30, 0.92)",
+      border: "1px solid #3a3a4a",
+      borderRadius: "4px",
+      padding: "6px",
     } satisfies Partial<CSSStyleDeclaration>);
     this.editControls.addEventListener("pointerdown", (e) => e.stopPropagation());
     this.panel.appendChild(this.editControls);
@@ -965,8 +973,15 @@ export class CardEditorPanel extends PixiPanel {
         else sprite.visible = false;
       };
       chan(this.albedoSprite, albedoSq, "albedo");
+      // The Color control tints the ALBEDO (pre-lighting), so the albedo square shows
+      // the tinted albedo — a non-destructive Pixi render multiply, the paint data
+      // underneath is untouched. Normal/emissive/diffuse are never tinted (a tinted
+      // normal would skew lighting; diffuse is the raw master source).
+      this.albedoSprite.tint = node.tint ?? 0xffffff;
       chan(this.normalSprite, normalSq, "normal");
       chan(this.emissiveSprite, emissiveSq, "emissive");
+      // Emissive square shows its glow tint (per-stem, alongside its bloom controls).
+      this.emissiveSprite.tint = stem ? this.bloomFor(stem).tint : 0xffffff;
     } else if (g && node) {
       // Non-textured prim: the small face renders it; no channel squares.
       this.diffuseSprite.visible = false;
@@ -1237,11 +1252,12 @@ export class CardEditorPanel extends PixiPanel {
     const lights = this.cardLights();
     for (const s of this.litSprites) {
       if (!s.albedoData) continue;
-      composite(s.out, s.albedoData, s.normalData, s.emissiveData, this.lightsForSprite(s, lights), LIGHT_AMBIENT, LIGHT_Y_SIGN);
-      // Per-emissive bloom (tuned by the controls under the emissive square).
+      // Per-stem emissive params (tuned by the controls under the emissive square) —
+      // its tint colours both the direct glow (composite) and the bloom halo.
       const bp = this.bloomFor(s.stem);
+      composite(s.out, s.albedoData, s.normalData, s.emissiveData, this.lightsForSprite(s, lights), LIGHT_AMBIENT, LIGHT_Y_SIGN, s.node.tint ?? 0xffffff, bp.tint);
       const radius = Math.max(2, Math.round(Math.max(s.out.width, s.out.height) * bp.radiusFrac));
-      s.bloom.apply(s.out, s.emissiveData, bp.threshold, radius, bp.intensity);
+      s.bloom.apply(s.out, s.emissiveData, bp.threshold, radius, bp.intensity, bp.tint);
       s.ctx.putImageData(s.out, 0, 0);
       s.texture.source.update();
     }
@@ -1249,7 +1265,7 @@ export class CardEditorPanel extends PixiPanel {
 
   /** The bloom params for a master stem — its override, or the module defaults. */
   private bloomFor(stem: string): BloomParams {
-    return this.bloomByStem.get(stem) ?? { threshold: BLOOM_THRESHOLD, radiusFrac: BLOOM_RADIUS_FRAC, intensity: BLOOM_INTENSITY };
+    return this.bloomByStem.get(stem) ?? { threshold: BLOOM_THRESHOLD, radiusFrac: BLOOM_RADIUS_FRAC, intensity: BLOOM_INTENSITY, tint: 0xffffff };
   }
 
   /** Patch the selected sprite's emissive bloom + relight (its sprite re-blooms
@@ -1268,23 +1284,27 @@ export class CardEditorPanel extends PixiPanel {
 
   /** Every light shading the card, in the shared CARD-PX space: the fixed (white)
    *  light, the cursor light (art tools' primary colour) while hovering, and each
-   *  `light` PRIMITIVE (already card-px). The fixed light's height/radius scale
-   *  with the primary sprite's card-px size (so its reach matches the old default);
-   *  the others carry their own. The fixed light is skippable via the Art Tools
-   *  toggle, to preview the card's own lights alone. */
+   *  `light` PRIMITIVE. The authored lights' radius is in hex-tile units (the world
+   *  unit) and is converted to card-px here (× hex radius); the fixed inspection
+   *  light is already an absolute card-px shape. The fixed light is skippable via
+   *  the Art Tools toggle, to preview the card's own lights alone. */
   private cardLights(): CardLight[] {
     const lights: CardLight[] = [];
+    // Authored light radius is in HEX-TILE units (the world's unit — see
+    // `DeferredLighting.packChunkLights`); the preview composite works in card-px,
+    // so convert tiles → card-px the same way the world does (× hex radius).
+    const hexR = worldHexRadius();
     if (this.artTools.defaultLight) {
       // The fixed inspection light is an absolute card-px shape (height 180,
       // radius 960, intensity 1.2) — tuned to read like the game's world light.
       lights.push({ x: this.fixedLight.x, y: this.fixedLight.y, height: LIGHT_HEIGHT, radius: LIGHT_RADIUS, intensity: LIGHT_INTENSITY, color: 0xffffff });
     }
     if (this.cursorLight) {
-      lights.push({ x: this.cursorLight.x, y: this.cursorLight.y, height: this.artTools.lightHeight, radius: this.artTools.lightRadius, intensity: this.artTools.lightIntensity, color: this.artTools.primary });
+      lights.push({ x: this.cursorLight.x, y: this.cursorLight.y, height: this.artTools.lightHeight, radius: this.artTools.lightRadius * hexR, intensity: this.artTools.lightIntensity, color: this.artTools.primary });
     }
     for (const n of this.workingList) {
       if (n.kind !== "light" || !n.light) continue;
-      lights.push({ x: n.pos.x, y: n.pos.y, height: n.light.height, radius: n.light.radius, intensity: n.light.intensity, color: n.tint ?? 0xffffff });
+      lights.push({ x: n.pos.x, y: n.pos.y, height: n.light.height, radius: n.light.radius * hexR, intensity: n.light.intensity, color: n.tint ?? 0xffffff });
     }
     return lights;
   }
@@ -1564,8 +1584,10 @@ export class CardEditorPanel extends PixiPanel {
     this.paintButton = e.button;
     if (tool === "bucket") { e.preventDefault(); this.bucketFill(hit); return; }
     // Brush / erase: begin a stroke on the selected layer of the hit sprite.
-    const key = `${hit.stem}|${this.artTools.layer}`;
-    if (!this.paint.has(key)) return; // that sprite's selected layer isn't editable
+    const layer = this.artTools.layer;
+    this.channelTexture(hit.stem, layer); // ensure the target layer exists (blank emissive if absent)
+    const key = `${hit.stem}|${layer}`;
+    if (!this.paint.has(key)) return; // that sprite's selected layer isn't editable (no master yet)
     e.preventDefault();
     this.painting = true;
     this.paintStem = hit.stem;
@@ -1600,7 +1622,7 @@ export class CardEditorPanel extends PixiPanel {
     const key = `${hit.stem}|${layer}`;
     if (!this.paint.has(key)) return;
     const mask = floodFill(src, hit.tx, hit.ty, this.artTools.tolerance);
-    this.paint.fillRegion(key, mask, this.strokeColor());
+    this.paint.fillRegion(key, mask, this.strokeColor(), this.artTools.opacity);
     this.refreshHistoryButtons();
     this.afterEdit();
   }
@@ -1829,17 +1851,25 @@ export class CardEditorPanel extends PixiPanel {
     Object.assign(rad, { min: "0", step: "0.5" });
     const inten = this.numberInput(bp.intensity, (v) => this.setBloom(stem, { intensity: v }));
     Object.assign(inten, { min: "0", step: "0.1" });
+    // Color: the emissive glow tint — colours the direct glow + the bloom halo, and
+    // the emissive preview square. `setBloom` relights; tint the square directly so it
+    // tracks live without a full relayout.
+    const col = this.colorInput(bp.tint, (v) => { this.setBloom(stem, { tint: v }); this.emissiveSprite.tint = v; });
     this.bloomControls.append(
       makeRow("Threshold", thr, "62px"),
       makeRow("Radius %", rad, "62px"),
       makeRow("Intensity", inten, "62px"),
+      makeRow("Color", col, "62px"),
     );
   }
 
   /** A field changed — re-render the card copy + the selection views from the
-   *  mutated working list. Does NOT rebuild controls (keeps input focus). */
+   *  mutated working list, and re-composite the lit overlays (so a `tint`/Color
+   *  edit shows on the lit sprite, not just the flat base). Does NOT rebuild
+   *  controls (keeps input focus). */
   private onEdit(): void {
     this.redrawCard();
+    this.relight();
     this.relayout();
   }
 
@@ -1886,7 +1916,9 @@ export class CardEditorPanel extends PixiPanel {
   private numberInput(value: number, onChange: (v: number) => void): HTMLInputElement {
     const input = document.createElement("input");
     input.type = "number";
-    Object.assign(input.style, INPUT_CSS, { width: "84px" });
+    // Fill the row's free width (after the label) so the control column stays within
+    // its preview-box-width container instead of overflowing past the box.
+    Object.assign(input.style, INPUT_CSS, { flex: "1 1 auto", minWidth: "0", width: "auto" });
     input.value = String(value);
     input.addEventListener("input", () => {
       const v = parseFloat(input.value);
@@ -1942,10 +1974,16 @@ export class CardEditorPanel extends PixiPanel {
     const g = this.geom;
     if (!g) return;
     const body = this.bodyRect;
-    this.editControls.style.left = `${body.left + PAD}px`;
+    // Clamp to the prim (diffuse) preview box: same x + the box's width, so the
+    // control column stays aligned under the preview instead of spanning the body.
+    const primX = g.squares.find((s) => s.kind === "prim")?.x ?? PAD;
+    this.editControls.style.left = `${body.left + primX}px`;
     this.editControls.style.top = `${body.top + g.controlsY}px`;
-    this.editControls.style.width = `${Math.max(0, body.width - 2 * PAD)}px`;
-    this.editControls.style.height = `${Math.max(0, body.height - g.controlsY - PAD)}px`;
+    this.editControls.style.width = `${g.side}px`;
+    // Hug the rows (like the bloom box) but scroll if they exceed the space left
+    // below the controls band.
+    this.editControls.style.height = "auto";
+    this.editControls.style.maxHeight = `${Math.max(0, body.height - g.controlsY - PAD)}px`;
   }
 
   /** Float the bloom controls under the emissive square (top of the controls
@@ -1959,8 +1997,9 @@ export class CardEditorPanel extends PixiPanel {
     const body = this.bodyRect;
     this.bloomControls.style.left = `${body.left + sq.x}px`;
     this.bloomControls.style.top = `${body.top + g.controlsY}px`;
-    // Wide enough for the label column (62px) + the 84px number input + padding.
-    this.bloomControls.style.width = `${Math.max(g.side, 172)}px`;
+    // Clamp to the emissive preview box width so the controls line up under it
+    // (inputs fill the row, so they fit the narrower column).
+    this.bloomControls.style.width = `${g.side}px`;
   }
 
   /** Place the side sections + save button. The 💾 sits at the top-right of the

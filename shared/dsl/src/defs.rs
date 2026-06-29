@@ -704,7 +704,7 @@ pub fn aspect_value(bundle: &Bundle, packed: u16, name: &str) -> Option<i64> {
   // aspects). `name_for_packed` keys the full packed value, matching
   // `card_render_def`.
   let def_id = bundle.card_def_id(bundle.name_for_packed(packed)?)?;
-  let view = crate::bridge::card_view(bundle, &crate::bridge::Card { def_id, stock: Vec::new(), stock_raw: 0 });
+  let view = crate::bridge::card_view(bundle, &crate::bridge::Card { def_id, stock: Vec::new(), stock_raw: 0, ..Default::default() });
   Store::with_root(view).read(&format!("data.{name}")).map(Cell::as_int)
 }
 

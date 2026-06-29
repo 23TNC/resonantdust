@@ -241,7 +241,7 @@ impl Catalog {
           _ => 1,
         }
         .max(1);
-        let ver = version_suffix(facet);
+        let ver = query_suffix(facet);
         for i in 0..len {
           for part in 0..parts {
             out.push(format!("{category}.0/{object}.0/{}.{}.{}{ver}", ids[i], counts[i], part));
@@ -645,13 +645,27 @@ fn facet_int(cell: &Cell, key: &str) -> Option<i64> {
   }
 }
 
-/// The `?v=<hash>` version suffix for a manifest object facet, or empty when the
-/// manifest carries no `&hash` (un-versioned content — the resolved stem is then
-/// the bare path, exactly as before). The suffix rides along inside the stem
-/// string and is split back off client-side when building the LOD URL, so a
-/// re-mastered object (new hash) yields a distinct URL that busts every cache.
-fn version_suffix(facet: &Cell) -> String {
-  facet_int(facet, "hash").map_or(String::new(), |h| format!("?v={h}"))
+/// The `?v=<hash>&m=<maps>` query suffix for a manifest object facet (each part
+/// emitted only when its `&hash` / `&maps` field is present; empty when neither
+/// is — bare path, exactly as before). Both ride inside the stem string and are
+/// split back off client-side: `v` makes a re-mastered object a distinct URL
+/// that busts every cache; `m` is the existing-map bitfield (bit0 albedo, bit1
+/// normal, bit2 emissive) so the client only fetches channels that might exist
+/// (no speculative emissive/normal 404s). `m` never enters the LOD URL — the
+/// client strips the whole query when building the R2 key.
+fn query_suffix(facet: &Cell) -> String {
+  let mut parts: Vec<String> = Vec::new();
+  if let Some(h) = facet_int(facet, "hash") {
+    parts.push(format!("v={h}"));
+  }
+  if let Some(m) = facet_int(facet, "maps") {
+    parts.push(format!("m={m}"));
+  }
+  if parts.is_empty() {
+    String::new()
+  } else {
+    format!("?{}", parts.join("&"))
+  }
 }
 
 /// Resolve a texture STEM `<cat>.<biome>/<obj>.<faction>/<id>.<count>.<part>` from
@@ -698,7 +712,7 @@ fn resolve_r2(
     .unwrap_or(false);
   let bdir = if bio_present { biome } else { 0 };
 
-  format!("{category}.{bdir}/{object}.{fdir}/{id}.{count}.{part}{}", version_suffix(facet))
+  format!("{category}.{bdir}/{object}.{fdir}/{id}.{count}.{part}{}", query_suffix(facet))
 }
 
 fn hash(x: i64) -> i64 {
@@ -796,7 +810,7 @@ fn head_of<'a>(map: &'a HashMap<String, Vec<Stmt>>, name: &str) -> Option<&'a Ve
 /// unresolved path strings (`slot.1.0`, `slot.2.0.owner`) — the gate resolves
 /// them against the operating set to concrete card ids. The new model is uniform:
 /// holds (claim/touch/…), lifecycle (dead/reap), gameplay (wood/…) and progress
-/// style (pstyle) are ALL `Stock` mutations on `data.*` aspects; spawning is the
+/// presence (pstatus) are ALL `Stock` mutations on `data.*` aspects; spawning is the
 /// only non-stock effect.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Effect {
@@ -804,14 +818,52 @@ pub enum Effect {
   /// (or the synthetic tile's). `delta` is the signed change for inc/dec; `set`
   /// carries the absolute value with `abs = true`.
   Stock { slot: String, aspect: String, delta: i64, abs: bool },
-  /// `<zone> $card::def &owner ^create` — spawn `def` owned by `owner` at the
-  /// macro_zone resolved from `^macro_zone(zone_owner, surface, q, r)`.
-  Create { def: String, owner: String, zone_owner: String, surface: i64, q: i64, r: i64 },
+  /// `<zone> <micro> <stack> &owner $card::def ^create` — spawn `def` owned by
+  /// `owner` with the placement INTENT `(zone, micro cell, stack id)`; the
+  /// destination resolves via the shared placement sweep at apply time.
+  Create { def: String, owner: String, zone: ZoneArg, micro: i64, stack: i64 },
+  /// `<zone> <micro> <stack> &card ^place` — relocate the bound `card` with the
+  /// same `(zone, micro, stack)` intent. The unified relocate verb (matches the
+  /// shard's `place_card`); `^move` and the old concrete-cell `^place` folded in.
+  Reposition { slot: String, zone: ZoneArg, micro: i64, stack: i64 },
 }
 
-/// One `@output` effect with the `sys.time` it's stamped at. The gate
-/// future-stamps each at `start + at` ms — acquire holds at `at = 0`, mutate +
-/// release at the action's window. Replaces the single `sys.duration` scalar.
+/// A placement zone argument — either a `^macro_zone` handle (owner resolved at
+/// translate, e.g. "the owner's inventory") or an already-concrete packed
+/// `macro_zone` (a row read like `*slot.0.0.macro_zone`). Both feed `^create` /
+/// `^place`; `translate` resolves the symbolic form to a packed value.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ZoneArg {
+  Symbolic { owner: String, surface: i64, q: i64, r: i64 },
+  Concrete(i64),
+}
+
+/// Interpret a popped `^create`/`^place` zone operand: a `^macro_zone` Map (the
+/// owner path is already resolved into it) becomes [`ZoneArg::Symbolic`]; any
+/// other value is a concrete packed `macro_zone` ([`ZoneArg::Concrete`]).
+fn zone_arg(item: Option<Item>) -> ZoneArg {
+  match item {
+    Some(Item::Cell(Cell::Map(m))) => {
+      let get = |k: &str| m.iter().find(|(kk, _)| kk == k).map(|(_, c)| c.clone());
+      ZoneArg::Symbolic {
+        owner: match get("owner") {
+          Some(Cell::Sym(s)) => s,
+          _ => String::new(),
+        },
+        surface: get("surface").map(|c| c.as_int()).unwrap_or(0),
+        q: get("q").map(|c| c.as_int()).unwrap_or(0),
+        r: get("r").map(|c| c.as_int()).unwrap_or(0),
+      }
+    }
+    Some(it) => ZoneArg::Concrete(it.int()),
+    None => ZoneArg::Concrete(0),
+  }
+}
+
+/// One `@output` effect with the `sys.time` it's stamped at. `at` is in DSL
+/// SECONDS — the gate future-stamps each at `start + at*1000` ms (see
+/// `apply::eff_ms`). Acquire holds at `at = 0`, mutate + release at the action's
+/// window. Replaces the single `sys.duration` scalar.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TimedEffect {
   pub at: i64,
@@ -836,6 +888,15 @@ pub struct Plan {
   pub matched: bool,
   pub duration: i64,
   pub effects: Vec<TimedEffect>,
+  /// The live `sys.time` effect-stamp cursor. AMBIENT execution state — it belongs
+  /// to the whole `@output` timeline, NOT to one body, so it lives here (shared
+  /// across `$data_func::`/`$functions::` calls via the `&mut plan` every `exec`
+  /// threads) rather than as an `exec` local. A function that emits an effect after
+  /// the caller advanced `sys.time` must stamp it at the CALLER's time (e.g.
+  /// `$data_func::end_bar` clearing `pstatus` at completion, not at t=0). Transient
+  /// (ends equal to `duration`), so it's not part of the serialized result.
+  #[serde(skip)]
+  pub now_t: i64,
 }
 
 /// Run a hook/function body against `store`. `host` is the system-call table
@@ -887,10 +948,10 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
   let mut call: Vec<usize> = Vec::new();
   let mut ip = 0usize;
   let mut steps = 0u32;
-  // The `sys.time` cursor (Mode::Output): every emitted effect is stamped with
-  // it; `0 &sys.time set` then `10 &sys.time set` partitions the timeline into
-  // acquire-now / mutate-and-release-at-window.
-  let mut now_t: i64 = 0;
+  // The `sys.time` cursor lives on `plan` (ambient — shared across function calls,
+  // see `Plan::now_t`), NOT here: `0 &sys.time set` then `10 &sys.time set`
+  // partitions the timeline into acquire-now / mutate-and-release-at-window, and a
+  // helper invoked at t=10 must emit at t=10.
 
   while ip < body.len() {
     steps += 1;
@@ -950,11 +1011,11 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               if taddr == "sys.time" {
                 // advance the effect-stamp cursor; the action's duration is the
                 // furthest stamp reached.
-                now_t = val.int();
-                plan.duration = plan.duration.max(now_t);
+                plan.now_t = val.int();
+                plan.duration = plan.duration.max(plan.now_t);
               } else if let Some(i) = taddr.find(".data.") {
                 plan.effects.push(TimedEffect {
-                  at: now_t,
+                  at: plan.now_t,
                   effect: Effect::Stock {
                     slot: taddr[..i].to_string(),
                     aspect: taddr[i + ".data.".len()..].to_string(),
@@ -1160,28 +1221,45 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
                 ("r".into(), Cell::Int(r)),
               ])));
             }
-            // `<zone> $card::def &owner ^create call` — emit a Create effect at the
-            // current `sys.time`; push a `created.N` handle so a following `as`
-            // (or `&h set`) can address the new card.
+            // `<q> <r> ^micro_location call` — pack a LOOSE micro_location u32 from
+            // cell coords (within-cell offset 0). Pure: the value is concrete, so
+            // it flows straight into `^place`/`^move` or a `data` read.
+            Some(Item::Sys(name)) if name == "micro_location" => {
+              let r = st.pop().map(|i| i.int()).unwrap_or(0);
+              let q = st.pop().map(|i| i.int()).unwrap_or(0);
+              let packed = resonantdust_codec::packed::pack_micro_loose(q as u8, r as u8, 0, 0);
+              st.push(Item::Val(packed as i64));
+            }
+            // `<zone> <micro> <stack> &card ^place call` — emit a Reposition effect
+            // at the current `sys.time`; relocate the bound `card` with the
+            // `(zone, micro, stack)` placement intent. Leaves 0 (drop it).
+            Some(Item::Sys(name)) if name == "place" && mode == Mode::Output => {
+              let slot = st.pop().map(|i| store.resolve_addr(i.addr())).unwrap_or_default();
+              let stack = st.pop().map(|i| i.int()).unwrap_or(0);
+              let micro = st.pop().map(|i| i.int()).unwrap_or(0);
+              let zone = zone_arg(st.pop());
+              plan.effects.push(TimedEffect {
+                at: plan.now_t,
+                effect: Effect::Reposition { slot, zone, micro, stack },
+              });
+              st.push(Item::Val(0));
+            }
+            // `<zone> <micro> <stack> &owner $card::def ^create call` — emit a Create
+            // effect at the current `sys.time`; push a `created.N` handle so a
+            // following `as` (or `&h set`) can address the new card.
             Some(Item::Sys(name)) if name == "create" && mode == Mode::Output => {
-              let owner = st.pop().map(|i| store.resolve_addr(i.addr())).unwrap_or_default();
               let def = match st.pop() { Some(Item::Sym(s)) => s, _ => String::new() };
-              let zone = match st.pop() { Some(Item::Cell(c)) => c, _ => Cell::Map(Vec::new()) };
-              let zget = |k: &str| match &zone {
-                Cell::Map(m) => m.iter().find(|(kk, _)| kk == k).map(|(_, c)| c.clone()),
-                _ => None,
-              };
-              let zone_owner = match zget("owner") { Some(Cell::Sym(s)) => s, _ => String::new() };
-              let surface = zget("surface").map(|c| c.as_int()).unwrap_or(0);
-              let q = zget("q").map(|c| c.as_int()).unwrap_or(0);
-              let r = zget("r").map(|c| c.as_int()).unwrap_or(0);
+              let owner = st.pop().map(|i| store.resolve_addr(i.addr())).unwrap_or_default();
+              let stack = st.pop().map(|i| i.int()).unwrap_or(0);
+              let micro = st.pop().map(|i| i.int()).unwrap_or(0);
+              let zone = zone_arg(st.pop());
               // The created card is `created.N` (Nth Create in the plan); push a
               // Ref handle so a following `&h set` aliases it (`&h.data.x set`
               // then folds into this Create).
               let idx = plan.effects.iter().filter(|e| matches!(&e.effect, Effect::Create { .. })).count();
               plan.effects.push(TimedEffect {
-                at: now_t,
-                effect: Effect::Create { def, owner, zone_owner, surface, q, r },
+                at: plan.now_t,
+                effect: Effect::Create { def, owner, zone, micro, stack },
               });
               st.push(Item::Cell(Cell::Ref(format!("created.{idx}"))));
             }
@@ -1218,7 +1296,7 @@ fn exec(body: &[Stmt], store: &mut Store, host: &[(String, Cell)], cat: &Catalog
               let taddr = store.resolve_addr(&addr);
               if let Some(i) = taddr.find(".data.") {
                 plan.effects.push(TimedEffect {
-                  at: now_t,
+                  at: plan.now_t,
                   effect: Effect::Stock {
                     slot: taddr[..i].to_string(),
                     aspect: taddr[i + ".data.".len()..].to_string(),
@@ -1967,7 +2045,7 @@ mod tests {
       &slot.1.0.data.dead inc
       &slot.0.0.data.wood dec
       &slot.1.0.owner 1 0 0 ^macro_zone call &mz set
-      *mz $card::corpus_dim &slot.1.0.owner ^create call drop
+      *mz 0 0 &slot.1.0.owner $card::corpus_dim ^create call drop
       &slot.1.0.data.claim dec
 ";
 
@@ -1988,7 +2066,7 @@ mod tests {
       TimedEffect { at: 0, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "claim".into(), delta: 1, abs: false } },
       TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "dead".into(), delta: 1, abs: false } },
       TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.0.0".into(), aspect: "wood".into(), delta: -1, abs: false } },
-      TimedEffect { at: 10, effect: Effect::Create { def: "card::corpus_dim".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 1, q: 0, r: 0 } },
+      TimedEffect { at: 10, effect: Effect::Create { def: "card::corpus_dim".into(), owner: "slot.1.0.owner".into(), zone: ZoneArg::Symbolic { owner: "slot.1.0.owner".into(), surface: 1, q: 0, r: 0 }, micro: 0, stack: 0 } },
       TimedEffect { at: 10, effect: Effect::Stock { slot: "slot.1.0".into(), aspect: "claim".into(), delta: -1, abs: false } },
     ]);
   }
@@ -2001,9 +2079,9 @@ mod tests {
   ::handle_test>
     @output>
       &slot.1.0.owner 0 0 0 ^macro_zone call &mz set
-      *mz $card::log &slot.1.0.owner ^create call &log set
+      *mz 0 0 &slot.1.0.owner $card::log ^create call &log set
       4 &log.data.progress set
-      *mz $card::pip &slot.1.0.owner ^create call drop
+      *mz 0 0 &slot.1.0.owner $card::pip ^create call drop
 ";
 
   #[test]
@@ -2012,10 +2090,10 @@ mod tests {
     let (c, f) = cat_funcs();
     let pp = plan_recipe(recipe_hook(&root, "handle_test", "output"), &mut Store::default(), &c, &f).unwrap();
     assert_eq!(pp.effects, vec![
-      TimedEffect { at: 0, effect: Effect::Create { def: "card::log".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 } },
+      TimedEffect { at: 0, effect: Effect::Create { def: "card::log".into(), owner: "slot.1.0.owner".into(), zone: ZoneArg::Symbolic { owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 }, micro: 0, stack: 0 } },
       // `&log.data.progress set` resolves &log → created.0
       TimedEffect { at: 0, effect: Effect::Stock { slot: "created.0".into(), aspect: "progress".into(), delta: 4, abs: true } },
-      TimedEffect { at: 0, effect: Effect::Create { def: "card::pip".into(), owner: "slot.1.0.owner".into(), zone_owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 } },
+      TimedEffect { at: 0, effect: Effect::Create { def: "card::pip".into(), owner: "slot.1.0.owner".into(), zone: ZoneArg::Symbolic { owner: "slot.1.0.owner".into(), surface: 0, q: 0, r: 0 }, micro: 0, stack: 0 } },
     ]);
   }
 }

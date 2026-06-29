@@ -1,7 +1,7 @@
 import { Buffer, BufferUsage, Container, Geometry, Graphics, Mesh, Point, Text, type FederatedPointerEvent, type Renderer, type RenderTexture } from "pixi.js";
 import type { GameContext } from "../../GameContext";
 import { DeferredLighting } from "../lighting/DeferredLighting";
-import { RectComposite, DISPLAY_INDICES, type HotEntry } from "./rects/RectComposite";
+import { RectComposite, buildDisplayIndices, type HotEntry } from "./rects/RectComposite";
 import { makeGroundShader, GroundShader, MAX_HOT_LIGHTS } from "./rects/rectDisplayShader";
 import { MAX_SHADOW_LIGHTS } from "./rects/shadowMaskShader";
 import { rectW, rectH, rectOffX, rectOffY, rectWorldX, rectWorldY } from "./rects/rectMath";
@@ -108,6 +108,10 @@ interface CardSpec {
   packed: number;
   stock: string;
   flags: number;
+  /** Active build-bar channel (`pstatus` bit index; -1 = none). Resolved to a
+   *  fill style via {@link barStyle} and fed to the progress prim via
+   *  `card_data.progress[].style`. */
+  pbit: number;
   sig: string;
 }
 
@@ -119,6 +123,16 @@ function tileSig(item: Extract<Renderable, { layer: "tile" }>): number {
  *  position tween in `tick`), so a move reads as motion instead of a teleport. */
 function cardContentSig(item: Extract<Renderable, { layer: "card" }>): string {
   return `${item.packed}|${item.stock}|${item.flags}|${item.offsetX},${item.offsetY}`;
+}
+
+/** Build-bar fill direction (matches the legacy `pstyle`: 1 = ltr, 2 = rtl; 0 =
+ *  no bar). Style is a client-side concern keyed by `visual.pstyle.<bit>` — that
+ *  visual-aspect value store isn't implemented yet, so every active channel
+ *  defaults to ltr. `bit < 0` (no active bar) → 0. Wire `visual.pstyle.N` here
+ *  when visual aspects land; presence/timing already come from the `p*` window. */
+const STYLE_LTR = 1;
+function barStyle(_packed: number, bit: number): number {
+  return bit >= 0 ? STYLE_LTR : 0;
 }
 
 /** Per-frame easing factor for the card position tween (fraction of the
@@ -183,16 +197,25 @@ export class WorldRenderer extends LayoutNode {
    *  composites and applies the HOT (dynamic) lights live each frame. BELOW `panLayer`
    *  so objects/cards draw over it. */
   private readonly groundShader: GroundShader = makeGroundShader();
-  /** Display mesh: up to 4 quads (16 verts) splitting the window at the torus wrap,
-   *  so no quad samples across the seam. `fillDisplay` rewrites pos/uv each frame. */
-  private readonly groundPosBuf = new Buffer({ data: new Float32Array(32), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
-  private readonly groundUvBuf = new Buffer({ data: new Float32Array(32), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  /** Display mesh: ONE quad per resident world rect (`RectComposite.displayQuadCount`),
+   *  each sampling only its own padded-atlas slot — no quad samples across a slot boundary,
+   *  so neither the fractional-`rectW` column seam nor the torus-wrap seam appears. The
+   *  buffers grow to the quad count on resize ({@link ensureGroundGeometry}); `fillDisplay`
+   *  rewrites pos/uv/gridUv each frame. */
+  private displayQuads = 0;
+  private readonly groundPosBuf = new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  private readonly groundUvBuf = new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  /** Logical grid UV (slot sx → [sx/cols,(sx+1)/cols]) — the shader's cold-light block derives
+   *  the rect slot + rect-local px from it (the padded `aUV` is no longer evenly slot-divided). */
+  private readonly groundGridUvBuf = new Buffer({ data: new Float32Array(8), usage: BufferUsage.VERTEX | BufferUsage.COPY_DST });
+  private readonly groundIndexBuf = new Buffer({ data: buildDisplayIndices(1), usage: BufferUsage.INDEX | BufferUsage.COPY_DST });
   private readonly groundGeo = new Geometry({
     attributes: {
       aPosition: { buffer: this.groundPosBuf, format: "float32x2" },
       aUV: { buffer: this.groundUvBuf, format: "float32x2" },
+      aGridUV: { buffer: this.groundGridUvBuf, format: "float32x2" },
     },
-    indexBuffer: new Buffer({ data: DISPLAY_INDICES.slice(), usage: BufferUsage.INDEX | BufferUsage.COPY_DST }),
+    indexBuffer: this.groundIndexBuf,
   });
   private readonly groundMesh = new Mesh({ geometry: this.groundGeo, shader: this.groundShader });
   /** HOT (dynamic) lights packed into the ground shader each frame. [0] is the cursor
@@ -225,6 +248,16 @@ export class WorldRenderer extends LayoutNode {
 
   /** Selection highlight, drawn over the selected card's footprint. */
   private readonly selectionGfx = new Graphics();
+  /** Debug overlay (gated on `debug.showInfo`): a hex outline over every cell whose
+   *  tile has been promoted to a real tile-card — so you can SEE when/where the
+   *  engine spawns a card for a synthetic tile (holds + the live decrement land on
+   *  it). Redrawn each `tick` like {@link selectionGfx}. */
+  private readonly cardBackedGfx = new Graphics();
+  /** Cell keys (`"q,r"`) whose tile is currently card-backed, per the render feed's
+   *  `cardBacked` flag. Tracked apart from `desiredTiles` because that map only
+   *  updates on a content-sig change, while this flag can flip with the stock held
+   *  constant. Maintained on every batch + pruned by {@link dropAbsent}. */
+  private readonly cardBackedTiles = new Set<string>();
   /** `?rectview` debug overlay: the x/y rectangle grid (red), drawn in world space
    *  so it pans with the world — to eyeball rect alignment against the hexes. */
   private readonly rectGrid = new Graphics();
@@ -250,12 +283,14 @@ export class WorldRenderer extends LayoutNode {
   private readonly cardQueue: number[] = [];
   private readonly queuedTiles = new Set<string>();
   private readonly queuedCards = new Set<number>();
-  /** Live progress-bar windows per card, refreshed each batch and interpolated
-   *  with the local clock between batches (see {@link fillFraction}). `pt/pr` =
-   *  build window, `qt/qr` = queue window, `at` = `performance.now()` at receipt. */
+  /** Live progress-bar windows per card (see {@link fillFraction}). `pStart/pEnd` =
+   *  build window as ABSOLUTE server-ms bounds (filled against the disciplined
+   *  server clock, so the bar tracks the row promotion); `qt/qr` = queue window as a
+   *  perf countdown with `at` = `performance.now()` at receipt (the client-side
+   *  pre-fire debounce). Refreshed each batch; both interpolate between batches. */
   private readonly progressTimings = new Map<
     number,
-    { pt: number; pr: number; qt: number; qr: number; at: number }
+    { pStart: number; pEnd: number; qt: number; qr: number; at: number }
   >();
   private animating = false;
   /** Monotonic id source for tile ground entries in the rect composite's index. */
@@ -296,7 +331,7 @@ export class WorldRenderer extends LayoutNode {
       // the vector), skipped where a prim has none so the flat-up clear (+Z) shows.
       { name: "normal", texOf: (s) => s.normalTexture ?? null, clearColor: [0.5, 0.5, 1, 1], whiteTint: true },
     ]);
-    this.panLayer.addChild(this.cardLayer, this.selectionGfx, this.rectGrid);
+    this.panLayer.addChild(this.cardLayer, this.selectionGfx, this.cardBackedGfx, this.rectGrid);
     // Ground is the shader-displayed albedo composite, BELOW `panLayer` so
     // objects/cards draw over it.
     this.container.addChild(this.groundMesh, this.panLayer);
@@ -616,6 +651,10 @@ export class WorldRenderer extends LayoutNode {
       if (item.layer === "tile") {
         const key = `${item.q},${item.r}`;
         this.presentTiles.add(key);
+        // Card-backed flag flips independently of the tile's content sig (stock can
+        // hold constant), so track it every batch — not gated on the rebuild below.
+        if (item.cardBacked) this.cardBackedTiles.add(key);
+        else this.cardBackedTiles.delete(key);
         const sig = tileSig(item);
         const node = this.tiles.get(key);
         if (!node || node.sig !== sig) {
@@ -631,11 +670,12 @@ export class WorldRenderer extends LayoutNode {
         // the bar interpolates between batches). An active window keeps the settle
         // loop alive — a queue bar appears without a content rebuild, so it would
         // otherwise never animate.
-        const pt = item.pTotalMs ?? 0;
+        const pStart = item.pStartMs ?? 0;
+        const pEnd = item.pEndMs ?? 0;
         const qt = item.qTotalMs ?? 0;
-        if (pt > 0 || qt > 0) {
+        if (pEnd > pStart || qt > 0) {
           this.progressTimings.set(item.cardId, {
-            pt, pr: item.pRemainingMs ?? 0, qt, qr: item.qRemainingMs ?? 0, at: performance.now(),
+            pStart, pEnd, qt, qr: item.qRemainingMs ?? 0, at: performance.now(),
           });
           this.animating = true;
         } else {
@@ -647,7 +687,7 @@ export class WorldRenderer extends LayoutNode {
         // position tween in `tick` reads each frame.
         this.desiredCards.set(item.cardId, {
           q: item.q, r: item.r, offsetX: item.offsetX, offsetY: item.offsetY,
-          packed: item.packed, stock: item.stock, flags: item.flags, sig,
+          packed: item.packed, stock: item.stock, flags: item.flags, pbit: item.pbit ?? -1, sig,
         });
         // Rebuild ONLY when the visual content changed (or the card is new). A
         // pure `(q, r)` move keeps the node and glides it via the tween — no
@@ -672,6 +712,7 @@ export class WorldRenderer extends LayoutNode {
       node.bg.destroy();
       this.tiles.delete(key);
       this.desiredTiles.delete(key);
+      this.cardBackedTiles.delete(key);
     }
     for (const [id, node] of this.cards) {
       if (this.presentCards.has(id)) continue;
@@ -744,6 +785,7 @@ export class WorldRenderer extends LayoutNode {
       this.animating = active;
     }
     this.drawSelection();
+    this.drawCardBacked();
 
     // Apply any LOD upgrades that landed since last frame (coalesced). A tile's
     // ground texture swapping (64px → ideal LOD) needs its rectangles re-baked.
@@ -803,15 +845,34 @@ export class WorldRenderer extends LayoutNode {
     this.albedo.bakeHotPrims(renderer, hot);
   }
 
+  /** Grow the display buffers to `quads` (one quad per resident rect): 4 verts × 2 floats
+   *  each for pos/uv/gridUv, 6 indices each. PIXI reallocates the GPU buffer on a length
+   *  change; only fires when the panel resizes (the quad count is otherwise stable). */
+  private ensureGroundGeometry(quads: number): void {
+    if (quads === this.displayQuads || quads <= 0) return;
+    this.displayQuads = quads;
+    this.groundPosBuf.data = new Float32Array(quads * 8);
+    this.groundUvBuf.data = new Float32Array(quads * 8);
+    this.groundGridUvBuf.data = new Float32Array(quads * 8);
+    this.groundIndexBuf.data = buildDisplayIndices(quads);
+  }
+
   private updateGroundMesh(renderer: Renderer, panX: number, panY: number): void {
     if (!this.albedo.ready) return;
     const alb = this.albedo.channelComposite("albedo");
     const nrm = this.albedo.channelComposite("normal");
     if (!alb || !nrm) return;
-    // Rebuild the ≤4 seam-split quads for this pan, then point at both G-buffers.
-    this.albedo.fillDisplay(panX, panY, this.groundPosBuf.data as Float32Array, this.groundUvBuf.data as Float32Array);
+    // Size the display buffers to one quad per resident rect, then rebuild them for this pan.
+    this.ensureGroundGeometry(this.albedo.displayQuadCount);
+    this.albedo.fillDisplay(
+      panX, panY,
+      this.groundPosBuf.data as Float32Array,
+      this.groundUvBuf.data as Float32Array,
+      this.groundGridUvBuf.data as Float32Array,
+    );
     this.groundPosBuf.update();
     this.groundUvBuf.update();
+    this.groundGridUvBuf.update();
     this.groundShader.albedo = alb;
     this.groundShader.normal = nrm;
     const lm = this.albedo.lightmapTexture;
@@ -987,6 +1048,26 @@ export class WorldRenderer extends LayoutNode {
     }
   }
 
+  /** Debug overlay: trace a hex outline over every CARD-BACKED cell (a tile the
+   *  engine promoted to a real tile-card). Gated on `debug.showInfo` — off → the
+   *  layer stays cleared. Redrawn each `tick` so it pans with the world and tracks
+   *  cells as tile-cards spawn (a `cut_tree`) / demote (GC fold-back). Magenta, to
+   *  read apart from the yellow selection outline. */
+  private drawCardBacked(): void {
+    this.cardBackedGfx.clear();
+    if (!debug.showInfo) return;
+    this.cardBackedGfx.zIndex = 1e9 - 1; // just under the selection outline
+    const r = worldHexRadius();
+    for (const key of this.cardBackedTiles) {
+      if (!this.tiles.has(key)) continue; // only cells actually built/visible
+      const [q, qr] = key.split(",");
+      const c = this.grid.cellToPixel(Number(q), Number(qr));
+      this.cardBackedGfx
+        .poly(hexPoints(c.x, c.y, r))
+        .stroke({ color: 0xff33cc, width: 2, alpha: 0.9 });
+    }
+  }
+
 
   private buildTile(key: string, spec: TileSpec): void {
     const center = this.grid.cellToPixel(spec.q, spec.r);
@@ -1039,18 +1120,30 @@ export class WorldRenderer extends LayoutNode {
     this.albedo.setTilePrims(node.primId, [node.bg, ...node.prims.litSprites()]);
   }
 
-  /** Live progress fraction for a tracked card, interpolated from the last
-   *  mirrored window with the local clock so the bar advances smoothly between
-   *  worker batches. `queue` selects the pre-fire debounce window (`source = 1`)
-   *  over the build window (`source = 0`). Returns `< 0` when there's no active
-   *  window, so the prim hides. */
+  /** Live progress fraction for a tracked card. Returns `< 0` when there's no
+   *  active window, so the prim hides.
+   *
+   *  `queue = true` (the pre-fire debounce, `source = 1`): a perf countdown from
+   *  the batch's `(qr, at)` mirror — purely client-side, no server time involved.
+   *
+   *  `queue = false` (the build bar, `source = 0`): filled against the disciplined
+   *  server clock between `[pStart, pEnd]` (absolute server-ms). This is the SAME
+   *  clock the core promotes the completion row on, re-anchored every 50ms pump, so
+   *  the bar reaches full exactly as the soul/move promotes — not a one-shot
+   *  countdown that drifts as `client_delay` decays over the window. */
   private fillFraction(cardId: number, queue: boolean): number {
     const t = this.progressTimings.get(cardId);
     if (!t) return -1;
-    const total = queue ? t.qt : t.pt;
+    if (queue) {
+      if (t.qt <= 0) return -1;
+      const remaining = t.qr - (performance.now() - t.at);
+      return Math.max(0, Math.min(1, 1 - remaining / t.qt));
+    }
+    const total = t.pEnd - t.pStart;
     if (total <= 0) return -1;
-    const remaining = (queue ? t.qr : t.pr) - (performance.now() - t.at);
-    return Math.max(0, Math.min(1, 1 - remaining / total));
+    const now = this.gctx.client.serverNowMs();
+    if (now === null) return -1; // clock not yet synced → no meaningful build bar
+    return Math.max(0, Math.min(1, (now - t.pStart) / total));
   }
 
   private buildCard(id: number, spec: CardSpec): void {
@@ -1083,8 +1176,10 @@ export class WorldRenderer extends LayoutNode {
       // Self-handle: `*d.progress.0.id` resolves to this card's id, which the
       // progress prim passes back as `target`; the live fraction comes from the
       // mirrored timing window (see `fillFraction`), not from this record. A bar
-      // tracking another row would carry that row's id here instead.
-      progress: [{ id }],
+      // tracking another row would carry that row's id here instead. `style` is
+      // the fill direction for the active `pstatus` channel (`*d.progress.0.style`
+      // reads it; default ltr); the bar's PRESENCE is gated by the timing window.
+      progress: [{ id, style: barStyle(spec.packed, spec.pbit) }],
     };
     const prims = drawVisuals(spec.packed, { card_data: host }, "init");
 

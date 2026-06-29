@@ -101,10 +101,11 @@ export class ArtToolsPanel {
   /** Which channel paints target. More to come (e.g. emissive). */
   layer: ArtLayer = "albedo";
 
-  // Light tool — the variables a placed/cursor light gets (card px; intensity
-  // unitless). The light's colour is the primary swatch.
+  // Light tool — the variables a placed/cursor light gets. Height is card px;
+  // radius is in HEX-TILE units (the world's unit, so the preview matches the
+  // game); intensity is unitless. The light's colour is the primary swatch.
   lightHeight = 50;
-  lightRadius = 128;
+  lightRadius = 1.5;
   lightIntensity = 1.3;
   /** Whether the preview's default (fixed white) inspection light is active.
    *  Unchecking it previews the card's OWN lights alone. */
@@ -178,9 +179,10 @@ export class ArtToolsPanel {
     const hardInput = numberField(Math.round(this.hardness * 100), 0, (v) => { this.hardness = clamp01(v / 100); }, 100);
     this.addToolRow("Hardness", hardInput, PAINT);
 
-    // Opacity — 0–100% mapped to 0–1 (translucent build-up → solid).
+    // Opacity — 0–100% mapped to 0–1 (translucent build-up → solid). The bucket
+    // uses it as the fill's flat alpha.
     const opacityInput = numberField(Math.round(this.opacity * 100), 0, (v) => { this.opacity = clamp01(v / 100); }, 100);
-    this.addToolRow("Opacity", opacityInput, PAINT);
+    this.addToolRow("Opacity", opacityInput, [...PAINT, "bucket"]);
 
     // Tolerance — paint-bucket fill spread, 0–255 per channel.
     const tolInput = numberField(this.tolerance, 0, (v) => { this.tolerance = Math.min(255, v); }, 255);
@@ -192,11 +194,11 @@ export class ArtToolsPanel {
     });
     this.addToolRow("Layer", layerSel, ["brush", "erase", "bucket"]);
 
-    // Light — the variables a placed/cursor light gets (height/radius in card px,
-    // intensity unitless; colour is the primary swatch).
+    // Light — the variables a placed/cursor light gets (height in card px, radius
+    // in hex-tile units, intensity unitless; colour is the primary swatch).
     const heightInput = numberField(this.lightHeight, 0, (v) => { this.lightHeight = v; });
     this.addToolRow("Height", heightInput, ["light"]);
-    const radiusInput = numberField(this.lightRadius, 0, (v) => { this.lightRadius = v; });
+    const radiusInput = floatField(this.lightRadius, 0, (v) => { this.lightRadius = v; });
     this.addToolRow("Radius", radiusInput, ["light"]);
     const intensityInput = floatField(this.lightIntensity, 0, (v) => { this.lightIntensity = v; });
     this.addToolRow("Intensity", intensityInput, ["light"]);

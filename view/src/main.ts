@@ -71,7 +71,7 @@ async function main(): Promise<void> {
   // textures — curl 200s but the browser won't upload them to a GL texture.
   const TEXTURE_BASE =
     import.meta.env.VITE_TEXTURE_BASE ??
-    "https://pub-1e16a0e8062e4775a4368f0271a37496.r2.dev";
+    "https://r2.resonantdust.com";
   await Assets.init({ basePath: TEXTURE_BASE });
 
   // Content-shipped panel layout defaults — positions / sizes / toggle states
@@ -153,6 +153,9 @@ async function main(): Promise<void> {
   // swaps `Content`/`Locales`, and fires `onContentReloaded` (DefinitionManager /
   // globals / each WorldRenderer rebuild). Session-long; no teardown needed.
   client.onContentChanged(() => {
+    // A new manifest may have added masters that previously 404'd — let the
+    // texture loader re-probe them (mirrors the gate's absent-cache flush).
+    lodTextures.clearAbsent();
     void reloadContent();
   });
 

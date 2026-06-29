@@ -41,7 +41,7 @@
       "flora &object set
       128 &size set
       50 60 &scale range
-      50 60 &anchor vec2
+      50 70 &anchor vec2
 
   ::soul>
     @define>

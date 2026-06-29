@@ -12,8 +12,6 @@
         requisite &data.type set
         2 &data.fuel set
         2 &data.wood set
-        14 &data.stack_hosts set
-        6 &data.stack_joins set
 
 
   ::stick>

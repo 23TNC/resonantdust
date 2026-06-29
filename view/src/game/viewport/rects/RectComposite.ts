@@ -8,7 +8,7 @@ import {
   SHADOW_DBL_CAP, SHADOW_NORTH_STRETCH, SHADOW_MAX_LEN, SHADOW_MIN_Z, type ShadowMaskShader,
 } from "./shadowMaskShader";
 import { makeWarmCombineShader, makeWarmQuadGeometry, type WarmCombineShader } from "./warmCombineShader";
-import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, type RectRange } from "./rectMath";
+import { mod, rectH, rectOffX, rectOffY, rectsForAABB, rectW, rectWorldX, rectWorldY, RECT_PAD, rectSlotPW, rectSlotPH, type RectRange } from "./rectMath";
 import { makeLightBakeShader, MAX_COLD_LIGHTS, type LightBakeShader } from "./rectLightBakeShader";
 import { makeObjectDepthShader, makeDepthQuadGeometry, setQuadDepth, BLUE_OBJECT, BLUE_ROOT, type ObjectDepthShader } from "../../lighting/depthShaders";
 import type { LightCore } from "../../lighting/lights";
@@ -89,6 +89,16 @@ interface ChannelState extends ChannelSpec {
 interface PrimEntry {
   sprite: IndexedSprite;
   range: RectRange;
+  /** The silhouette stem this prim cast its shadow from, captured at add/refresh
+   *  (undefined for a flat ground fill). A reconciler slot can swap the stem — or
+   *  demote a caster to ground — WITHOUT moving the footprint; comparing against
+   *  this on refresh is the only signal that the shadow reach must re-bake. */
+  stem: string | undefined;
+  /** The rectangles this prim's SHADOW can reach (for cold-light invalidation),
+   *  or null when it casts none. Captured at add/refresh time so removal can
+   *  invalidate the reach WITHOUT reading the sprite — which the caller may have
+   *  already destroyed (a dropped tile prim) by the time {@link removePrim} runs. */
+  reach: RectRange | null;
 }
 
 /**
@@ -312,55 +322,54 @@ export class RectComposite {
   /** True once the window has been aimed + sized (geometry can be filled). */
   get ready(): boolean { return this.cols > 0 && this.channels[0]?.composite != null; }
 
+  /** Number of display quads {@link fillDisplay} emits — ONE per resident world rect.
+   *  The renderer sizes its vertex/index buffers from this. */
+  get displayQuadCount(): number { return this.cols * this.rows; }
+
   /**
-   * Fill the display mesh: **up to 4 quads** that tile the resident window and
-   * split it at the torus wrap, so each quad samples a CONTIGUOUS run of composite
-   * slots (never across the seam — that's the smear fix). `pos`/`uv` are 16-vertex
-   * (4 quads × 4) Float32Arrays; quads with no extent (no wrap on that axis) come
-   * out degenerate (zero-area → nothing drawn). Indices are static (see
-   * {@link DISPLAY_INDICES}).
+   * Fill the display mesh: **one quad per resident world rect** (`cols × rows` quads).
+   * Each quad maps its world rect directly to its OWN padded-atlas slot and samples only
+   * that slot's gutter-protected interior — the renderer never samples across a slot
+   * boundary, so neither the fractional-`rectW` column seam nor the torus-wrap seam can
+   * appear (this subsumes the old ≤4-quad seam split). `pos`/`uv`/`gridUv` are
+   * `displayQuadCount·4`-vertex Float32Arrays (the renderer reallocates them on resize).
    *
-   * For each axis the window `[win, win+count)` splits at the first slot-0 rollover:
-   * piece 0 = the slots from the window start up to the wrap, piece 1 = slots
-   * `[0, s0)` after it. UVs sit in the VALID slot region (cols·W of the padded RT),
-   * inset a half-texel at the composite's outer edges so bilinear can't reach the
-   * unused padding.
+   * - `pos`   — world quad `(wc·W, wr·H)`+pan, size `W×H` (TRUE pitch → hexes at true
+   *             positions; abutting quads meet exactly).
+   * - `uv`    — the slot's INTERIOR atlas region `[ix, ix+W]` (`ix = sx·PW + PAD`).
+   *             Bilinear at the edges reaches ≤½ texel into the gutter, which holds valid
+   *             neighbour bleed.
+   * - `gridUv`— the LOGICAL grid UV (`sx/cols … (sx+1)/cols`); the shader's cold-light
+   *             block derives the rect slot + rect-local px from it (the padded `uv` is no
+   *             longer evenly slot-divided).
    */
-  fillDisplay(panX: number, panY: number, pos: Float32Array, uv: Float32Array): void {
+  fillDisplay(panX: number, panY: number, pos: Float32Array, uv: Float32Array, gridUv: Float32Array): void {
     const W = rectW();
     const H = rectH();
-    const cw = Math.ceil(this.cols * W);
-    const chh = Math.ceil(this.rows * H);
-    const s0 = mod(this.winCol, this.cols);
-    const t0 = mod(this.winRow, this.rows);
-    const hx = 0.5 / cw;
-    const hy = 0.5 / chh;
-    // axis pieces: world range [a0,a1) → slot range [s0,s1)
-    const xs = [
-      { a0: this.winCol, a1: this.winCol + (this.cols - s0), s0, s1: this.cols },
-      { a0: this.winCol + (this.cols - s0), a1: this.winCol + this.cols, s0: 0, s1: s0 },
-    ];
-    const ys = [
-      { a0: this.winRow, a1: this.winRow + (this.rows - t0), s0: t0, s1: this.rows },
-      { a0: this.winRow + (this.rows - t0), a1: this.winRow + this.rows, s0: 0, s1: t0 },
-    ];
-    let v = 0;
-    for (const x of xs) {
-      for (const y of ys) {
-        const x0 = x.a0 * W + panX, x1 = x.a1 * W + panX;
-        const y0 = y.a0 * H + panY, y1 = y.a1 * H + panY;
-        let u0 = (x.s0 * W) / cw, u1 = (x.s1 * W) / cw;
-        let p0 = (y.s0 * H) / chh, p1 = (y.s1 * H) / chh;
-        if (x.s0 === 0) u0 += hx;            // composite left edge
-        if (x.s1 === this.cols) u1 -= hx;    // composite right edge (padding past here)
-        if (y.s0 === 0) p0 += hy;            // composite top edge
-        if (y.s1 === this.rows) p1 -= hy;    // composite bottom edge
-        const b = v * 2;
+    const PW = rectSlotPW();
+    const PH = rectSlotPH();
+    const cw = this.cols * PW;
+    const chh = this.rows * PH;
+    let b = 0;
+    for (let wc = this.winCol; wc < this.winCol + this.cols; wc++) {
+      const sx = mod(wc, this.cols);
+      const x0 = wc * W + panX, x1 = x0 + W;
+      const ix = sx * PW + RECT_PAD;        // interior atlas-px origin
+      const u0 = ix / cw, u1 = (ix + W) / cw;
+      const gx0 = sx / this.cols, gx1 = (sx + 1) / this.cols;
+      for (let wr = this.winRow; wr < this.winRow + this.rows; wr++) {
+        const sy = mod(wr, this.rows);
+        const y0 = wr * H + panY, y1 = y0 + H;
+        const iy = sy * PH + RECT_PAD;
+        const p0 = iy / chh, p1 = (iy + H) / chh;
+        const gy0 = sy / this.rows, gy1 = (sy + 1) / this.rows;
         pos[b] = x0; pos[b + 1] = y0; pos[b + 2] = x1; pos[b + 3] = y0;
         pos[b + 4] = x1; pos[b + 5] = y1; pos[b + 6] = x0; pos[b + 7] = y1;
         uv[b] = u0; uv[b + 1] = p0; uv[b + 2] = u1; uv[b + 3] = p0;
         uv[b + 4] = u1; uv[b + 5] = p1; uv[b + 6] = u0; uv[b + 7] = p1;
-        v += 4;
+        gridUv[b] = gx0; gridUv[b + 1] = gy0; gridUv[b + 2] = gx1; gridUv[b + 3] = gy0;
+        gridUv[b + 4] = gx1; gridUv[b + 5] = gy1; gridUv[b + 6] = gx0; gridUv[b + 7] = gy1;
+        b += 8;
       }
     }
   }
@@ -423,11 +432,15 @@ export class RectComposite {
     this.coldColorTex = coldTex(this.coldTexColor);
     this.coldTexDirty = true;
     const res = renderer.resolution;
-    const cw = Math.ceil(cols * rectW());
-    const ch = Math.ceil(rows * rectH());
+    // Padded atlas: each slot is PW×PH (interior + a RECT_PAD gutter on every side), placed
+    // at the INTEGER atlas position sx·PW / sy·PH — no fractional blit, no ceil(cols·W) drift.
+    const PW = rectSlotPW();
+    const PH = rectSlotPH();
+    const cw = cols * PW;
+    const ch = rows * PH;
     this.scratchRT?.destroy(true);
     this.scratchTex?.destroy();
-    this.scratchRT = RenderTexture.create({ width: Math.ceil(rectW()), height: Math.ceil(rectH()), resolution: res });
+    this.scratchRT = RenderTexture.create({ width: PW, height: PH, resolution: res });
     this.scratchTex = new Texture({ source: this.scratchRT.source, dynamic: true });
     // Per channel: a fixed cols×rows-slot composite (the display shader samples it).
     for (const c of this.channels) {
@@ -463,10 +476,10 @@ export class RectComposite {
     // card lost the compare in that 1px sliver and the object's dark edge bled through as an outline.
     this.depthRT.source.scaleMode = "nearest";
     renderer.render({ container: this.empty, target: this.depthRT, clear: true, clearColor: [0, 0, 0, 1] });
-    // Light-bake quad is rect-local (0..W,0..H); placed at each slot by a transform.
-    const W = rectW();
-    const H = rectH();
-    (this.lightBakePos.data as Float32Array).set([0, 0, W, 0, W, H, 0, H]);
+    // Light-bake quad covers the FULL slot (0..PW, 0..PH) — gutter included — so the
+    // lightmap carries the bleed display bilinear needs. `vLocal` is slot-local px; the
+    // shader's world = (rectWorld − PAD) + vLocal (set in bakeLightRect).
+    (this.lightBakePos.data as Float32Array).set([0, 0, PW, 0, PW, PH, 0, PH]);
     this.lightBakePos.update();
     this.aimed = false; // recenter re-aims + dirties the whole window
     this.dirty.clear();
@@ -739,9 +752,11 @@ export class RectComposite {
   // ── prim index ───────────────────────────────────────────────────────────────
   private addPrim(id: number, sprite: IndexedSprite): void {
     const range = this.tightRange(sprite);
-    this.prims.set(id, { sprite, range });
+    const reach = this.casterReach(sprite);
+    this.prims.set(id, { sprite, range, reach, stem: sprite.stem });
     this.linkRange(id, range);
     this.dirtyRange(range);
+    this.dirtyReach(reach); // a new shadow caster → re-bake the cold light it now shadows
   }
 
   private removePrim(id: number): void {
@@ -749,6 +764,7 @@ export class RectComposite {
     if (!e) return;
     this.unlinkRange(id, e.range);
     this.dirtyRange(e.range);
+    this.dirtyReach(e.reach); // a removed caster (a cut tree) → un-shadow the cold light north of it
     this.prims.delete(id);
   }
 
@@ -759,13 +775,58 @@ export class RectComposite {
       return;
     }
     const range = this.tightRange(sprite);
-    if (!sameRange(range, e.range)) {
-      this.unlinkRange(id, e.range);
-      this.dirtyRange(e.range);
-      e.range = range;
-      this.linkRange(id, range);
+    const rangeChanged = !sameRange(range, e.range);
+    // A reused reconciler slot can swap the prim's silhouette — or demote a caster
+    // to a flat ground fill (stem → undefined) — WITHOUT moving its footprint. The
+    // albedo re-bakes via dirtyRange below, but the cold-shadow REACH only re-bakes
+    // on a dirtyReach, so a stem change at an unchanged range would otherwise strand
+    // the OLD shadow forever (a tree felled by a stock change keeps its shadow).
+    const stemChanged = sprite.stem !== e.stem;
+    if (rangeChanged || stemChanged) {
+      if (rangeChanged) {
+        this.unlinkRange(id, e.range);
+        this.dirtyRange(e.range); // re-bake the vacated footprint
+      }
+      this.dirtyReach(e.reach); // invalidate the OLD shadow reach
+      if (rangeChanged) {
+        e.range = range;
+        this.linkRange(id, range);
+      }
+      e.reach = this.casterReach(sprite);
+      e.stem = sprite.stem;
+      this.dirtyReach(e.reach); // …and the NEW one
     }
     this.dirtyRange(e.range); // always re-dirty: the prim's art/tint may have changed
+  }
+
+  /** A shadow-casting prim changed (added / removed / moved) — invalidate the COLD
+   *  lightmap over the region its shadow can REACH, not just its own footprint. The
+   *  prim's own rects already re-bake via the geometry `dirty` path, but a tree's
+   *  shadow falls on the ground to its NORTH; without this, cutting the tree leaves
+   *  a ghost shadow there (those rects were never marked light-dirty). Flat ground
+   *  (no `stem`) casts nothing, so it's skipped — matching {@link gatherShadowCasters}.
+   *  Caster changes are rare (a cut / a growth), so the conservative reach is cheap.
+   *
+   *  Split in two: {@link casterReach} reads the LIVE sprite (only ever called while
+   *  it's alive — on add/refresh) and {@link dirtyReach} replays a STORED reach (so
+   *  removal, which may run after the sprite was destroyed, never touches it). */
+  private casterReach(sprite: IndexedSprite): RectRange | null {
+    if (!sprite.stem) return null; // only silhouette casters shadow; flat ground doesn't
+    const w = sprite.width;
+    const h = sprite.height;
+    const left = sprite.x - sprite.anchor.x * w;
+    const top = sprite.y - sprite.anchor.y * h;
+    // Shadows project away from the light — with the iso ground + mostly-overhead/north
+    // lights they fall NORTH (−Y) and are stretched ({@link SHADOW_NORTH_STRETCH}); cap
+    // each direction at the projection clamp. Conservative + uniform laterally.
+    const north = SHADOW_MAX_LEN * SHADOW_NORTH_STRETCH;
+    return rectsForAABB(left - SHADOW_MAX_LEN, top - north, left + w + SHADOW_MAX_LEN, top + h + SHADOW_MAX_LEN);
+  }
+
+  private dirtyReach(reach: RectRange | null): void {
+    if (!reach) return;
+    for (let c = reach.col0; c <= reach.col1; c++)
+      for (let row = reach.row0; row <= reach.row1; row++) this.lightDirty.add(`${c},${row}`);
   }
 
   /** The prim's tight non-transparent world AABB → rect range. Uses the silhouette
@@ -847,37 +908,57 @@ export class RectComposite {
     this.lastBaked = baked;
   }
 
+  /** The prims of rect `(wc,wr)` AND its 8 neighbours, deduped. The neighbours feed the
+   *  slot's gutter (a prim across a boundary must continue into the gutter for seamless
+   *  display bilinear); prims that don't reach the padded scratch clip to nothing. */
+  private gatherPadded(wc: number, wr: number): PrimEntry[] {
+    const seen = new Set<number>();
+    const list: PrimEntry[] = [];
+    for (let dc = -1; dc <= 1; dc++)
+      for (let dr = -1; dr <= 1; dr++) {
+        const ids = this.rectPrims.get(`${wc + dc},${wr + dr}`);
+        if (!ids) continue;
+        for (const id of ids) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          const e = this.prims.get(id);
+          if (e) list.push(e);
+        }
+      }
+    return list;
+  }
+
   /** Bake ONE world rectangle into every channel: move its prims into the bake
    *  container (z-sorted), then per channel set each prim's texture/tint (or hide it
    *  when the channel has no texture for it — its area falls through to the channel's
    *  clear, e.g. flat-up normal), render translated to rect-local (scratch bounds clip
    *  to the portion), and replace-copy the scratch into that channel's fixed slot. */
   private bakeRect(renderer: Renderer, wc: number, wr: number): void {
-    const W = rectW();
+    const PW = rectSlotPW();
+    const PH = rectSlotPH();
     const H = rectH();
-    const slotX = mod(wc, this.cols) * W;
-    const slotY = mod(wr, this.rows) * H;
+    const slotX = mod(wc, this.cols) * PW;
+    const slotY = mod(wr, this.rows) * PH;
     this.lightDirty.add(`${wc},${wr}`); // geometry/normal changed → this slot's lightmap is stale
-    const ids = this.rectPrims.get(`${wc},${wr}`);
-    if (!ids || ids.size === 0) {
-      // Empty rect: clear the slot in every channel (+ depth) to its clear value.
+    // Gather this rect's prims AND the 8 neighbours' (deduped): a prim sitting just across a
+    // boundary must fill THIS slot's gutter so display bilinear reads continuous content at
+    // the edge. Prims clip to the PW×PH scratch, so over-gather is just minor overdraw.
+    const list = this.gatherPadded(wc, wr);
+    if (list.length === 0) {
+      // Empty rect: clear the whole slot (gutter included) in every channel (+ depth).
       for (const c of this.channels) {
         renderer.render({ container: this.empty, target: this.scratchRT!, clear: true, clearColor: c.clearColor });
-        this.blit(renderer, this.scratchTex!, 0, 0, W, H, c.composite!, slotX, slotY, false);
+        this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, c.composite!, slotX, slotY, false);
       }
       renderer.render({ container: this.empty, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 1] });
-      this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.depthRT!, slotX, slotY, false);
+      this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, this.depthRT!, slotX, slotY, false);
       return;
-    }
-    const list: PrimEntry[] = [];
-    for (const id of ids) {
-      const e = this.prims.get(id);
-      if (e) list.push(e);
     }
     list.sort((a, b) => a.sprite.zIndex - b.sprite.zIndex);
     const tints = list.map((e) => e.sprite.tint); // restore after (normal forces white)
     for (const e of list) this.bakeContainer.addChild(e.sprite);
-    const m = new Matrix().translate(-rectWorldX(wc), -rectWorldY(wr));
+    // +PAD shifts the rect's world origin to the slot interior (the gutter is the PAD margin).
+    const m = new Matrix().translate(RECT_PAD - rectWorldX(wc), RECT_PAD - rectWorldY(wr));
     for (const c of this.channels) {
       for (let i = 0; i < list.length; i++) {
         const s = list[i].sprite;
@@ -891,7 +972,7 @@ export class RectComposite {
         }
       }
       renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: c.clearColor, transform: m });
-      this.blit(renderer, this.scratchTex!, 0, 0, W, H, c.composite!, slotX, slotY, false);
+      this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, c.composite!, slotX, slotY, false);
     }
     // DEPTH: each STANDING object (not ground) writes its feet world-Y (modular sort
     // key, see encodeDepthTint) across its silhouette. `list` is sorted ascending zIndex
@@ -927,7 +1008,7 @@ export class RectComposite {
     // 0 = no object (R=G=0; a true row-0 object is a negligible world-edge case), then
     // overwrite back-to-front so the frontmost object's bytes land.
     renderer.render({ container: this.depthBakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 1], transform: m });
-    this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.depthRT!, slotX, slotY, false);
+    this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, this.depthRT!, slotX, slotY, false);
     // Restore each prim (albedo texture, original tint, renderable) + return it home.
     for (let i = 0; i < list.length; i++) {
       const s = list[i].sprite;
@@ -964,7 +1045,10 @@ export class RectComposite {
     if (entries.length === 0) return;
     const rectMap = new Map<string, HotEntry[]>();
     for (const e of entries) {
-      const r = rectsForAABB(e.wx0, e.wy0, e.wx1, e.wy1);
+      // Expand by the gutter so a mover near a boundary is stamped into the neighbour slot
+      // too — fills that slot's gutter for seamless display bilinear (same role as the static
+      // bake's 3×3 gather).
+      const r = rectsForAABB(e.wx0 - RECT_PAD, e.wy0 - RECT_PAD, e.wx1 + RECT_PAD, e.wy1 + RECT_PAD);
       for (let c = r.col0; c <= r.col1; c++)
         for (let row = r.row0; row <= r.row1; row++) {
           if (!this.inWindow(c, row)) continue;
@@ -984,19 +1068,19 @@ export class RectComposite {
     const ci = key.indexOf(",");
     const wc = +key.slice(0, ci);
     const wr = +key.slice(ci + 1);
-    return [wc, wr, mod(wc, this.cols) * rectW(), mod(wr, this.rows) * rectH()];
+    return [wc, wr, mod(wc, this.cols) * rectSlotPW(), mod(wr, this.rows) * rectSlotPH()];
   }
 
   private bakeHotRect(renderer: Renderer, key: string, entries: HotEntry[]): void {
-    const W = rectW(), H = rectH();
+    const PW = rectSlotPW(), PH = rectSlotPH(), H = rectH();
     const [wc, wr, slotX, slotY] = this.slotXY(key);
-    const m = new Matrix().translate(-rectWorldX(wc), -rectWorldY(wr));
+    const m = new Matrix().translate(RECT_PAD - rectWorldX(wc), RECT_PAD - rectWorldY(wr));
     const parents = entries.map((e) => e.node.parent);
     const saved = entries.map((e) => e.lit.map((s) => ({ s, tint: s.tint, tex: s.texture })));
     for (const e of entries) this.bakeContainer.addChild(e.node);
     // ALBEDO: nodes already display their albedo → render as-is.
     renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 0], transform: m });
-    this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotAlbedo!, slotX, slotY, false);
+    this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, this.hotAlbedo!, slotX, slotY, false);
     // NORMAL: ONLY real-normal LitSprites draw (their normal map, white-tinted so the
     // albedo tint can't skew the vector). Everything else — no-normal LitSprites
     // (solid-fill rects) AND non-LitSprite leaves (title text, bars) — is hidden so
@@ -1019,7 +1103,7 @@ export class RectComposite {
     // would let the back show through a front card's rect).
     for (const e of entries) for (const s of e.lit) { if (s.normalTexture) { s.texture = s.normalTexture; s.tint = 0xffffff; } else { s.tint = 0x8080ff; } }
     renderer.render({ container: this.bakeContainer, target: this.scratchRT!, clear: true, clearColor: [0.5, 0.5, 1, 1], transform: m });
-    this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotNormal!, slotX, slotY, false);
+    this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, this.hotNormal!, slotX, slotY, false);
     // DEPTH: one solid quad per mover covering its AABB, tinted by its feet-Y + card
     // layer (BLUE_ROOT, band 0). Entries are z-sorted (back-to-front) + OVERWRITE, so the
     // front mover's depth survives. The display merge picks hot-vs-cold via `depthFront`.
@@ -1038,7 +1122,7 @@ export class RectComposite {
         this.depthBakeContainer.addChild(quad);
       }
       renderer.render({ container: this.depthBakeContainer, target: this.scratchRT!, clear: true, clearColor: [0, 0, 0, 1], transform: m });
-      this.blit(renderer, this.scratchTex!, 0, 0, W, H, this.hotDepth, slotX, slotY, false);
+      this.blit(renderer, this.scratchTex!, 0, 0, PW, PH, this.hotDepth, slotX, slotY, false);
     }
     // Restore textures/tints/renderable, then return the nodes to their parents.
     for (const group of saved) for (const r of group) { r.s.renderable = true; r.s.texture = r.tex; r.s.tint = r.tint; }
@@ -1053,7 +1137,13 @@ export class RectComposite {
     const normal = this.channelComposite("normal");
     if (!this.lightmap || !normal || this.lightDirty.size === 0) return;
     this.lightBakeShader.normal = normal;
-    // Cold lights + shadows are now bound PER RECT (binned) inside bakeLightRect — not once here.
+    // The GROUND lightmap binds cold lights PER RECT (binned) inside bakeLightRect. The hot-prim
+    // cold TEXTURE, by contrast, uses ONE viewport-wide set written into EVERY slot — a card
+    // straddling a rect boundary must read the SAME cold lights on both halves, else per-rect
+    // binning (radius-cull / nearest-cap ranked against each rect's own box) gives the two halves
+    // slightly different light sets → a lit seam down the join. Computed once per batch.
+    this.vpCold = this.viewportCold();
+    // Cold shadows are bound PER RECT (binned) inside bakeLightRect — not once here.
     if (this.coldShadowRT) this.lightBakeShader.coldShadow = this.coldShadowRT;
     if (this.depthRT) this.lightBakeShader.depth = this.depthRT; // object gate + backlight, like hot
     let baked = 0;
@@ -1080,16 +1170,21 @@ export class RectComposite {
    *  slot, the shader sums the cold lights at `rectWorld + local`, output → the slot
    *  (placed by a translate; the quad is rect-local). */
   private bakeLightRect(renderer: Renderer, wc: number, wr: number, normal: RenderTexture): void {
-    const W = rectW();
-    const H = rectH();
+    const PW = rectSlotPW();
+    const PH = rectSlotPH();
     const cw = normal.width;
     const chh = normal.height;
-    const slotX = mod(wc, this.cols) * W;
-    const slotY = mod(wr, this.rows) * H;
-    const hx = 0.5 / cw;
-    const hy = 0.5 / chh;
-    const u0 = slotX / cw + hx, v0 = slotY / chh + hy;
-    const u1 = (slotX + W) / cw - hx, v1 = (slotY + H) / chh - hy;
+    const slotX = mod(wc, this.cols) * PW;
+    const slotY = mod(wr, this.rows) * PH;
+    // 1:1 with the normal slot — the full-slot quad [0..PW] maps to the normal's [slotX..slotX+PW]
+    // EXACTLY, so lightmap texel k samples normal texel k. NO half-texel inset: that inset (a
+    // holdover from the pre-padding design, when the W-wide quad sat against a contiguous neighbour
+    // slot) shifts the baked lighting ~0.5px off the 1:1-blitted albedo, which the display's
+    // `albedo × lightmap` then reveals as a hairline at slot boundaries. The only texel the inset
+    // protected — the outermost gutter texel, whose bilinear reaches the adjacent PHYSICAL slot — is
+    // never sampled by the display (it stays ≥ PAD−0.5 texels inside the interior).
+    const u0 = slotX / cw, v0 = slotY / chh;
+    const u1 = (slotX + PW) / cw, v1 = (slotY + PH) / chh;
     (this.lightBakeUv.data as Float32Array).set([u0, v0, u1, v0, u1, v1, u0, v1]);
     this.lightBakeUv.update();
     // Per-rect cold lights: bin the world set to this rect's nearest ≤32, set the uniforms, and
@@ -1097,16 +1192,21 @@ export class RectComposite {
     // world-wide cold count past 32 and makes shadows per-rect.)
     const binned = this.lightsForRect(wc, wr);
     this.lightBakeShader.setColdLights(this.coldDataBuf, this.coldColorBuf, this.packColdInto(binned), this.coldAmbient);
-    this.populateColdTex(mod(wc, this.cols), mod(wr, this.rows), binned, rectWorldX(wc), rectWorldY(wr));
+    // Hot-prim cold texture: the VIEWPORT-WIDE set (same in every slot), encoded rect-local to THIS
+    // slot's origin — so adjacent slots hold identical lights and a card across the boundary lights
+    // continuously (see bakeLightDirty). The ground lightmap above still uses the per-rect `binned`.
+    this.populateColdTex(mod(wc, this.cols), mod(wr, this.rows), this.vpCold, rectWorldX(wc), rectWorldY(wr));
     this.buildColdShadows(binned);
-    this.lightBakeShader.setRect(rectWorldX(wc), rectWorldY(wr));
+    // The quad is slot-local px [0..PW,0..PH]; its interior origin is +PAD, so the rect's true
+    // world origin maps to slot-local PAD → shader world = (rectWorld − PAD) + vLocal.
+    this.lightBakeShader.setRect(rectWorldX(wc) - RECT_PAD, rectWorldY(wr) - RECT_PAD);
     // First stamp this rect's COLD-SHADOW slot: render the projected cold silhouettes (world
-    // px) into the scratch (clipped to the rect), then blit into the cold-shadow slot — the
-    // lightmap shader below samples it at the same slot UV. (Must precede the lightmap render.)
+    // px) into the scratch (clipped to the padded slot), then blit into the cold-shadow slot —
+    // the lightmap shader below samples it at the same slot UV. (Must precede the lightmap render.)
     if (this.coldShadowRT && this.scratchRT && this.scratchTex) {
-      const cm = new Matrix().translate(-rectWorldX(wc), -rectWorldY(wr));
+      const cm = new Matrix().translate(RECT_PAD - rectWorldX(wc), RECT_PAD - rectWorldY(wr));
       renderer.render({ container: this.coldShadowContainer, target: this.scratchRT, clear: true, clearColor: [0, 0, 0, 0], transform: cm });
-      this.blit(renderer, this.scratchTex, 0, 0, W, H, this.coldShadowRT, slotX, slotY, false);
+      this.blit(renderer, this.scratchTex, 0, 0, PW, PH, this.coldShadowRT, slotX, slotY, false);
     }
     const m = new Matrix().translate(slotX, slotY);
     renderer.render({ container: this.lightBakeMesh, target: this.lightmap!, clear: false, transform: m });
@@ -1136,6 +1236,25 @@ export class RectComposite {
   /** The cold lights reaching rect `(wc,wr)`, nearest-first, capped at {@link MAX_COLD_LIGHTS}.
    *  Per-rect culling → the world-wide cold set is unbounded; each rect sums only its own ≤32.
    *  The nearest 3 also cast shadows (R/G/B), so shadows scale per-rect too (vs the old global 3). */
+  /** The viewport-wide cold set fed to EVERY slot's cold texture (hot-prim lighting). Recomputed
+   *  per light-bake batch by {@link viewportCold}; one shared set → no per-rect binning seam. */
+  private vpCold: ColdLight[] = [];
+
+  /** The nearest ≤{@link MAX_COLD_LIGHTS} cold lights to the window CENTRE — one set for the whole
+   *  viewport. Unlike {@link lightsForRect} (per-rect, radius-culled, for the ground lightmap), this
+   *  is keyed on the viewport not the rect, so every slot's cold texture gets the SAME lights and a
+   *  hot prim spanning a rect boundary lights continuously. Bounded by the viewport, so the
+   *  world-wide "scales past 32" property (which `lightsForRect` provides for the ground) is intact
+   *  — hot prims only ever see what's near the view. */
+  private viewportCold(): ColdLight[] {
+    const cx = rectWorldX(this.winCol) + (this.cols * rectW()) / 2;
+    const cy = rectWorldY(this.winRow) + (this.rows * rectH()) / 2;
+    const hits = this.coldLights.map((l) => ({ l, d2: (l.x - cx) ** 2 + (l.y - cy) ** 2 }));
+    hits.sort((a, b) => a.d2 - b.d2);
+    if (hits.length > MAX_COLD_LIGHTS) hits.length = MAX_COLD_LIGHTS;
+    return hits.map((h) => h.l);
+  }
+
   private lightsForRect(wc: number, wr: number): ColdLight[] {
     const rx0 = rectWorldX(wc), ry0 = rectWorldY(wr);
     const rx1 = rx0 + rectW(), ry1 = ry0 + rectH();
@@ -1224,11 +1343,15 @@ function sameRange(a: RectRange, b: RectRange): boolean {
   return a.col0 === b.col0 && a.row0 === b.row0 && a.col1 === b.col1 && a.row1 === b.row1;
 }
 
-/** Static index buffer for the 4-quad display mesh ({@link RectComposite.fillDisplay}):
- *  4 quads × 2 triangles × 3 verts, over the 16 vertices (4 per quad). */
-export const DISPLAY_INDICES = new Uint32Array([
-  0, 1, 2, 0, 2, 3,
-  4, 5, 6, 4, 6, 7,
-  8, 9, 10, 8, 10, 11,
-  12, 13, 14, 12, 14, 15,
-]);
+/** Index buffer for the per-slot display mesh ({@link RectComposite.fillDisplay}): one
+ *  quad (2 triangles, 6 indices) per `quadCount`, over its 4 vertices `[0,1,2,0,2,3]`.
+ *  The renderer rebuilds this whenever {@link RectComposite.displayQuadCount} changes. */
+export function buildDisplayIndices(quadCount: number): Uint32Array {
+  const idx = new Uint32Array(quadCount * 6);
+  for (let q = 0; q < quadCount; q++) {
+    const b = q * 6, v = q * 4;
+    idx[b] = v; idx[b + 1] = v + 1; idx[b + 2] = v + 2;
+    idx[b + 3] = v; idx[b + 4] = v + 2; idx[b + 5] = v + 3;
+  }
+  return idx;
+}

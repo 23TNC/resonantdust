@@ -10,11 +10,52 @@
 //! purely the rendering + dirty system (convert at the boundary, in world px).
 
 import { worldHexRadius, worldHexWidth } from "../hex/hexSize";
+import { COLD_POS_STEP } from "./coldLightTex";
 
-/** Rectangle width in world px — `√3·R`, one hex column. */
-export const rectW = (): number => worldHexWidth();
-/** Rectangle height in world px — `R`, half a hex row. */
-export const rectH = (): number => worldHexRadius();
+/** Round `v` UP to a whole multiple of `m`. */
+const ceilMul = (v: number, m: number): number => Math.ceil(v / m) * m;
+
+/** Rectangle width in world px — the rect-lattice PITCH, `ceil(√3·R)`.
+ *
+ *  Rounded UP to a whole pixel on purpose. The bake places each rect's prims with
+ *  `translate(−rectWorldX(wc))` = `−wc·rectW`; if the pitch were the raw `√3·R ≈ 152.42`,
+ *  adjacent rects' bake offsets would differ by a NON-integer, so a tile straddling the
+ *  boundary lands at a different SUB-PIXEL phase in each slot — and that 0.42px content
+ *  shift is the vertical seam. An integer pitch makes neighbours differ by a whole number
+ *  of pixels, so any tile keeps the SAME phase in every slot it touches → seamless.
+ *
+ *  This is the rect LATTICE only (bucketing + bake origin + display placement, all of which
+ *  read `rectW` consistently). Hexes are still DRAWN/placed from `worldHexWidth()`/`HexMath`
+ *  at their true `√3·R` positions; the lattice is just the tiling the composite bakes on. The
+ *  extra width is absorbed by the gutter ({@link rectSlotPW}).
+ *
+ *  Rounded up to a multiple of {@link COLD_POS_STEP}: cold-light positions are stored
+ *  RECT-LOCAL and quantized to that step (coldLightTex). If a rect origin (`k·rectW`) weren't
+ *  on the quantization grid, the SAME light would reconstruct at a slightly different position
+ *  in adjacent rects (`rectW/STEP` not integer → a half-step rounding mismatch), so a hot prim
+ *  (card) straddling a rect boundary would show a lit seam down the join. A pitch that's a
+ *  whole number of steps makes every rect origin grid-aligned → identical reconstruction → no
+ *  seam. (Integer too, so the sub-pixel bake phase stays consistent.) */
+export const rectW = (): number => ceilMul(worldHexWidth(), COLD_POS_STEP);
+/** Rectangle height in world px — `R` rounded up to a multiple of {@link COLD_POS_STEP}, for the
+ *  same cold-light continuity reason as {@link rectW} (the row-boundary / horizontal case). */
+export const rectH = (): number => ceilMul(worldHexRadius(), COLD_POS_STEP);
+
+/** Gutter (CSS px) baked around every composite slot's interior. The bake over-renders
+ *  neighbour content into it; the display samples only the gutter-protected interior, so
+ *  bilinear never reaches across a slot boundary. A single knob: 1 covers bilinear's ½-texel
+ *  reach, 2 is the safe default. */
+export const RECT_PAD = 2;
+
+/** Interior tile size (CSS px) a slot's rect content bakes into. Equals the (now integer)
+ *  pitch — the rect content fills the interior exactly; the gutter is extra around it. */
+export const rectInteriorW = (): number => rectW();
+export const rectInteriorH = (): number => rectH();
+
+/** Slot PITCH (CSS px) in the padded atlas — interior + a `RECT_PAD` gutter on each side.
+ *  INTEGER, so slot `sx` sits at the whole-texel atlas position `sx·PW` (no fractional blit). */
+export const rectSlotPW = (): number => rectInteriorW() + 2 * RECT_PAD;
+export const rectSlotPH = (): number => rectInteriorH() + 2 * RECT_PAD;
 
 /** Lattice phase (world px): the rect grid's origin offset from world (0,0). Kept
  *  at the origin — a zero-offset lattice has every hex straddle the column lines, so

@@ -1,10 +1,15 @@
 import { Assets, Container, Graphics, Rectangle, RenderTexture, Sprite, Texture, type Renderer } from "pixi.js";
 import {
   channelUrl,
+  splitStem,
   pickLodForSize,
   LOD_SIZES,
   MIN_LOD,
   PREVIEW_LOD,
+  mapsOf,
+  MAP_ALBEDO,
+  MAP_NORMAL,
+  MAP_EMISSIVE,
   type Channel,
 } from "../lodUrls";
 import { TextureManager, type PackedPair, type SlotHandle } from "./TextureManager";
@@ -78,6 +83,14 @@ export class LodTextureManager {
   private readonly byKey = new Map<string, LodEntry>();
   /** Keys whose master load is in flight (dedupe). */
   private readonly loading = new Set<string>();
+  /** Object dirs (`<cat>.<biome>/<obj>.<faction>`) the gate has confirmed have no
+   *  master — a gate fetch returned 404 (which uniquely means "no master to
+   *  downscale"). Once seen, every other size/channel/variation of that object is
+   *  skipped at the source (no R2-direct, no gate), so a stale manifest entry
+   *  costs ONE probe per object, not the full variation × channel × size storm.
+   *  Session-scoped; cleared on content reload (a newly-uploaded master may now
+   *  exist — see {@link clearAbsent}). Mirrors the gate's own negative cache. */
+  private readonly absentObjects = new Set<string>();
   /** Preview atlas entry keyed by the (versioned) stem — one preview per stem. */
   private readonly previewByKey = new Map<string, LodEntry>();
   /** Stems whose preview load is in flight (dedupe). */
@@ -288,6 +301,7 @@ export class LodTextureManager {
   private ensureRealLoad(stem: string, ideal: number, key: string): void {
     if (this.loading.has(key)) return;
     if ((this.byKey.get(key)?.level ?? 0) >= FrameLevel.Real) return;
+    if (this.absentObjects.has(splitStem(stem).dir)) return; // masterless — don't enqueue
     this.loading.add(key);
     this.schedule(() => this.load(stem, ideal, key), "high");
   }
@@ -295,6 +309,7 @@ export class LodTextureManager {
   /** Kick the low-res preview load for `stem` unless cached or in flight. */
   private ensurePreviewLoad(stem: string): void {
     if (this.previewByKey.has(stem) || this.previewLoading.has(stem)) return;
+    if (this.absentObjects.has(splitStem(stem).dir)) return; // masterless — don't enqueue
     this.previewLoading.add(stem);
     this.schedule(() => this.loadPreview(stem), "low");
   }
@@ -403,6 +418,7 @@ export class LodTextureManager {
   prewarmPreviews(stems: readonly string[]): void {
     for (const s of stems) {
       if (!s || this.previewByKey.has(s) || this.previewLoading.has(s)) continue;
+      if (this.absentObjects.has(splitStem(s).dir)) continue; // masterless — don't enqueue
       this.previewLoading.add(s);
       this.schedule(() => this.loadPreview(s), "low");
     }
@@ -449,8 +465,17 @@ export class LodTextureManager {
     return atlas;
   }
 
+  /** Forget every object proven masterless. Call on content reload: a master that
+   *  404'd before may have just been uploaded (the manifest version bumped), so the
+   *  next request must re-probe rather than stay short-circuited. Mirrors the gate's
+   *  `flush_absent_masters` on the same version-bump signal. */
+  clearAbsent(): void {
+    this.absentObjects.clear();
+  }
+
   destroy(): void {
     this.byKey.clear();
+    this.absentObjects.clear();
     this.loading.clear();
     this.previewByKey.clear();
     this.previewLoading.clear();
@@ -475,10 +500,14 @@ export class LodTextureManager {
   private async load(stem: string, ideal: number, key: string): Promise<void> {
     let landed = false;
     try {
-      const albedoSrc = await this.fetchChannel(stem, ideal, "albedo");
+      const maps = mapsOf(stem);
+      const albedoSrc = maps & MAP_ALBEDO ? await this.fetchChannel(stem, ideal, "albedo") : null;
       if (albedoSrc) {
-        const normalSrc = await this.fetchChannel(stem, ideal, "normal");
-        const emissiveSrc = await this.fetchChannel(stem, ideal, "emissive");
+        // Only fetch channels the manifest says have a master — skip the
+        // guaranteed 404 otherwise (chiefly `emissive`). A re-mastered object
+        // that gained/lost a map gets a fresh stem version, so this stays exact.
+        const normalSrc = maps & MAP_NORMAL ? await this.fetchChannel(stem, ideal, "normal") : null;
+        const emissiveSrc = maps & MAP_EMISSIVE ? await this.fetchChannel(stem, ideal, "emissive") : null;
         // Reuse the stem's existing stable frame (geo/preview) so every bound
         // sprite follows the upgrade in place; otherwise stand a fresh one up at
         // the real source's aspect.
@@ -503,6 +532,10 @@ export class LodTextureManager {
    *  common case for `emissive`). Both URLs cache independently in PIXI Assets;
    *  within a session the packed result is held in `byKey`, so we never re-probe. */
   private async fetchChannel(stem: string, size: number, channel: Channel): Promise<Texture | null> {
+    // Known-masterless object → don't probe R2 or the gate (the preview path
+    // records absence; this path only consumes it — `loadOrNull` can't read a
+    // gate 404's status to record one itself).
+    if (this.absentObjects.has(splitStem(stem).dir)) return null;
     // `channelUrl` is version-aware: it splits any `?v=` off the path and re-adds
     // it as the query, so both the R2-direct path and the gate URL carry it.
     const path = channelUrl(stem, size, channel);
@@ -529,13 +562,14 @@ export class LodTextureManager {
       if (!bytes || bytes.v !== version) {
         // 2. Miss / stale → fetch the channel bytes from R2 (gate on miss) and
         //    write them through to IndexedDB for next session.
-        const albedo = await this.fetchBytes(stem, PREVIEW_LOD, "albedo");
+        const maps = mapsOf(stem);
+        const albedo = maps & MAP_ALBEDO ? await this.fetchBytes(stem, PREVIEW_LOD, "albedo") : null;
         bytes = albedo
           ? {
               v: version,
               albedo,
-              normal: await this.fetchBytes(stem, PREVIEW_LOD, "normal"),
-              emissive: await this.fetchBytes(stem, PREVIEW_LOD, "emissive"),
+              normal: maps & MAP_NORMAL ? await this.fetchBytes(stem, PREVIEW_LOD, "normal") : null,
+              emissive: maps & MAP_EMISSIVE ? await this.fetchBytes(stem, PREVIEW_LOD, "emissive") : null,
             }
           : null;
         if (bytes) void putPreview(base, bytes);
@@ -566,11 +600,23 @@ export class LodTextureManager {
    *  neither has it. Distinct from {@link fetchChannel} (which decodes via PIXI
    *  `Assets`) because persistence needs the bytes, not a GPU texture. */
   private async fetchBytes(stem: string, size: number, channel: Channel): Promise<ArrayBuffer | null> {
+    const dir = splitStem(stem).dir;
+    if (this.absentObjects.has(dir)) return null; // known masterless — skip both origins
     const path = channelUrl(stem, size, channel); // version-aware (?v in query)
     const direct = await fetchOrNull(this.textureBase + path);
     if (direct) return direct;
-    if (this.gateBase) return fetchOrNull(this.gateBase + path);
-    return null;
+    if (!this.gateBase) return null;
+    // Gate fallback, status-aware: a 404 from the gate uniquely means "no master"
+    // (its only 404 path). Record the object absent ONLY on the ALBEDO channel —
+    // it's the display channel, so its absence means the object can't render at
+    // all. A missing normal/emissive is a per-channel gap (and `mapsOf` already
+    // gates those), never a reason to suppress a present albedo.
+    const g = await fetchGate(this.gateBase + path);
+    if (g === "absent") {
+      if (channel === "albedo") this.absentObjects.add(dir);
+      return null;
+    }
+    return g;
   }
 }
 
@@ -590,6 +636,21 @@ async function fetchOrNull(url: string): Promise<ArrayBuffer | null> {
   try {
     const r = await fetch(url);
     return r.ok ? await r.arrayBuffer() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `fetch` the gate for a texture/sidecar, distinguishing the three outcomes the
+ *  caller acts on: the bytes (200), `"absent"` (the gate's 404 — its only 404 path
+ *  means "no master to generate from", so the object is masterless), or `null` (a
+ *  transient/other failure that should NOT be cached as absent). Status is always
+ *  readable on a CORS response, so no `Access-Control-Expose-Headers` is needed. */
+async function fetchGate(url: string): Promise<ArrayBuffer | "absent" | null> {
+  try {
+    const r = await fetch(url);
+    if (r.ok) return await r.arrayBuffer();
+    return r.status === 404 ? "absent" : null;
   } catch {
     return null;
   }

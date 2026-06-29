@@ -84,9 +84,14 @@ fn sys_effect(s: &str) -> (u32, u32) {
     // `&owner <surface> <q> <r> ^macro_zone call` — resolve a macro_zone (the
     // card_id+surface+cell tuple) from an owner card; 4 args in, the zone out.
     "macro_zone" => (4, 1),
-    // `<zone> $card::def &owner ^create call` — spawn `def` at `zone`, owned by
-    // `owner`; 3 args in, the created handle (or 0) out.
-    "create" => (3, 1),
+    // `<zone> <micro> <stack> &owner $card::def ^create call` — spawn `def` with the
+    // placement intent; 5 args in, the created handle (or 0) out.
+    "create" => (5, 1),
+    // `<q> <r> ^micro_location call` — pack a loose micro_location; 2 in, 1 out.
+    "micro_location" => (2, 1),
+    // `<zone> <micro> <stack> &card ^place call` — relocate a bound card with the
+    // placement intent; 4 args in, the (discarded) 0 out.
+    "place" => (4, 1),
     _ => (0, 1),
   }
 }

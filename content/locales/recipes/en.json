@@ -41,6 +41,12 @@
   "triple_corpus": {
     "label": "triple_corpus"
   },
+  "corpus_brighten": {
+    "label": "brighten",
+    "success": {
+      "simple": "{root} brightened."
+    }
+  },
   "corpus_stack": {
     "1": {
       "label": "1"

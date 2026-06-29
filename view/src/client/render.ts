@@ -43,6 +43,10 @@ export type Renderable =
       /** The two zone stock slots driving the tile's `:visuals`. */
       stock0: number;
       stock1: number;
+      /** A real tile-card has been promoted on this cell (the engine spawned one to
+       *  carry holds + the live resource decrement). Debug-only: gates the
+       *  card-backed outline overlay. Absent on snapshots that predate the flag. */
+      cardBacked?: boolean;
     }
   | {
       layer: "card";
@@ -58,15 +62,22 @@ export type Renderable =
        *  bit reads) + propagating `flags` u32 (state/placement). */
       stock: string;
       flags: number;
-      /** Progress-bar timing windows as `(total, remaining)` ms — the view fills
-       *  locally with its own clock (no per-frame worker round-trip). `p*` = build
-       *  (`source = 0`, the server-confirmed completion window); `q*` = queue
-       *  (`source = 1`, the pre-fire debounce). `0` total ⇒ no active bar.
+      /** Build bar (`source = 0`): ABSOLUTE server-time bounds `[pStartMs, pEndMs]`
+       *  of the completion window. The view fills `(serverNow - pStartMs) /
+       *  (pEndMs - pStartMs)` against the disciplined server clock, so the fill and
+       *  the completion-row promotion share a clock. `pEndMs <= pStartMs` ⇒ no bar. */
+      pStartMs?: number;
+      pEndMs?: number;
+      /** Queue bar (`source = 1`, the pre-fire debounce) as `(total, remaining)` ms
+       *  — a client-side perf countdown (not server time). `0` total ⇒ no bar.
        *  Optional so older/test snapshots without timing still parse. */
-      pTotalMs?: number;
-      pRemainingMs?: number;
       qTotalMs?: number;
       qRemainingMs?: number;
+      /** Active build-bar channel (the `pstatus` bit index), or `-1`/absent when
+       *  the card declares no build bar. The view resolves the fill direction from
+       *  it (`visual.pstyle.N`, default ltr) and feeds the progress prim's `style`
+       *  through `card_data.progress[].style`. Presence/timing are the `p*` above. */
+      pbit?: number;
     };
 
 /** One streamed chunk of a region's renderables. `gen` rises every time the

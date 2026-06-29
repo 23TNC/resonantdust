@@ -179,9 +179,10 @@ export class PaintHistory {
   }
 
   /** Fill `mask` (a white region mask, any resolution — scaled to fit) tinted
-   *  with `color` into `key` as a single committed, undoable stroke. Used by the
-   *  paint bucket. No-op if the channel doesn't exist. */
-  fillRegion(key: string, mask: HTMLCanvasElement, color: string): void {
+   *  with `color` at `opacity` (0–1 flat alpha) into `key` as a single committed,
+   *  undoable stroke. Used by the paint bucket. No-op if the channel doesn't
+   *  exist. */
+  fillRegion(key: string, mask: HTMLCanvasElement, color: string, opacity: number): void {
     const ch = this.channels.get(key);
     if (!ch) return;
     this.redoStack = [];
@@ -191,6 +192,7 @@ export class PaintHistory {
     ctx.fillStyle = color;
     ctx.fillRect(0, 0, ch.w, ch.h);
     ctx.globalCompositeOperation = "destination-in";
+    ctx.globalAlpha = Math.min(1, Math.max(0, opacity)); // scale the region's flat alpha
     ctx.drawImage(mask, 0, 0, ch.w, ch.h); // scale the region mask to the channel
     this.commitStroke(ch, canvas);
   }

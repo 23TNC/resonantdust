@@ -54,6 +54,13 @@ export class WasmClient {
   private readonly chatListeners = new Set<(messages: ChatMessage[]) => void>();
   /** Fired each pump with the latest clock-discipline + RTT diagnostics (debug HUD). */
   private readonly clockStatsListeners = new Set<(stats: ClockStats) => void>();
+  /** Latest disciplined server-time anchor: `serverNowMs` from a synced clockStats
+   *  paired with the main-thread `performance.now()` at receipt. {@link serverNowMs}
+   *  extrapolates between the 50ms pumps, re-anchoring each one — so it tracks the
+   *  core's continuously re-disciplined clock (incl. `client_delay` decay), unlike
+   *  a one-shot countdown. `null` until the clock first syncs. */
+  private serverAnchorMs: number | null = null;
+  private serverAnchorPerf = 0;
   /** Fired each pump with the latest per-reducer gateway-call tally (debug HUD). */
   private readonly callStatsListeners = new Set<(stats: CallStat[]) => void>();
   /** Fired each pump with the latest per-table subscription tally (debug HUD). */
@@ -121,6 +128,10 @@ export class WasmClient {
           for (const fn of this.chatListeners) fn(msg.messages);
           break;
         case "clockStats":
+          if (msg.stats.synced) {
+            this.serverAnchorMs = msg.stats.serverNowMs;
+            this.serverAnchorPerf = performance.now();
+          }
           for (const fn of this.clockStatsListeners) fn(msg.stats);
           break;
         case "callStats":
@@ -285,6 +296,17 @@ export class WasmClient {
   onClockStats(fn: (stats: ClockStats) => void): () => void {
     this.clockStatsListeners.add(fn);
     return () => this.clockStatsListeners.delete(fn);
+  }
+
+  /** The disciplined server clock NOW (ms), extrapolated from the latest synced
+   *  clockStats anchor with the local perf delta — re-anchored every 50ms pump, so
+   *  it follows the core's running clock (the same one the row promotions use).
+   *  `null` until the clock first syncs. Render-side timing (the build progress
+   *  bar) reads this so the fill and the completion-row promotion share a clock. */
+  serverNowMs(): number | null {
+    return this.serverAnchorMs === null
+      ? null
+      : this.serverAnchorMs + (performance.now() - this.serverAnchorPerf);
   }
 
   /** Subscribe to the per-reducer gateway-call tally the worker drains each pump

@@ -559,8 +559,8 @@ export class DetailsPanel extends LayoutNode {
       } else {
         valueText.text = String(value);
         valueText.position.set(
-          x + FEATURE_PIP_SIZE - 2,
-          y + FEATURE_PIP_SIZE - 2,
+          x + FEATURE_PIP_SIZE,
+          y + FEATURE_PIP_SIZE,
         );
         valueText.visible = true;
       }

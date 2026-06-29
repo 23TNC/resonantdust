@@ -300,6 +300,45 @@ pub const ZONE_SIZE: i32 = 7;
 /// into its four quadrant neighbours.
 pub const TILE_CENTER: i32 = 3;
 
+/// Cube/hex distance between two axial tile coords. The single shared copy — the
+/// shard's `cards`/`regions` once carried private duplicates.
+pub fn hex_dist(aq: i32, ar: i32, bq: i32, br: i32) -> i32 {
+    let dq = aq - bq;
+    let dr = ar - br;
+    (dq.abs() + dr.abs() + (dq + dr).abs()) / 2
+}
+
+/// The local cells `(q, r)` of `macro_zone` inside its region disk of radius
+/// `distance` (tiles from the owner origin), **center-out**: nearest to the world
+/// origin `(0,0)` first (ties in raster order). So a "first-free" walk fills from
+/// the centre cell (local `(3,3)` = world `(0,0)`) outward, not from a raster
+/// corner. `distance == u16::MAX` ⇒ the whole `ZONE_SIZE²` block.
+pub fn zone_disk_cells(macro_zone: u64, distance: u16) -> Vec<(u8, u8)> {
+    let (zq, zr) = unpack_macro_zone(macro_zone);
+    let d = distance as i32;
+    let mut out: Vec<(u8, u8, i32)> = Vec::new();
+    for r in 0..ZONE_SIZE {
+        for q in 0..ZONE_SIZE {
+            let dist = hex_dist(world_tile(zq, q as u8), world_tile(zr, r as u8), 0, 0);
+            if dist <= d {
+                out.push((q as u8, r as u8, dist));
+            }
+        }
+    }
+    // Stable sort by distance from the origin — centre first, raster order within
+    // a ring. The walk then prefers world `(0,0)`, then its nearest neighbours.
+    out.sort_by_key(|&(_, _, dist)| dist);
+    out.into_iter().map(|(q, r, _)| (q, r)).collect()
+}
+
+/// Whether cell `(q, r)` is inside `macro_zone`'s disk of radius `distance` — the
+/// O(1) membership test for an exact-cell placement (a product on a card's own
+/// world cell is in-disk; an inventory's off-centre `(0,0)` corner isn't).
+pub fn cell_in_disk(macro_zone: u64, q: u8, r: u8, distance: u16) -> bool {
+    let (zq, zr) = unpack_macro_zone(macro_zone);
+    hex_dist(world_tile(zq, q), world_tile(zr, r), 0, 0) <= distance as i32
+}
+
 /// The global world-tile coordinate of macro_zone slot `(zone, local)` along one
 /// axis: `zone*ZONE_SIZE + local − TILE_CENTER`. The single place the zone→tile
 /// fold lives — pair the q and r results. Inverse: [`zone_local`].
@@ -487,6 +526,13 @@ pub fn unpack_definition(v: u16) -> (u8, u16) {
 /// souls — including the player_soul — live in this type, so `packed_definition
 /// >= SOUL_CARD_TYPE << 12` (`>= 0xF000`) is "any soul".
 pub const SOUL_CARD_TYPE: u8 = 0xF;
+
+/// `card_type` nibble of a **promoted tile-card** — a zone tile lifted into a real
+/// `Card` (per-cell stock in its `stock`, placed loose-snapped at the cell) so it
+/// can carry holds + a live (decremented) resource count the bare zone slot can't.
+/// The single owner of this constant; the gate, shard, and client all read it here
+/// rather than each pinning their own `7`.
+pub const TILE_CARD_TYPE: u8 = 7;
 
 /// Lowest `packed_definition` reserved for **player-soul** cards: the top 16
 /// def_ids of the soul type (`0xFFF0..=0xFFFF`). A card in this range IS a
@@ -694,6 +740,42 @@ pub fn set_tile_stock(
     let mask = 0x3u64 << bit_offset;
     let v = (value as u64 & 0x3) << bit_offset;
     packed[u64_idx] = (packed[u64_idx] & !mask) | v;
+}
+
+/// Card-priority synthetic-tile read — the single source of the rule shared by the
+/// gate matcher, the shard, and the client (so they can't drift, as they did when
+/// only the gate had it). A **promoted tile-card**'s view wins over the zone's
+/// packed grid slot, because the tile-card carries the live stock (decremented by a
+/// `cut_tree`, held mid-action) while the zone slot only catches up on GC demotion.
+///
+/// `tile_card` is the promoted tile-card's `(packed_definition, stock0, stock1)` at
+/// the cell, or `None` when no tile-card is promoted there. The zone args are the
+/// packed tile grid + its `tile_card_type` (the high nibble a zone stamps onto each
+/// tile's def_id). Returns `(packed_def, stock0, stock1)`, or `None` when the cell
+/// is empty (zone def_id 0 with no tile-card) or out of the 7×7 store.
+pub fn synthetic_tile(
+    tile_card: Option<(u16, u8, u8)>,
+    zone_words: &[u64; ZONE_TILE_U64_COUNT],
+    zone_tile_card_type: u8,
+    local_q: u8,
+    local_r: u8,
+) -> Option<(u16, u8, u8)> {
+    if let Some(view) = tile_card {
+        return Some(view); // card-priority: live tile-card over the stale zone slot
+    }
+    if local_q as usize >= ZONE_STORAGE_STRIDE || local_r as usize >= ZONE_STORAGE_STRIDE {
+        return None;
+    }
+    let idx = tile_slot(local_q, local_r);
+    let def_id = tile_def_id(zone_words, idx);
+    if def_id == 0 {
+        return None; // empty cell
+    }
+    Some((
+        pack_definition(zone_tile_card_type, def_id),
+        tile_stock(zone_words, idx, 0),
+        tile_stock(zone_words, idx, 1),
+    ))
 }
 
 /// Decode one row of [`ZONE_STORAGE_STRIDE`] (7) tiles. Returns `(def_id, stock0,
@@ -938,6 +1020,25 @@ mod tests {
         // tile_stock reads the same value
         assert_eq!(tile_stock(&packed, 7, 0), 3);
         assert_eq!(tile_stock(&packed, 7, 1), 0);
+    }
+
+    #[test]
+    fn synthetic_tile_card_priority() {
+        // Zone grid: forest (def 0x11) at cell (3,3) with pine=2, flora=1.
+        let mut words = [0u64; ZONE_TILE_U64_COUNT];
+        set_tile_full(&mut words, tile_slot(3, 3), 0x11, 2, 1);
+        // No tile-card → the zone slot, packed with the zone's tile_card_type.
+        assert_eq!(
+            synthetic_tile(None, &words, TILE_CARD_TYPE, 3, 3),
+            Some((pack_definition(TILE_CARD_TYPE, 0x11), 2, 1))
+        );
+        // A promoted tile-card (live, decremented to pine=1) WINS over the stale
+        // zone slot — its full view is returned verbatim.
+        let card = (pack_definition(TILE_CARD_TYPE, 0x11), 1, 1);
+        assert_eq!(synthetic_tile(Some(card), &words, TILE_CARD_TYPE, 3, 3), Some(card));
+        // Empty cell, no card → None; out-of-range → None.
+        assert_eq!(synthetic_tile(None, &words, TILE_CARD_TYPE, 0, 0), None);
+        assert_eq!(synthetic_tile(None, &words, TILE_CARD_TYPE, 7, 0), None);
     }
 
     #[test]

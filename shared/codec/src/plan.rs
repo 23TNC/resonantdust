@@ -8,7 +8,7 @@
 
 /// A recipe `@output` effect, stamped at a `sys.time` (`TimedEffect::at`). The
 /// new model is uniform: holds (claim/touch/…), lifecycle (dead/reap), gameplay
-/// (wood/…) and progress style (pstyle) are ALL stock writes — `SetCardStock` for
+/// (wood/…) and progress presence (pstatus) are ALL stock writes — `SetCardStock` for
 /// a bound card, `ModifyTileStock` for the synthetic tile. Spawning is the only
 /// non-stock effect. The gate future-stamps each at `start + at`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,14 +25,18 @@ pub enum Effect {
     owner_id: u32,
     stock: u64,
     tag: u32,
-    micro_location: Option<u32>,
+    /// Placement INTENT: the preferred loose cell (packed micro_location) and the
+    /// target `stack` id (0 loose / 1 hex / 2 top / 3 bottom). The shard resolves
+    /// the concrete cell+stack via the shared sweep at apply time.
+    micro_location: u32,
+    stack: u8,
   },
   /// Mutate the synthetic tile's per-cell stock `slot` (`set_tile_stock`) — the
   /// zone-savable u4 path.
   ModifyTileStock { slot: u8, op: StockOp, delta: u8 },
   /// Set a bound CARD's full per-card `stock` u64 to a gate-computed value
   /// (current stock with one slot's bits replaced) — the PER-DEF mutation
-  /// (wood/pine/pstyle/…). GLOBAL aspects (holds / dead / reap) go through
+  /// (wood/pine/pstatus/…). GLOBAL aspects (holds / dead / reap) go through
   /// [`Effect::LogOp`] instead.
   SetCardStock { card_id: u32, stock: u64 },
   /// Append an op-log delta for a GLOBAL aspect (holds / `dead` / `reap`) and
@@ -47,6 +51,12 @@ pub enum Effect {
   /// op-log home for a tile's holds — `cut_tree`'s `set_use` on the tile lands
   /// here instead of the never-wired flag tile-hold path.
   TileLogOp { aspect_id: u8, op: u8, modifier: i64 },
+  /// Relocate an existing bound card (`^place`) to `(surface, macro_zone)`,
+  /// re-owned by `owner_id`, with the placement INTENT `(micro_location cell,
+  /// stack id)` — the shard resolves the concrete cell+stack via the shared sweep
+  /// at apply time. A consumed `blueprint_chord_soul` goes back to the player's
+  /// inventory while the chord_soul is minted at its freed world cell.
+  Reposition { card_id: u32, surface: u8, macro_zone: u64, owner_id: u32, micro_location: u32, stack: u8 },
 }
 
 /// Tile-stock arithmetic for [`Effect::ModifyTileStock`]. `code()` is the u8 the
@@ -78,7 +88,7 @@ pub struct TimedEffect {
 
 /// The action plan the gate applies: the action's duration (max `sys.time`) plus
 /// the time-stamped effect timeline. Holds and styles are gone — they're stock
-/// writes in `effects` (claim/touch/pstyle aspects).
+/// writes in `effects` (claim/touch/pstatus aspects).
 #[derive(Clone, Debug, Default)]
 pub struct ActionPlan {
   /// Action duration in the DSL's time units (the max `sys.time` stamp).

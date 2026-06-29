@@ -28,13 +28,15 @@ services:
   # validate + resolve each file. Mounts the repo root so the crate (shared/) and
   # the content (content/, both data/ and visuals/) are visible. The load-bearing
   # cross-file lint — catches renames, missing art, duplicate/dangling `$` refs.
+  # Lives as the `real_corpus` integration test in the dsl crate (the standalone
+  # `corpus` bin died with the `resonantdust-data` crate).
   corpus:
     image: clockworklabs/spacetime:latest
     volumes:
       - ..:/workspace
     working_dir: /workspace/shared
     entrypoint: ["cargo"]
-    command: ["run", "--quiet", "-p", "resonantdust-data", "--bin", "corpus", "--", "/workspace/content"]
+    command: ["test", "-p", "resonantdust-dsl", "--test", "real_corpus", "--", "--nocapture"]
 
   # Builds the JS/wasm bundle the pixijs client imports.
   #

@@ -9,8 +9,8 @@
 ; hold; touch = refcount namespace (.user/.server budgets, cap 3); pos_hold =
 ; position pin; dead = lifecycle refcount (dead != 0 doesn't immediately remove
 ; the card — it's reaped later, which is why releases still run on a killed card);
-; pstyle = progress-bar style. A recipe's @input reads them via can_*; @output
-; acquires via set_* and releases via release_*.
+; pstatus = progress-bar presence bitmap (start_bar/end_bar). A recipe's @input
+; reads holds via can_*; @output acquires via set_* and releases via release_*.
 
 <data_func>
   ; Declare per-card UI stock (`&data` passed in). The holds + lifecycle
@@ -18,11 +18,12 @@
   ; op-log GLOBAL stock aspects (codec::aspects, fixed bits 42-63), so declaring
   ; them as schema slots was both vestigial AND harmful: on a card with many
   ; per-def aspects the schema grew up into the global region and a slot's default
-  ; landed on the Dead field → false `is_dead`. `pstyle` (progress-bar style) is a
-  ; real per-card aspect a recipe sets, so it stays.
+  ; landed on the Dead field → false `is_dead`. `pstatus` (progress-bar presence
+  ; bitmap) is a real per-card aspect a recipe sets, so it stays — 4 bits = up to 4
+  ; concurrent bar channels (bit N = channel N active).
   ::aspect_flags>
     pop &a set
-    2 &a.pstyle stock
+    4 &a.pstatus stock
     0 ret
 
   ; Default stacking bit-fields (FLAT `stack_hosts`/`stack_joins` — the names the
@@ -74,6 +75,21 @@
     &a.touch.user dec
     0 ret
 
+  ; --- progress bar: `pstatus` channel 0 (the build/completion bar). `start_bar`
+  ; sets the bit in the hold-acquire partition (sys.time 0); `end_bar` clears it in
+  ; the completion partition (sys.time = duration). The bit rides forward across the
+  ; window's rows via clone-from-prior; the clear forms the interval's end boundary
+  ; the client scans for. Always pair them — a missing `end_bar` leaves the bit set
+  ; forever and the bar never completes. ---
+  ::start_bar>
+    pop &a set
+    1 &a.pstatus set
+    0 ret
+  ::end_bar>
+    pop &a set
+    0 &a.pstatus set
+    0 ret
+
   ; --- borrow: non-exclusive hold. `borrow` = unpinned; `share` = position-pinned.
   ; Same eligibility (just "not exclusively claimed"), so can_share = can_borrow. ---
   ::can_borrow>
@@ -105,4 +121,17 @@
     &a.borrow dec
     &a.pos_hold dec
     &a.touch.user dec
+    0 ret
+
+  ; Relocation helper: `<zone> <micro> <stack> &card $data_func::place call drop` —
+  ; wraps the `^place` syscall (relocate a bound card with the placement intent; the
+  ; shard resolves the cell+stack and re-owns it to the zone owner). `zone` is a
+  ; `^macro_zone` handle or a concrete macro_zone; `micro` a loose cell; `stack` the
+  ; target slot (0 loose). Sends a consumed blueprint back to inventory.
+  ::place>
+    pop &z set
+    pop &m set
+    pop &s set
+    pop &c set
+    *z *m *s &c ^place call drop
     0 ret

@@ -12,11 +12,13 @@
 //!     the `@output` timeline.
 //!   - **`vm::Plan` → `ActionPlan`**: each time-stamped effect maps to a stock
 //!     write (bound card / synthetic tile) or a `Create`, with owner-walk target
-//!     resolution against the store. Holds, lifecycle (dead) and pstyle are all
+//!     resolution against the store. Holds, lifecycle (dead) and pstatus are all
 //!     `Stock` effects now — there is no separate hold list.
 
 use resonantdust_codec::card_model;
-use resonantdust_codec::packed::{pack_macro_zone_full, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN};
+use resonantdust_codec::packed::{
+    pack_macro_zone_full, surface_of, INVENTORY_LAYER, TAG_ID_MAX, TAG_ID_MIN,
+};
 use resonantdust_codec::plan::{ActionPlan, Effect, StockOp, TimedEffect};
 use resonantdust_dsl::bridge::{stock_default_u64, stock_slot_bits, stock_slot_for_aspect, stock_to_vec, Card};
 use resonantdust_dsl::loader::Bundle;
@@ -51,7 +53,7 @@ pub fn run<S: CardStore>(
             let def_id = bundle
                 .card_def_id(name)
                 .ok_or_else(|| format!("tile {name:?} not in DSL bundle"))?;
-            Some(Card { def_id, stock: vec![s0 as i64, s1 as i64], stock_raw: 0 })
+            Some(Card { def_id, stock: vec![s0 as i64, s1 as i64], stock_raw: 0, ..Default::default() })
         }
         None => None,
     };
@@ -61,7 +63,15 @@ pub fn run<S: CardStore>(
         let c = store.card_at(id, now_ms)?;
         let name = bundle.name_for_packed(c.packed_definition)?;
         let def_id = bundle.card_def_id(name)?;
-        Some(Card { def_id, stock: stock_to_vec(bundle, name, c.stock), stock_raw: c.stock })
+        Some(Card {
+            def_id,
+            stock: stock_to_vec(bundle, name, c.stock),
+            stock_raw: c.stock,
+            macro_zone: c.macro_zone,
+            micro_location: c.micro_location,
+            flags: c.flags,
+            card_id: c.card_id,
+        })
     };
 
     let mut frame = build_frame(bundle, recipe, root, bindings, synth_card.as_ref(), &lookup);
@@ -131,7 +141,7 @@ fn translate<S: CardStore>(
                             effect: Effect::LogOp { card_id, aspect_id: asp.id(), op: op.code(), modifier },
                         });
                     } else {
-                        // Per-def aspect (gameplay wood/pine, pstyle) → write the
+                        // Per-def aspect (gameplay wood/pine, pstatus) → write the
                         // card's per-card `stock` u64 (current value with this
                         // slot's bits replaced), absolute SetCardStock stamped @at.
                         let c = store
@@ -186,22 +196,41 @@ fn translate<S: CardStore>(
                     });
                 }
             }
-            VmEffect::Create { def, owner, zone_owner, surface, q, r } => {
+            VmEffect::Create { def, owner, zone, micro, stack } => {
                 let dk = def_key(def);
                 let owner_ref = resolve_owner(frame, store, owner, now_ms)?;
-                let zone_ref = resolve_owner(frame, store, zone_owner, now_ms)?;
                 let stock = stock_default_u64(bundle, &dk);
+                let zone = synth_zone(frame, store, zone, now_ms)?;
                 synths.push(Synthetic {
                     def_key: dk,
                     owner_ref,
-                    zone_ref,
-                    surface: *surface as u8,
-                    q: *q,
-                    r: *r,
+                    zone,
+                    micro: *micro as u32,
+                    stack: *stack as u8,
                     stock,
                     alive: true,
                     tag: 0,
                     at,
+                });
+            }
+            VmEffect::Reposition { slot, zone, micro, stack } => {
+                // Relocate a bound card with a placement intent (the blueprint back to
+                // inventory). No fold/tag — emit straight away; the shard's move loop
+                // resolves the cell+stack and re-owns it to the zone owner.
+                let card_id = frame
+                    .card_at(slot)
+                    .ok_or_else(|| format!("place: target {slot:?} is not a bound card"))?;
+                let (macro_zone, surface, owner_id) = place_zone(frame, store, zone, now_ms)?;
+                ap.effects.push(TimedEffect {
+                    at,
+                    effect: Effect::Reposition {
+                        card_id,
+                        surface,
+                        macro_zone,
+                        owner_id,
+                        micro_location: *micro as u32,
+                        stack: *stack as u8,
+                    },
                 });
             }
         }
@@ -217,7 +246,7 @@ fn translate<S: CardStore>(
         if !synths[i].alive {
             continue;
         }
-        for m in [synths[i].owner_ref.synth(), synths[i].zone_ref.synth()].into_iter().flatten() {
+        for m in [synths[i].owner_ref.synth(), synths[i].zone.synth()].into_iter().flatten() {
             if !synths.get(m).map(|s| s.alive).unwrap_or(false) {
                 return Err(format!("created.{i} nests in created.{m}, which was destroyed or absent"));
             }
@@ -240,24 +269,33 @@ fn translate<S: CardStore>(
             continue;
         }
         let owner_id = s.owner_ref.id(&synths);
-        let zone_owner_id = s.zone_ref.id(&synths);
-        // Inventory (surface == INVENTORY_LAYER) lands on the first free cell
-        // (micro_location None); a world surface keeps the requested cell coords.
-        let macro_zone = if s.surface == INVENTORY_LAYER {
-            pack_macro_zone_full(zone_owner_id, s.surface, 0, 0)
-        } else {
-            pack_macro_zone_full(zone_owner_id, s.surface, s.q as i16, s.r as i16)
+        // Pack the placement zone: a symbolic zone resolves its owner (possibly a
+        // sibling created card's tag, now assigned) + surface + cell; a concrete
+        // zone is the macro_zone verbatim. `(micro, stack)` ride through as the
+        // intent the shard resolves.
+        let (macro_zone, surface) = match &s.zone {
+            SynthZone::Symbolic { zone_ref, surface, q, r } => {
+                let zid = zone_ref.id(&synths);
+                let mz = if *surface == INVENTORY_LAYER {
+                    pack_macro_zone_full(zid, *surface, 0, 0)
+                } else {
+                    pack_macro_zone_full(zid, *surface, *q as i16, *r as i16)
+                };
+                (mz, *surface)
+            }
+            SynthZone::Concrete(mz) => (*mz, surface_of(*mz)),
         };
         ap.effects.push(TimedEffect {
             at: s.at,
             effect: Effect::Create {
                 def_key: s.def_key.clone(),
-                surface: s.surface,
+                surface,
                 macro_zone,
                 owner_id,
                 stock: s.stock,
                 tag: s.tag,
-                micro_location: None,
+                micro_location: s.micro,
+                stack: s.stack,
             },
         });
     }
@@ -266,20 +304,37 @@ fn translate<S: CardStore>(
 }
 
 /// A card created in this plan, folded so same-card stock sets don't become extra
-/// effects. `owner_ref`/`zone_ref` are the ownership + placement targets (a real
-/// bound card or a sibling created card); `tag` (0 = none) is set when another
-/// synthetic nests in this one. `at` is the `sys.time` of its `^create`.
+/// effects. `owner_ref` is the ownership target (a real bound card or a sibling
+/// created card); `zone` is the placement zone (its owner may also be a sibling);
+/// `tag` (0 = none) is set when another synthetic nests in this one. `(micro,
+/// stack)` is the placement intent. `at` is the `sys.time` of its `^create`.
 struct Synthetic {
     def_key: String,
     owner_ref: OwnerRef,
-    zone_ref: OwnerRef,
-    surface: u8,
-    q: i64,
-    r: i64,
+    zone: SynthZone,
+    micro: u32,
+    stack: u8,
     stock: u64,
     alive: bool,
     tag: u32,
     at: i64,
+}
+
+/// A `^create` placement zone: a symbolic zone (owner resolved at emit — may be a
+/// sibling created card's tag) or an already-concrete packed `macro_zone`.
+enum SynthZone {
+    Symbolic { zone_ref: OwnerRef, surface: u8, q: i64, r: i64 },
+    Concrete(u64),
+}
+
+impl SynthZone {
+    /// The sibling-synthetic this zone's owner nests in, if any (for tag assignment).
+    fn synth(&self) -> Option<usize> {
+        match self {
+            SynthZone::Symbolic { zone_ref, .. } => zone_ref.synth(),
+            SynthZone::Concrete(_) => None,
+        }
+    }
 }
 
 /// Whose card an owner/zone path resolves to: a real bound card_id, or a sibling
@@ -326,6 +381,59 @@ fn resolve_owner<S: CardStore>(
         return Err(format!("owner path {path:?} must resolve to a card, not a {c:?} container"));
     }
     Ok(OwnerRef::Real(id))
+}
+
+/// A `^create` zone operand → [`SynthZone`]: a symbolic zone keeps its owner as an
+/// [`OwnerRef`] (resolved to a real id or a sibling tag at emit time); a concrete
+/// zone is the packed macro_zone verbatim.
+fn synth_zone<S: CardStore>(
+    frame: &Frame,
+    store: &S,
+    zone: &resonantdust_dsl::vm::ZoneArg,
+    now_ms: u64,
+) -> Result<SynthZone, String> {
+    use resonantdust_dsl::vm::ZoneArg;
+    match zone {
+        ZoneArg::Symbolic { owner, surface, q, r } => {
+            let zone_ref = resolve_owner(frame, store, owner, now_ms)?;
+            Ok(SynthZone::Symbolic { zone_ref, surface: *surface as u8, q: *q, r: *r })
+        }
+        ZoneArg::Concrete(mz) => Ok(SynthZone::Concrete(*mz as u64)),
+    }
+}
+
+/// A `^place` zone operand → `(macro_zone, surface, owner_id)`: the resolved
+/// destination + the card's new owner (the zone's owner). A symbolic zone's owner
+/// must be a real bound card (a relocate can't re-own to a not-yet-minted card); a
+/// concrete zone carries its owner in the packed value.
+fn place_zone<S: CardStore>(
+    frame: &Frame,
+    store: &S,
+    zone: &resonantdust_dsl::vm::ZoneArg,
+    now_ms: u64,
+) -> Result<(u64, u8, u32), String> {
+    use resonantdust_dsl::vm::ZoneArg;
+    match zone {
+        ZoneArg::Symbolic { owner, surface, q, r } => {
+            let zid = match resolve_owner(frame, store, owner, now_ms)? {
+                OwnerRef::Real(id) => id,
+                OwnerRef::Synth(_) => {
+                    return Err(format!("place: zone owner {owner:?} cannot be a created card"))
+                }
+            };
+            let s = *surface as u8;
+            let mz = if s == INVENTORY_LAYER {
+                pack_macro_zone_full(zid, s, 0, 0)
+            } else {
+                pack_macro_zone_full(zid, s, *q as i16, *r as i16)
+            };
+            Ok((mz, s, zid))
+        }
+        ZoneArg::Concrete(mz) => {
+            let mz = *mz as u64;
+            Ok((mz, surface_of(mz), resonantdust_codec::packed::owner_of(mz)))
+        }
+    }
 }
 
 /// Split a `created.N[.rest]` handle path into its synthetic index and remainder
@@ -439,10 +547,10 @@ mod tests {
             \x20 ::pip>\n    :data>\n      @define>\n        requisite &data.type set\n";
         let recipe = "<recipe>\n  ::make>\n    @input>\n      0 ret\n    @output>\n      \
             &slot.0.0 1 0 0 ^macro_zone call &hz set\n      \
-            *hz $card::log &slot.0.0 ^create call &log set\n      \
+            *hz 0 0 &slot.0.0 $card::log ^create call &log set\n      \
             4 &log.data.progress set\n      \
             &log 1 0 0 ^macro_zone call &lz set\n      \
-            *lz $card::pip &log ^create call drop\n";
+            *lz 0 0 &log $card::pip ^create call drop\n";
         load(&[
             ("a.rd".into(), aspects.into()),
             ("c.rd".into(), cards.into()),
@@ -485,7 +593,8 @@ mod tests {
                     owner_id: root,
                     stock: 4,
                     tag: 1,
-                    micro_location: None,
+                    micro_location: 0,
+                    stack: 0,
                 },
                 // pip: owner + zone are log's tag (shard resolves), no own tag.
                 &Effect::Create {
@@ -495,7 +604,8 @@ mod tests {
                     owner_id: 1,
                     stock: 0,
                     tag: 0,
-                    micro_location: None,
+                    micro_location: 0,
+                    stack: 0,
                 },
             ]
         );
@@ -526,7 +636,7 @@ mod tests {
             10 &sys.time set\n      \
             &slot.0.0.data.dead inc\n      \
             &slot.0.0 1 0 0 ^macro_zone call &z set\n      \
-            *z $card::widget &slot.0.0 ^create call drop\n";
+            *z 0 0 &slot.0.0 $card::widget ^create call drop\n";
         let b = load(&[
             ("a.rd".into(), aspects.into()),
             ("c.rd".into(), cards.into()),
@@ -563,5 +673,148 @@ mod tests {
             "dead → LogOp(Dead) @10 on root, effects: {:?}", ap.effects);
         assert!(ap.effects.iter().any(|t| matches!(&t.effect, Effect::Create { def_key, .. } if def_key == "widget") && t.at == 10),
             "spawn → Create @10, effects: {:?}", ap.effects);
+    }
+
+    // The chord_soul_assemble shape under the unified verbs: a root reads its OWN
+    // macro_zone + micro_location and `^create`s a product there with a CONCRETE
+    // zone (Create carries that macro_zone + micro intent), then `^place`s itself
+    // into its owner's inventory (a Reposition re-owned to the owner). Verifies the
+    // read side (placement on the frame), the polymorphic zone, and both arms.
+    #[test]
+    fn create_at_own_cell_and_place_to_owner() {
+        let aspects = "<aspect>\n  ::type>\n    @define>\n      traits &section set\n";
+        let cards = "<card>\n\
+            \x20 ::bp>\n    :data>\n      @define>\n        requisite &data.type set\n\
+            \x20 ::cs>\n    :data>\n      @define>\n        requisite &data.type set\n";
+        let recipe = "<recipe>\n  ::asm>\n    @input>\n      0 ret\n    @output>\n      \
+            *slot.0.0.macro_zone &bz set\n      \
+            *slot.0.0.micro_location &bm set\n      \
+            *bz *bm 0 &slot.0.0.owner $card::cs ^create call drop\n      \
+            &slot.0.0.owner 1 0 0 ^macro_zone call &iz set\n      \
+            *iz 0 0 &slot.0.0 ^place call drop\n";
+        let b = load(&[
+            ("a.rd".into(), aspects.into()),
+            ("c.rd".into(), cards.into()),
+            ("r.rd".into(), recipe.into()),
+        ])
+        .expect("load");
+
+        let root = 9000u32;
+        let owner = 4242u32;
+        let blueprint_zone = pack_macro_zone_full(77, 0, 3, -2);
+        let blueprint_micro = resonantdust_codec::packed::pack_micro_loose(3, 2, 0, 0);
+        let bp = b.packed_def("bp").expect("bp def");
+        let store = Mock(HashMap::from([(
+            root,
+            CardView {
+                card_id: root,
+                owner_id: owner,
+                micro_location: blueprint_micro,
+                macro_zone: blueprint_zone,
+                packed_definition: bp,
+                flags: 0,
+                stock: 0,
+            },
+        )]));
+        let ap = run(&b, &store, "asm", root, &[], None, 0).expect("run");
+
+        // ^create with a CONCRETE zone → Create carries the blueprint's own
+        // macro_zone + micro intent (loose, stack 0), owned by the owner.
+        let made = ap.effects.iter().find_map(|t| match &t.effect {
+            Effect::Create { def_key, macro_zone, micro_location, stack, owner_id, .. } if def_key == "cs" => {
+                Some((*macro_zone, *micro_location, *stack, *owner_id))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            made,
+            Some((blueprint_zone, blueprint_micro, 0, owner)),
+            "^create(concrete) must spawn cs at the blueprint's macro_zone+micro, loose, owned by the owner; effects: {:?}",
+            ap.effects
+        );
+
+        // ^place → Reposition the root to its owner's inventory (surface 1), re-owned.
+        let mv = ap.effects.iter().find_map(|t| match &t.effect {
+            Effect::Reposition { card_id, surface, macro_zone, owner_id, .. } => {
+                Some((*card_id, *surface, *macro_zone, *owner_id))
+            }
+            _ => None,
+        });
+        assert_eq!(
+            mv,
+            Some((root, INVENTORY_LAYER, pack_macro_zone_full(owner, INVENTORY_LAYER, 0, 0), owner)),
+            "^place must Reposition the root into its owner's inventory; effects: {:?}",
+            ap.effects
+        );
+    }
+
+    // End-to-end against the REAL repo corpus: run `corpus_brighten` on a fresh
+    // `corpus_dim` and assert the progress-bar bit is actually written — `pstatus`
+    // channel 0 SET at the hold-acquire partition (t=0) and CLEARED at completion
+    // (t=10). This is the data the client's `progress_window` scans for; if the
+    // recipe didn't emit it, the live bar would never appear regardless of the
+    // client. Pairs with the dsl-crate `bar_cards_expose_pstatus_slot` (decode side).
+    #[test]
+    fn corpus_brighten_writes_pstatus_interval() {
+        use std::fs;
+        use std::path::{Path, PathBuf};
+        fn collect_rd(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = fs::read_dir(dir) else { return };
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    collect_rd(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rd") {
+                    out.push(p);
+                }
+            }
+        }
+        fn read_tree(dir: &Path, prefix: &str) -> Vec<(String, String)> {
+            let mut files = Vec::new();
+            collect_rd(dir, &mut files);
+            files.sort();
+            files
+                .iter()
+                .map(|f| {
+                    let t = fs::read_to_string(f).unwrap();
+                    let rel = f.strip_prefix(dir).unwrap_or(f).display().to_string();
+                    (format!("{prefix}{rel}"), t)
+                })
+                .collect()
+        }
+        let content =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../content").canonicalize().unwrap();
+        let mut sources = read_tree(&content.join("data"), "");
+        sources.extend(read_tree(&content.join("visuals"), "visuals/"));
+        let b = load(&sources).expect("real corpus loads");
+
+        let root = 12345u32;
+        let cd = b.packed_def("corpus_dim").expect("corpus_dim def");
+        let store = Mock(HashMap::from([(
+            root,
+            CardView {
+                card_id: root,
+                owner_id: 1,
+                micro_location: 0,
+                macro_zone: 0,
+                packed_definition: cd,
+                flags: 0,
+                stock: 0,
+            },
+        )]));
+        let ap = run(&b, &store, "corpus_brighten", root, &[], None, 0).expect("corpus_brighten runs");
+
+        let (shift, width) = stock_slot_bits(&b, "corpus_dim", "pstatus").expect("pstatus slot");
+        let pstatus = |s: u64| resonantdust_codec::bits::get_field64(s, shift, width);
+        let set_at = |at: i64| -> u64 {
+            match ap.effects.iter().find(|t| {
+                t.at == at && matches!(&t.effect, Effect::SetCardStock { card_id, .. } if *card_id == root)
+            }) {
+                Some(TimedEffect { effect: Effect::SetCardStock { stock, .. }, .. }) => *stock,
+                _ => panic!("no SetCardStock on root @{at}; effects: {:?}", ap.effects),
+            }
+        };
+        assert_eq!(pstatus(set_at(0)) & 1, 1, "start_bar must SET pstatus bit0 @t=0");
+        assert_eq!(pstatus(set_at(10)) & 1, 0, "end_bar must CLEAR pstatus bit0 @t=10");
     }
 }

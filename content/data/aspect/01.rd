@@ -230,7 +230,9 @@
   ; can_/set_/release_ helpers. `claim` = exclusive (slot) hold; `borrow` =
   ; non-exclusive hold; `touch` = refcount namespace (`.user`/`.server` budgets);
   ; `pos_hold` = position pin; `dead`/`reap` = lifecycle refcounts (dead != 0 does
-  ; not immediately remove the card); `pstyle` = progress-bar style. All sim-only.
+  ; not immediately remove the card); `pstatus` = progress-bar presence bitmap
+  ; (bit N = channel N active; set at hold-acquire, cleared at completion — the
+  ; client scans the bit's row interval for the bar's start/end). All sim-only.
   ::claim>
     @define>
       0 &visibility set
@@ -249,7 +251,7 @@
   ::reap>
     @define>
       0 &visibility set
-  ::pstyle>
+  ::pstatus>
     @define>
       0 &visibility set
   ::cost>

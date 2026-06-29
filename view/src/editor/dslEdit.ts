@@ -10,8 +10,9 @@
 //! editor owns and rewrites in full, leaving everything outside it untouched.
 //! Lights are the first user of it.
 
-/** A point light, in the game/DSL unit (card px) — the shape we serialise to
- *  `^light`. */
+/** A point light in game/DSL units — the shape we serialise to `^light`.
+ *  x/y/height are card px; `radius` is in hex-tile units (the world's falloff
+ *  unit, `radius × hex_radius` px). */
 export interface DslLight {
   x: number;
   y: number;
@@ -54,7 +55,7 @@ function lightStatements(l: DslLight, i: number, pad: string): string[] {
     `${pad}${Math.round(l.x)} ${Math.round(l.y)} ${v}.pos vec2`,
     `${pad}${hex(l.tint)} ${v}.tint set`,
     `${pad}${Math.round(l.height)} ${v}.light.height set`,
-    `${pad}${Math.round(l.radius)} ${v}.light.radius set`,
+    `${pad}${num(l.radius)} ${v}.light.radius set`,
     `${pad}${num(l.intensity)} ${v}.light.intensity set`,
   ];
 }

@@ -119,7 +119,7 @@ impl StockAspect {
   /// Resolve a DSL aspect path to its global `StockAspect`, or `None` if the
   /// path is a per-def / non-global aspect (regular schema stock, or `visual.*`).
   /// The dotted paths (`touch.user` / `touch.server`) are the touch refcounts;
-  /// `pstyle` / `stack_hosts` / `stack_joins` are deliberately NOT global.
+  /// `pstatus` / `stack_hosts` / `stack_joins` are deliberately NOT global.
   /// This is the single switch translate/bridge use to route a write/read to the
   /// op-log global region vs a schema slot.
   pub fn from_name(name: &str) -> Option<Self> {
@@ -268,7 +268,7 @@ mod tests {
     assert_eq!(StockAspect::from_name("touch.server"), Some(StockAspect::TouchServer));
     // per-def / non-global aspects resolve to None → regular schema stock.
     assert_eq!(StockAspect::from_name("pine"), None);
-    assert_eq!(StockAspect::from_name("pstyle"), None);
+    assert_eq!(StockAspect::from_name("pstatus"), None);
     assert_eq!(StockAspect::from_name("stack_hosts"), None);
   }
 

@@ -47,12 +47,24 @@ export function composite(
   lights: readonly Light[],
   ambient: number,
   normalYSign: number,
+  tint: number,
+  emissiveTint: number,
 ): void {
   const w = out.width;
   const a = albedo.data;
   const n = normal?.data;
   const e = emissive?.data;
   const o = out.data;
+  // Albedo tint multiplies the albedo before lighting (matches the engine: Pixi's
+  // sprite shader does texture×tint, then the lit pass multiplies by the light sum).
+  // Emissive carries its OWN tint (its glow colour), applied to the self-illumination
+  // term — so a grey emissive map can glow any colour. 0xffffff is a no-op for both.
+  const tr = ((tint >> 16) & 0xff) / 255;
+  const tg = ((tint >> 8) & 0xff) / 255;
+  const tb = (tint & 0xff) / 255;
+  const er0 = ((emissiveTint >> 16) & 0xff) / 255;
+  const eg0 = ((emissiveTint >> 8) & 0xff) / 255;
+  const eb0 = (emissiveTint & 0xff) / 255;
   for (let p = 0, i = 0; i < a.length; i += 4, p++) {
     const px = p % w;
     const py = (p / w) | 0;
@@ -91,11 +103,11 @@ export function composite(
     let eb = 0;
     if (e) {
       const ea = e[i + 3] / 255;
-      er = e[i] * ea; eg = e[i + 1] * ea; eb = e[i + 2] * ea;
+      er = e[i] * ea * er0; eg = e[i + 1] * ea * eg0; eb = e[i + 2] * ea * eb0;
     }
-    o[i] = Math.min(255, a[i] * lr + er);
-    o[i + 1] = Math.min(255, a[i + 1] * lg + eg);
-    o[i + 2] = Math.min(255, a[i + 2] * lb + eb);
+    o[i] = Math.min(255, a[i] * tr * lr + er);
+    o[i + 1] = Math.min(255, a[i + 1] * tg * lg + eg);
+    o[i + 2] = Math.min(255, a[i + 2] * tb * lb + eb);
     o[i + 3] = a[i + 3];
   }
 }
@@ -123,16 +135,21 @@ export class Bloom {
    *  the lit albedo never blooms — gated by a 0–255 luma `threshold` (skips
    *  near-black). `radius` is the blur radius in texels, `intensity` the add-back
    *  strength. No-op without an emissive layer. */
-  apply(lit: ImageData, emissive: ImageData | null, threshold: number, radius: number, intensity: number): void {
+  apply(lit: ImageData, emissive: ImageData | null, threshold: number, radius: number, intensity: number, tint: number): void {
     if (radius < 1 || intensity <= 0 || !emissive) return;
     const { w, h, bright, tmp } = this;
     const d = lit.data;
     const e = emissive.data;
-    // Bright-pass: the emissive contribution (premultiplied by its own alpha) at
-    // pixels whose luma clears the threshold; zero elsewhere. No albedo here.
+    // The halo carries the same emissive tint as the direct glow, so a tinted
+    // emissive blooms in its own colour. 0xffffff is a no-op.
+    const tr = ((tint >> 16) & 0xff) / 255;
+    const tg = ((tint >> 8) & 0xff) / 255;
+    const tb = (tint & 0xff) / 255;
+    // Bright-pass: the emissive contribution (premultiplied by its own alpha + tint)
+    // at pixels whose luma clears the threshold; zero elsewhere. No albedo here.
     for (let p = 0, i = 0; i < e.length; i += 4, p++) {
       const ea = e[i + 3] / 255;
-      const r = e[i] * ea, g = e[i + 1] * ea, b = e[i + 2] * ea;
+      const r = e[i] * ea * tr, g = e[i + 1] * ea * tg, b = e[i + 2] * ea * tb;
       const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
       const on = luma > threshold ? 1 : 0;
       bright[p * 3] = r * on;

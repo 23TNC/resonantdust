@@ -352,13 +352,14 @@
   ; soul_light — a warm point light between the soul's eyes. The art is centred at
   ; (card_width/2, body_height/2) = (36, 36) and ~61px square, so the upper face (eyes) sits
   ; around y≈28. `^light` isn't drawn; the client registers a point light from it, and the
-  ; tiered renderer folds it into the DYNAMIC pool (souls move). Radius/height in px.
+  ; tiered renderer folds it into the DYNAMIC pool (souls move). Height in px;
+  ; radius in HEX-TILE units (× hex_radius px — the world's falloff unit).
   ::soul_light>
     ^light call &h set
     36.0 28.0 &h.pos vec2              ; centred-x, upper face (between the eyes)
     #ffe0a0 &h.tint set                ; warm soul glow
     20.0 &h.light.height set           ; height above the sprite plane (px)
-    150.0 &h.light.radius set          ; falloff radius (px)
+    1.7 &h.light.radius set            ; falloff radius (tiles ≈ 150px at hex_radius 88)
     1.8 &h.light.intensity set         ; brightness
 
   ; card_death — the shared death exit: append a roll-up MASK over the whole card.
